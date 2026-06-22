@@ -215,7 +215,7 @@ function App() {
       </main>
 
       <footer className="border-kumo-hairline border-t bg-kumo-recessed">
-        <div className="page-shell footer-inner flex flex-col gap-2"><Text bold translate="no">{data.brand} (v{data.version})</Text><Text variant="secondary" size="sm">{data.disclaimer}</Text></div>
+        <div className="page-shell footer-inner flex flex-col gap-2"><Text bold translate="no">{data.brand} ({data.version})</Text><Text variant="secondary" size="sm">{data.disclaimer}</Text></div>
       </footer>
       <div ref={setOverlayPortal} className="overlay-portal" />
     </div>
