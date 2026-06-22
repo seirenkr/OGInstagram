@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Banner } from "@cloudflare/kumo/components/banner";
-import { Button } from "@cloudflare/kumo/components/button";
+import { Button, LinkButton } from "@cloudflare/kumo/components/button";
 import { Grid } from "@cloudflare/kumo/components/grid";
 import { LayerCard } from "@cloudflare/kumo/components/layer-card";
 import { Select } from "@cloudflare/kumo/components/select";
@@ -158,12 +158,8 @@ function App() {
             <Text id="page-title" variant="heading1" as="h1">{data.brand}</Text>
             <div className="max-w-3xl text-pretty"><Text size="lg" variant="secondary">{data.tagline}</Text></div>
             <div className="flex flex-wrap gap-3">
-              {data.supportURL ? <form action={data.supportURL} method="get" target="_blank" rel="noopener noreferrer">
-                <Button className="cta-gradient" variant="primary" type="submit" icon={Coffee}>{data.supportCta}</Button>
-              </form> : null}
-              {data.githubURL ? <form action={data.githubURL} method="get" target="_blank" rel="noopener noreferrer">
-                <Button variant="secondary" type="submit" icon={GithubLogo} translate="no">GitHub</Button>
-              </form> : null}
+              {data.supportURL ? <LinkButton className="cta-gradient" href={data.supportURL} external variant="primary" icon={Coffee}>{data.supportCta}</LinkButton> : null}
+              {data.githubURL ? <LinkButton href={data.githubURL} external variant="secondary" icon={GithubLogo} translate="no">GitHub</LinkButton> : null}
             </div>
           </div>
         </section>
