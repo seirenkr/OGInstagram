@@ -1,0 +1,11 @@
+.git
+.wrangler
+.claude
+.agents
+node_modules
+web/dist
+npm-debug.log
+.env
+.env.*
+server/server
+server/oginstagram

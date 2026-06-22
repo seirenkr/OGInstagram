@@ -1,0 +1,15 @@
+node_modules/
+.wrangler/
+server/oginstagram
+server/server
+web/dist/
+*.test
+.env
+.env.*
+!.env.example
+.dev.vars
+npm-debug.log*
+.DS_Store
+.claude/
+.agents/
+skills-lock.json

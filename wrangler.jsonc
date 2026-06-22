@@ -1,0 +1,81 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oginstagram",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-06-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
+  "vars": {
+    "BASE_URL": "https://oginstagram.com",
+    "BRAND_NAME": "OGInstagram",
+    "BRAND_COLOR": "#ff0069",
+    "SUPPORT_URL": "https://ko-fi.com/voyage1",
+    "GITHUB_URL": "https://github.com/LilasKR/OGInstagram"
+  },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.html"],
+      "fallthrough": false
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "oginstagram.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.oginstagram.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "d.oginstagram.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "g.oginstagram.com",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OG_CONTAINER",
+        "class_name": "OgUsContainer"
+      }
+    ]
+  },
+  "containers": [
+    {
+      "name": "oginstagram-us",
+      "class_name": "OgUsContainer",
+      "image": "./Dockerfile",
+      "image_build_context": ".",
+      "constraints": {
+        "regions": ["ENAM"]
+      },
+      "max_instances": 3,
+      "instance_type": "lite"
+    }
+  ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "AE",
+      "dataset": "oginstagram_requests"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OgUsContainer"]
+    }
+  ]
+}
