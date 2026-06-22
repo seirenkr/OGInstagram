@@ -152,6 +152,8 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 		"{{BRAND}}", htmlEscape(a.cfg.BrandName),
 		"{{LANG}}", t.Lang,
 		"{{T_TAGLINE}}", htmlEscape(t.Tagline),
+		"{{MAIN_JS}}", a.assets.mainJS,
+		"{{MAIN_CSS}}", a.assets.mainCSS,
 	)
 	return repl.Replace(a.assets.homeTemplate)
 }

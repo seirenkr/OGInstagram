@@ -3,33 +3,35 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type assetFile struct {
 	contentType string
+	immutable   bool
 	body        []byte
 }
 
 type Assets struct {
 	homeTemplate string
+	mainJS       string
+	mainCSS      string
 	files        map[string]assetFile
 }
 
-type staticRoute struct {
-	name        string
-	contentType string
-}
-
-var staticFileRoutes = map[string]staticRoute{
-	"/favicon.ico":     {"favicon-32.png", "image/png"},
-	"/favicon-16.png":  {"favicon-16.png", "image/png"},
-	"/favicon-24.png":  {"favicon-24.png", "image/png"},
-	"/favicon-32.png":  {"favicon-32.png", "image/png"},
-	"/favicon-48.png":  {"favicon-48.png", "image/png"},
-	"/favicon-64.png":  {"favicon-64.png", "image/png"},
-	"/favicon-192.png": {"favicon-192.png", "image/png"},
-	"/main.js":         {"main.js", "application/javascript; charset=utf-8"},
-	"/main.css":        {"main.css", "text/css; charset=utf-8"},
+func contentTypeFor(name string) string {
+	switch filepath.Ext(name) {
+	case ".js":
+		return "application/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".png":
+		return "image/png"
+	case ".ico":
+		return "image/x-icon"
+	default:
+		return ""
+	}
 }
 
 func loadAssets(dir string) (*Assets, error) {
@@ -38,12 +40,35 @@ func loadAssets(dir string) (*Assets, error) {
 		return nil, err
 	}
 	a := &Assets{homeTemplate: string(home), files: map[string]assetFile{}}
-	for path, route := range staticFileRoutes {
-		body, err := os.ReadFile(filepath.Join(dir, route.name))
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || name == "index.html" {
+			continue
+		}
+		ct := contentTypeFor(name)
+		if ct == "" {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
-		a.files[path] = assetFile{contentType: route.contentType, body: body}
+		hashed := strings.HasPrefix(name, "main-")
+		a.files["/"+name] = assetFile{contentType: ct, immutable: hashed, body: body}
+		switch {
+		case hashed && strings.HasSuffix(name, ".js"):
+			a.mainJS = "/" + name
+		case hashed && strings.HasSuffix(name, ".css"):
+			a.mainCSS = "/" + name
+		}
+	}
+	if f, ok := a.files["/favicon-32.png"]; ok {
+		a.files["/favicon.ico"] = f
 	}
 	return a, nil
 }

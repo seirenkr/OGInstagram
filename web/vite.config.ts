@@ -10,9 +10,12 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     cssCodeSplit: false,
-    lib: { entry: resolve(__dirname, "src/main.tsx"), formats: ["es"], fileName: () => "main.js" },
     rollupOptions: {
-      output: { assetFileNames: asset => (asset.name?.endsWith(".css") ? "main.css" : "assets/[name]-[hash][extname]") },
+      input: resolve(__dirname, "src/main.tsx"),
+      output: {
+        entryFileNames: "main-[hash].js",
+        assetFileNames: "main-[hash][extname]",
+      },
     },
   },
 });

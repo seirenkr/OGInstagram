@@ -220,7 +220,7 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
   if (path === "/uplot.js" || path === "/uplot.css") {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
-  if (path === "/main.js" || path === "/main.css") {
+  if (/^\/main-[\w-]+\.(?:js|css)$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
   if (path === "/oembed" || path === "/owoembed") {

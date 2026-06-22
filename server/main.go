@@ -101,7 +101,12 @@ func (a *App) route(req *http.Request) resp {
 		return cacheable(jsonResp(200, localPreviewStatus(time.Now())), 60)
 	}
 	if f, ok := a.assets.static(path); ok {
-		return cacheable(resp{status: 200, headers: map[string]string{"Content-Type": f.contentType}, body: f.body}, iconCacheSeconds)
+		r := resp{status: 200, headers: map[string]string{"Content-Type": f.contentType}, body: f.body}
+		if f.immutable {
+			r.headers["Cache-Control"] = "public, max-age=31536000, s-maxage=31536000, immutable"
+			return r
+		}
+		return cacheable(r, iconCacheSeconds)
 	}
 	if path == "/oembed" {
 		return a.handleOEmbed(req)

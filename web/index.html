@@ -17,7 +17,7 @@
   <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png">
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-jp-dynamic-subset.min.css">
-  <link rel="stylesheet" href="/main.css">
+  <link rel="stylesheet" href="{{MAIN_CSS}}">
   <script>
     (function () {
       var saved = localStorage.getItem("theme");
@@ -29,6 +29,6 @@
 <body>
   <div id="root"></div>
   <script id="app-data" type="application/json">{{APP_JSON}}</script>
-  <script type="module" src="/main.js"></script>
+  <script type="module" src="{{MAIN_JS}}"></script>
 </body>
 </html>
