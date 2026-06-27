@@ -157,7 +157,7 @@ func optionalString(v string) string { return strings.TrimSpace(v) }
 
 const galleryEmoji = "🖼️"
 
-const activityMaxImages = 3
+const activityMaxImages = 4
 
 type attachmentSelection struct {
 	items     []selectedAttachment
@@ -193,10 +193,9 @@ func selectActivityAttachments(post Post, mediaIndex int, specified bool) attach
 			}
 		}
 	}
-	if len(images) == total {
-		return attachmentSelection{items: images, indicator: galleryEmoji + " " + strconv.Itoa(total)}
-	}
-	return attachmentSelection{items: images, indicator: galleryEmoji + " " + strconv.Itoa(len(images)) + " / " + strconv.Itoa(total)}
+	// A capped gallery shows fewer images than the post has, but the indicator is
+	// just the total count — an "X / Y" here would read like a specific-image pick.
+	return attachmentSelection{items: images, indicator: galleryEmoji + " " + strconv.Itoa(total)}
 }
 
 func singleAttachmentIndicator(post Post, selectedIndex int) string {
