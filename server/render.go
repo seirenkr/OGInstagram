@@ -12,12 +12,13 @@ func isTelegramBot(ua string) bool { return strings.Contains(strings.ToLower(ua)
 func isDiscordBot(ua string) bool  { return strings.Contains(strings.ToLower(ua), "discordbot") }
 
 func (a *App) faviconLinks(baseURL string) []string {
-	sizes := []string{"64", "48", "32", "24", "16"}
-	links := make([]string, 0, len(sizes))
-	for _, s := range sizes {
-		links = append(links, `<link href="`+baseURL+a.assets.faviconPath(s)+`" rel="icon" sizes="`+s+`x`+s+`" type="image/png">`)
+	return []string{
+		`<link href="` + baseURL + `/favicon-64.png" rel="icon" sizes="64x64" type="image/png">`,
+		`<link href="` + baseURL + `/favicon-48.png" rel="icon" sizes="48x48" type="image/png">`,
+		`<link href="` + baseURL + `/favicon-32.png" rel="icon" sizes="32x32" type="image/png">`,
+		`<link href="` + baseURL + `/favicon-24.png" rel="icon" sizes="24x24" type="image/png">`,
+		`<link href="` + baseURL + `/favicon-16.png" rel="icon" sizes="16x16" type="image/png">`,
 	}
-	return links
 }
 
 func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, mediaIndex int, specified, gallery bool) string {
