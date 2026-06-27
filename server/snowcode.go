@@ -28,8 +28,18 @@ func activityCodeFor(postType, shortcode string, mediaIndex int, specified, gall
 	return shortcode
 }
 
+func profileActivityCode(username string) string {
+	if encoded, ok := encodeSnowcodePayload(`"u":"` + username + `"`); ok {
+		return encoded
+	}
+	return username
+}
+
 func parseActivityCode(code string) ActivityRoute {
 	if data, ok := decodeSnowcode(code); ok {
+		if u, isStr := data["u"].(string); isStr && u != "" {
+			return ActivityRoute{Username: u}
+		}
 		if i, isStr := data["i"].(string); isStr && i != "" {
 			route := ActivityRoute{Shortcode: i, PostType: "p"}
 			if p, isStr := data["p"].(string); isStr {

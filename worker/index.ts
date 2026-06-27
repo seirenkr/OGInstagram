@@ -1,6 +1,6 @@
 import { Container } from "@cloudflare/containers";
 import { Hono } from "hono";
-import { botRE, homePathLocale, parseEmbedSegments, resolveHomeLocale, splitPath } from "../shared/routes";
+import { botRE, homePathLocale, parseEmbedSegments, resolveHomeLocale, splitPath, validUsername } from "../shared/routes";
 
 const instagramOrigin = "https://www.instagram.com";
 const defaultCache = (caches as unknown as { default: Cache }).default;
@@ -263,6 +263,18 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
       cacheKey: `/${gallery ? "gallery" : "embed"}/${embed.postType}/${encodeURIComponent(embed.shortcode)}/${selected ?? "-"}`,
       varyBot: true,
       humanRedirect: origin,
+      rewritePath: gallery ? galleryRewritePath(url) : undefined
+    };
+  }
+
+  // Bare profile: /<username>/
+  if (segments.length === 1 && validUsername(segments[0])) {
+    const username = segments[0];
+    const gallery = isGalleryHost(url);
+    return {
+      cacheKey: `/${gallery ? "pgallery" : "profile"}/${encodeURIComponent(username)}`,
+      varyBot: true,
+      humanRedirect: `${instagramOrigin}/${encodeURIComponent(username)}/`,
       rewritePath: gallery ? galleryRewritePath(url) : undefined
     };
   }

@@ -46,7 +46,7 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 		if len(a.pool.sessions) == 0 {
 			return "", igErr(503, reasonConnection, "Instagram proxy sessions are not configured")
 		}
-		return "", igErr(503, reasonConnection, "all Instagram proxy sessions are rate limited or cooling down")
+		return "", ephemeralErr(503, reasonConnection, "all Instagram proxy sessions are rate limited or cooling down")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,7 +96,11 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 			if r.err == nil {
 				return r.body, nil
 			}
-			if lastErr == nil {
+			// Prefer the most authoritative error: a permanent answer from
+			// Instagram (e.g. 404 not-found) beats a transient one (e.g. a
+			// rate-limited session's 401), so racing a busy IP can't mask a
+			// genuine "account doesn't exist".
+			if lastErr == nil || (isTransient(lastErr.Reason) && !isTransient(r.err.Reason)) {
 				lastErr = r.err
 			}
 			if pending == 0 && !hedged {
@@ -168,7 +172,7 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (strin
 			reason = reasonNotFound
 		}
 
-		if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+		if shouldRotate(reason) {
 			failOnce(reason)
 		}
 		return "", igErr(resp.StatusCode, reason, msg)
@@ -186,7 +190,9 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (strin
 
 	parsed := gjson.Parse(bodyText)
 	if parsed.Get("status").String() == "fail" {
-		failOnce(reasonGraphql)
+		if shouldRotate(reasonGraphql) {
+			failOnce(reasonGraphql)
+		}
 		msg := strings.TrimSpace(parsed.Get("message").String())
 		if msg == "" {
 			msg = "Instagram request failed"
@@ -196,6 +202,30 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (strin
 
 	a.pool.recordLatency(s, time.Since(started))
 	return bodyText, nil
+}
+
+func (a *App) proxyRawGet(rawURL string, headers map[string]string) (int, string, bool) {
+	sessions := a.pool.pick(1, nil)
+	if len(sessions) == 0 {
+		return 0, "", false
+	}
+	s := sessions[0]
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, "", false
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := s.getClient().Do(req)
+	if err != nil {
+		return 0, "", false
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	return resp.StatusCode, string(raw), true
 }
 
 func instagramMessage(body string) string {

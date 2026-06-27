@@ -12,13 +12,12 @@ func isTelegramBot(ua string) bool { return strings.Contains(strings.ToLower(ua)
 func isDiscordBot(ua string) bool  { return strings.Contains(strings.ToLower(ua), "discordbot") }
 
 func (a *App) faviconLinks(baseURL string) []string {
-	return []string{
-		`<link href="` + baseURL + `/favicon-64.png" rel="icon" sizes="64x64" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-48.png" rel="icon" sizes="48x48" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-32.png" rel="icon" sizes="32x32" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-24.png" rel="icon" sizes="24x24" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-16.png" rel="icon" sizes="16x16" type="image/png">`,
+	sizes := []string{"64", "48", "32", "24", "16"}
+	links := make([]string, 0, len(sizes))
+	for _, s := range sizes {
+		links = append(links, `<link href="`+baseURL+a.assets.faviconPath(s)+`" rel="icon" sizes="`+s+`x`+s+`" type="image/png">`)
 	}
+	return links
 }
 
 func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, mediaIndex int, specified, gallery bool) string {
@@ -139,27 +138,11 @@ A lightweight Open Graph and ActivityPub bridge for Instagram links.
 --><head>` + strings.Join(h, "") + `</head><body></body></html>`)
 }
 
-func errorCard(reason string) (title, desc string) {
-	switch reason {
-	case reasonLoginRequired:
-		return "Login required", "Instagram requires logging in to view this content."
-	case reasonThrottled:
-		return "Rate limited", "Instagram is rate limiting requests right now. Please try again shortly."
-	case reasonNotFound, reasonMediaNotFound:
-		return "Post unavailable", "This post isn't available - it may be deleted, set to private, or the link is incorrect."
-	case reasonForbidden:
-		return "Unavailable", "Instagram blocked this request (forbidden)."
-	case reasonUnauthorized:
-		return "Unavailable", "Instagram returned unauthorized for this request."
-	case reasonBadRequest:
-		return "Unavailable", "Instagram rejected this request."
-	case reasonConnection:
-		return "Unavailable", "Couldn't reach Instagram right now. Please try again."
-	case reasonJSONDecode, reasonGraphql:
-		return "Unavailable", "Instagram returned an unexpected response."
-	default:
-		return "Unavailable", "Couldn't load this post right now. Please try again."
+func postErrorCard(reason string) (title, desc string) {
+	if isTransient(reason) {
+		return "Temporarily unavailable", "Couldn't load this post right now. Please try again in a moment."
 	}
+	return "Post unavailable", "This post isn't available - it may be deleted, set to private, or the link is incorrect."
 }
 
 func (a *App) buildStatusEmbedHTML(baseURL, originURL, title, description string) string {
@@ -261,7 +244,7 @@ func (a *App) buildActivityStatus(baseURL, statusID string, post Post, postType 
 	if gallery {
 		content = ""
 	}
-	profileURL := instagramOrigin + "/" + post.Username + "/"
+	authorURL := profileURL(post.Username)
 
 	media := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
@@ -283,7 +266,7 @@ func (a *App) buildActivityStatus(baseURL, statusID string, post Post, postType 
 		"visibility":             "public",
 		"application":            map[string]any{"name": "Instagram", "website": nil},
 		"media_attachments":      media,
-		"account":                activityAccount(post, profileURL),
+		"account":                activityAccount(post, authorURL),
 		"mentions":               []any{},
 		"tags":                   []any{},
 		"emojis":                 []any{},
@@ -292,7 +275,7 @@ func (a *App) buildActivityStatus(baseURL, statusID string, post Post, postType 
 	})
 }
 
-func activityAccount(post Post, profileURL string) map[string]any {
+func activityAccount(post Post, authorURL string) map[string]any {
 	var avatar any
 	if s := optionalString(post.ProfilePic); s != "" {
 		avatar = s
@@ -302,8 +285,8 @@ func activityAccount(post Post, profileURL string) map[string]any {
 		"display_name":     post.FullName,
 		"username":         post.Username,
 		"acct":             post.Username,
-		"url":              profileURL,
-		"uri":              profileURL,
+		"url":              authorURL,
+		"uri":              authorURL,
 		"created_at":       isoTime(post.CreatedAt),
 		"locked":           false,
 		"bot":              false,
@@ -323,19 +306,19 @@ func activityAccount(post Post, profileURL string) map[string]any {
 	}
 }
 
-func (a *App) buildActivityAccount(username string) []byte {
+func (a *App) buildFallbackAccount(username string) []byte {
 	safe := strings.TrimSpace(username)
 	if safe == "" {
 		safe = a.cfg.BrandName
 	}
-	profileURL := instagramOrigin + "/" + pathEscape(safe) + "/"
+	accountURL := profileURL(safe)
 	return jsonBytes(map[string]any{
 		"id":               safe,
 		"display_name":     safe,
 		"username":         safe,
 		"acct":             safe,
-		"url":              profileURL,
-		"uri":              profileURL,
+		"url":              accountURL,
+		"uri":              accountURL,
 		"created_at":       isoTime(epochUTC()),
 		"locked":           false,
 		"bot":              false,
@@ -357,9 +340,8 @@ func (a *App) buildActivityAccount(username string) []byte {
 	})
 }
 
-func (a *App) buildRateLimitActivityStatus(shortcode string) []byte {
+func (a *App) buildRateLimitActivityStatus(id string) []byte {
 	now := isoTime(nowUTC())
-	id := shortcode
 	if id == "" {
 		id = "rate-limit"
 	}

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "wrangler dev",
-    "build": "vite build --config web/vite.config.ts",
+    "build": "vite build --config web/vite.config.ts && node web/hash-favicons.mjs",
     "check": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit && cd server && go test ./...",
     "secrets": "wrangler secret bulk .env",
     "preview": "wrangler versions upload",
