@@ -20,16 +20,18 @@ const (
 	proxySessionCount       = 10
 
 	defaultCacheTTLSeconds  = 3600
-	negativeCacheTTL        = 60 * time.Second
 	defaultProxyHourlyLimit = 180
 
-	fetchRaceCount     = 2
+	transientErrorCacheSecond = 300
+	permanentErrorCacheSecond = 3600
+
+	fetchRaceCount     = 3
 	fetchRaceExplorers = 1
 	ewmaAlpha          = 0.3
 	fetchTimeout       = 4500 * time.Millisecond
 
 	fetchHedgeDelay = 1500 * time.Millisecond
-	fetchHedgeCount = 1
+	fetchHedgeCount = 2
 
 	rotateCooldown  = 3 * time.Second
 	maxCacheEntries = 500
@@ -43,13 +45,15 @@ const (
 	homeBrowserCacheSecs = 60
 	iconCacheSeconds     = 86400
 
-	errorEmbedCacheSecond = 600
-
 	serviceName          = "oginstagram"
 	rateLimitTitle       = "Rate Limit Exceeded"
 	rateLimitDescription = "Instagram fetching is temporarily rate limited. Please try again later."
 
-	instagramAppUA = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
+	instagramAppUA  = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
+	instagramWebUA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
+	instagramAsbdID = "129477"
+
+	profileCacheTTLSeconds = 1800
 
 	snowcodeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}[]\":,.-_"
 )

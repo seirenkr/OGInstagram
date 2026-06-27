@@ -39,7 +39,7 @@ type AppData = {
   supportURL: string; supportCta: string; githubURL: string; darkMode: string; lightMode: string;
   usageH2: string; normalView: string; normalDesc: string; galleryView: string;
   galleryDesc: string; directView: string; directDesc: string; supportedH2: string;
-  supportNote: string; posts: string; userPosts: string; reels: string;
+  supportNote: string; posts: string; userProfile: string; reels: string;
   statusH2: string; statusSub: string; requests: string; responseTime: string;
   disclaimer: string; js: Copy;
 };
@@ -86,8 +86,8 @@ function UsageCard({ title, url, description }: { title: string; url: React.Reac
     <LayerCard.Secondary>{title}</LayerCard.Secondary>
     <LayerCard.Primary>
       <div className="flex flex-col gap-3">
-        <div className="break-words"><Text variant="secondary" size="sm">{url}</Text></div>
-        <Text variant="secondary">{description}</Text>
+        <div className="break-words"><Text variant="body" size="base">{url}</Text></div>
+        <Text variant="secondary" size="base">{description}</Text>
       </div>
     </LayerCard.Primary>
   </LayerCard>;
@@ -137,7 +137,7 @@ function App() {
           <div className="flex items-center gap-2">
           <Select
             aria-label={data.js.language}
-            size="sm"
+            size="base"
             className="w-32"
             container={overlayPortal}
             value={data.lang}
@@ -145,7 +145,7 @@ function App() {
             onValueChange={(value) => { if (value) location.href = `/${value}`; }}
           />
           <Tooltip container={overlayPortal} content={dark ? data.lightMode : data.darkMode} side="bottom" render={
-            <Button shape="square" size="sm" variant="ghost" aria-label={dark ? data.lightMode : data.darkMode}
+            <Button shape="square" size="base" variant="ghost" aria-label={dark ? data.lightMode : data.darkMode}
               icon={dark ? Sun : Moon} onClick={() => setTheme(!dark)} />
           } />
           </div>
@@ -167,18 +167,18 @@ function App() {
         <section className="page-section" aria-labelledby="usage-title">
           <Text id="usage-title" variant="heading2" as="h2">{data.usageH2}</Text>
           <Grid className="usage-grid" variant="3up" gap="sm">
-            <UsageCard title={data.normalView} url={<>https://<HighlightedHost host={data.host} />/p/…/</>} description={data.normalDesc} />
-            <UsageCard title={data.galleryView} url={<>https://<strong className="key-prefix">g.</strong><HighlightedHost host={data.host} />/p/…/</>} description={data.galleryDesc} />
-            <UsageCard title={data.directView} url={<>https://<strong className="key-prefix">d.</strong><HighlightedHost host={data.host} />/p/…/</>} description={data.directDesc} />
+            <UsageCard title={data.normalView} url={<><span className="text-kumo-subtle">https://</span><HighlightedHost host={data.host} /></>} description={data.normalDesc} />
+            <UsageCard title={data.galleryView} url={<><span className="text-kumo-subtle">https://</span><strong className="key-prefix">g.</strong><HighlightedHost host={data.host} /></>} description={data.galleryDesc} />
+            <UsageCard title={data.directView} url={<><span className="text-kumo-subtle">https://</span><strong className="key-prefix">d.</strong><HighlightedHost host={data.host} /></>} description={data.directDesc} />
           </Grid>
         </section>
 
         <section className="page-section" aria-labelledby="supported-title">
           <Text id="supported-title" variant="heading2" as="h2">{data.supportedH2}</Text>
-          <Grid variant="3up" gap="sm">
-            <LayerCard><LayerCard.Secondary>{data.posts}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="sm">instagram.com/<strong>p</strong>/…</Text></LayerCard.Primary></LayerCard>
-            <LayerCard><LayerCard.Secondary>{data.reels}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="sm">instagram.com/<strong>reel</strong>(s)/…</Text></LayerCard.Primary></LayerCard>
-            <LayerCard><LayerCard.Secondary>{data.userPosts}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="sm">instagram.com/<strong>username</strong>/…</Text></LayerCard.Primary></LayerCard>
+          <Grid variant="3up" gap="sm" className="supported-grid">
+            <LayerCard><LayerCard.Secondary>{data.posts}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">p</strong>/…</Text><Text variant="secondary" size="base">instagram.com/username/<strong className="text-kumo-default">p</strong>/…</Text></LayerCard.Primary></LayerCard>
+            <LayerCard><LayerCard.Secondary>{data.reels}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">reel</strong>(s)/…</Text><Text variant="secondary" size="base">instagram.com/username/<strong className="text-kumo-default">reel</strong>(s)/…</Text></LayerCard.Primary></LayerCard>
+            <LayerCard><LayerCard.Secondary>{data.userProfile}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">username</strong></Text></LayerCard.Primary></LayerCard>
           </Grid>
           <Banner icon={<Info weight="fill" aria-hidden="true" />} title={data.supportNote} />
         </section>

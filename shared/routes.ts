@@ -13,6 +13,12 @@ function validShortcode(value: string): boolean {
   return shortcodeRE.test(value);
 }
 
+const usernameRE = /^[A-Za-z0-9._]{1,30}$/;
+
+export function validUsername(value: string): boolean {
+  return usernameRE.test(value);
+}
+
 export function parseEmbedSegments(segments: string[]): EmbedRoute | null {
   if ((segments.length === 2 || segments.length === 3) && isPostRouteType(segments[0]) && validShortcode(segments[1])) {
     const pathIndex = optionalPathIndex(segments, 2);

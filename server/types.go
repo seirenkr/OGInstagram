@@ -55,6 +55,7 @@ type RequestQuery struct {
 }
 
 type ActivityRoute struct {
+	Username            string
 	Shortcode           string
 	PostType            string
 	MediaIndex          int
@@ -66,6 +67,10 @@ type AppError struct {
 	Status  int
 	Message string
 	Reason  string
+	// Ephemeral marks a purely local, momentary condition (e.g. the proxy pool
+	// is exhausted/cooling down) that never reached Instagram, so callers must
+	// not cache it — the next request may succeed immediately.
+	Ephemeral bool
 }
 
 func (e *AppError) Error() string { return e.Message }
@@ -78,20 +83,6 @@ func igErr(status int, reason, message string) *AppError {
 	return &AppError{Status: status, Message: message, Reason: reason}
 }
 
-const (
-	reasonLoginRequired = "ClientLoginRequired"
-	reasonUnauthorized  = "ClientUnauthorizedError"
-	reasonForbidden     = "ClientForbiddenError"
-	reasonBadRequest    = "ClientBadRequestError"
-	reasonThrottled     = "ClientThrottledError"
-	reasonNotFound      = "ClientNotFoundError"
-	reasonMediaNotFound = "MediaNotFound"
-	reasonGraphql       = "ClientGraphqlError"
-	reasonJSONDecode    = "ClientJSONDecodeError"
-	reasonConnection    = "ClientConnectionError"
-	reasonClientError   = "ClientError"
-)
-
-func isTransientStatus(status int) bool {
-	return status == 401 || status == 403 || status == 429 || status >= 500
+func ephemeralErr(status int, reason, message string) *AppError {
+	return &AppError{Status: status, Message: message, Reason: reason, Ephemeral: true}
 }

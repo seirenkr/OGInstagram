@@ -32,6 +32,12 @@ type App struct {
 
 	inflightMu sync.Mutex
 	inflight   map[string]*inflightCall
+
+	profileMu       sync.Mutex
+	profiles        map[string]*profileEntry
+	profileOrder    []string
+	profileFlightMu sync.Mutex
+	profileFlight   map[string]*profileCall
 }
 
 func newApp(cfg Config, pool *SessionPool, assets *Assets) *App {
@@ -47,8 +53,10 @@ func newApp(cfg Config, pool *SessionPool, assets *Assets) *App {
 				ForceAttemptHTTP2:   true,
 			},
 		},
-		cache:    map[string]*cacheEntry{},
-		inflight: map[string]*inflightCall{},
+		cache:         map[string]*cacheEntry{},
+		inflight:      map[string]*inflightCall{},
+		profiles:      map[string]*profileEntry{},
+		profileFlight: map[string]*profileCall{},
 	}
 }
 
@@ -100,10 +108,11 @@ func (a *App) getEntry(shortcode string, meta *fetchMeta) (*cacheEntry, *AppErro
 func (a *App) fetchEntry(shortcode string) (*cacheEntry, *AppError) {
 	post, err := a.fetchPost(shortcode)
 	if err != nil {
-		if isTransientStatus(err.Status) {
+		if err.Ephemeral {
 			return nil, err
 		}
-		entry := &cacheEntry{err: err, expiresAt: time.Now().Add(negativeCacheTTL)}
+		ttl := time.Duration(errorCacheSeconds(err.Reason)) * time.Second
+		entry := &cacheEntry{err: err, expiresAt: time.Now().Add(ttl)}
 		return a.storeEntry(shortcode, entry), err
 	}
 	entry := &cacheEntry{post: post, expiresAt: time.Now().Add(time.Duration(a.cfg.CacheTTLSeconds) * time.Second)}
