@@ -138,8 +138,8 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 		`<link rel="canonical" href="` + attr(base+canonicalPath) + `">`,
 		`<meta name="theme-color" content="` + attr(a.cfg.BrandColor) + `">`,
 		`<meta property="og:url" content="` + attr(base+canonicalPath) + `">`,
-		`<meta property="og:image" content="` + attr(base+"/favicon-192.png") + `">`,
-		`<meta property="twitter:image" content="` + attr(base+"/favicon-192.png") + `">`,
+		`<meta property="og:image" content="` + attr(base+a.assets.faviconPath("192")) + `">`,
+		`<meta property="twitter:image" content="` + attr(base+a.assets.faviconPath("192")) + `">`,
 		`<link rel="alternate" hreflang="en" href="` + attr(base+"/en") + `">`,
 		`<link rel="alternate" hreflang="ja" href="` + attr(base+"/ja") + `">`,
 		`<link rel="alternate" hreflang="ko" href="` + attr(base+"/ko") + `">`,
@@ -154,6 +154,8 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 		"{{T_TAGLINE}}", htmlEscape(t.Tagline),
 		"{{MAIN_JS}}", a.assets.mainJS,
 		"{{MAIN_CSS}}", a.assets.mainCSS,
+		"{{FAVICON_192}}", a.assets.faviconPath("192"),
+		"{{FAVICON_32}}", a.assets.faviconPath("32"),
 	)
 	return repl.Replace(a.assets.homeTemplate)
 }
