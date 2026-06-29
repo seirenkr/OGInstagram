@@ -9,104 +9,14 @@ import (
 func parseInstagramPost(body string) (Post, *AppError) {
 	root := gjson.Parse(body)
 	data := root.Get("data")
-	if m := data.Get("xdt_shortcode_media"); present(m) {
-		return parseXDT(m)
-	}
-	if m := data.Get("shortcode_media"); present(m) {
-		return parseXDT(m)
-	}
-	if m := data.Get("xdt_api__v1__media__shortcode__web_info.items.0"); present(m) {
+
+	if m := data.Get("xig_polaris_media.if_not_gated_logged_out"); present(m) {
 		return parseV1(m)
 	}
 	if data.Exists() {
-
 		return Post{}, igErr(404, reasonMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
 	}
-
 	return Post{}, igErr(502, reasonGraphql, "Instagram response did not include media")
-}
-
-func parseXDT(media gjson.Result) (Post, *AppError) {
-	owner := media.Get("owner")
-	if !owner.Exists() {
-		return Post{}, igErr(502, reasonClientError, "missing owner")
-	}
-	username := owner.Get("username").String()
-	fullName := owner.Get("full_name").String()
-	if fullName == "" {
-		fullName = username
-	}
-	typename := media.Get("__typename").String()
-
-	var attachments []Attachment
-	statsPrefix := ""
-	switch {
-	case typename == "XDTGraphSidecar" || typename == "GraphSidecar":
-		for _, edge := range media.Get("edge_sidecar_to_children.edges").Array() {
-			if att, ok := parseXDTAttachment(edge.Get("node")); ok {
-				attachments = append(attachments, att)
-			}
-		}
-	case isVideoMedia(media):
-		if att, ok := parseXDTAttachment(media); ok {
-			attachments = append(attachments, att)
-		}
-		play := uintOf(media, "video_play_count")
-		if play == 0 {
-			play = uintOf(media, "video_view_count")
-		}
-		if play > 0 {
-			statsPrefix = "▶️ " + fmtCount(play) + "  "
-		}
-	default:
-		if att, ok := parseXDTAttachment(media); ok {
-			attachments = append(attachments, att)
-		}
-	}
-	if len(attachments) == 0 {
-		return Post{}, igErr(502, reasonClientError, "media had no usable attachments")
-	}
-
-	likes := uintOf(media, "edge_media_preview_like.count")
-	comments := uintOf(media, "edge_media_to_parent_comment.count")
-	return Post{
-		Shortcode:   media.Get("shortcode").String(),
-		Username:    username,
-		FullName:    fullName,
-		ProfilePic:  normalizeCDNHost(owner.Get("profile_pic_url").String()),
-		Caption:     media.Get("edge_media_to_caption.edges.0.node.text").String(),
-		StatsLine:   statsPrefix + "❤️ " + fmtCount(likes) + "  \U0001f4ac " + fmtCount(comments),
-		Attachments: attachments,
-		CreatedAt:   unixTime(media.Get("taken_at_timestamp").Int()),
-	}, nil
-}
-
-func parseXDTAttachment(node gjson.Result) (Attachment, bool) {
-	if !node.Exists() {
-		return Attachment{}, false
-	}
-	thumbnail := bestDisplayURL(node)
-	if thumbnail == "" {
-		return Attachment{}, false
-	}
-	att := Attachment{
-		Kind:      "image",
-		URL:       thumbnail,
-		Thumbnail: thumbnail,
-		Width:     mediaWidth(node),
-		Height:    mediaHeight(node),
-	}
-	if isVideoMedia(node) {
-		att.Kind = "video"
-		if v := bestVideoURL(node); v != "" {
-			att.URL = v
-		}
-	} else if d := node.Get("display_url").String(); d != "" {
-		att.URL = d
-	}
-	att.URL = normalizeCDNHost(att.URL)
-	att.Thumbnail = normalizeCDNHost(att.Thumbnail)
-	return att, true
 }
 
 func parseV1(item gjson.Result) (Post, *AppError) {
@@ -150,6 +60,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	return Post{
 		Shortcode:   shortcode,
 		Username:    username,
+		OwnerID:     firstNonEmpty(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
 		ProfilePic:  normalizeCDNHost(user.Get("profile_pic_url").String()),
 		Caption:     caption,
@@ -166,32 +77,23 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 	}
 	w, h := mediaWidth(item), mediaHeight(item)
 	thumbnail = normalizeCDNHost(thumbnail)
+	id := firstNonEmpty(item.Get("pk").String(), item.Get("id").String())
 	if uintOf(item, "media_type") == 2 {
 		u := bestVideoURL(item)
 		if u == "" {
 			u = thumbnail
 		}
-		return Attachment{Kind: "video", URL: normalizeCDNHost(u), Thumbnail: thumbnail, Width: w, Height: h}, true
+		return Attachment{ID: id, Kind: "video", URL: normalizeCDNHost(u), Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
-	return Attachment{Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
+	return Attachment{ID: id, Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
 }
 
 func bestV1ImageURL(item gjson.Result) string {
 	if u := bestCandidateURL(item.Get("image_versions2.candidates")); u != "" {
 		return u
 	}
-	return item.Get("thumbnail_url").String()
-}
-
-func bestDisplayURL(node gjson.Result) string {
-	if u := bestCandidateURL(node.Get("display_resources")); u != "" {
-		return u
-	}
-	if u := bestCandidateURL(node.Get("thumbnail_resources")); u != "" {
-		return u
-	}
-	for _, k := range []string{"display_url", "thumbnail_url", "thumbnail_src"} {
-		if u := node.Get(k).String(); u != "" {
+	for _, k := range []string{"thumbnail_url", "display_url", "thumbnail_src", "display_src"} {
+		if u := item.Get(k).String(); u != "" {
 			return u
 		}
 	}
@@ -228,35 +130,21 @@ func bestCandidateURL(value gjson.Result) string {
 	return bestURL
 }
 
-func isVideoMedia(value gjson.Result) bool {
-	tn := value.Get("__typename").String()
-	return value.Get("is_video").Bool() || uintOf(value, "media_type") == 2 || tn == "XDTGraphVideo" || tn == "GraphVideo"
+func mediaDimension(value gjson.Result, keys [3]string, fromCandidate func(gjson.Result) int) int {
+	for _, k := range keys {
+		if n := uintOf(value, k); n > 0 {
+			return n
+		}
+	}
+	return fromCandidate(bestImageCandidate(value))
 }
 
 func mediaWidth(value gjson.Result) int {
-	if w := uintOf(value, "dimensions.width"); w > 0 {
-		return w
-	}
-	if w := uintOf(value, "original_width"); w > 0 {
-		return w
-	}
-	if w := uintOf(value, "width"); w > 0 {
-		return w
-	}
-	return candidateWidth(bestImageCandidate(value))
+	return mediaDimension(value, [3]string{"dimensions.width", "original_width", "width"}, candidateWidth)
 }
 
 func mediaHeight(value gjson.Result) int {
-	if h := uintOf(value, "dimensions.height"); h > 0 {
-		return h
-	}
-	if h := uintOf(value, "original_height"); h > 0 {
-		return h
-	}
-	if h := uintOf(value, "height"); h > 0 {
-		return h
-	}
-	return candidateHeight(bestImageCandidate(value))
+	return mediaDimension(value, [3]string{"dimensions.height", "original_height", "height"}, candidateHeight)
 }
 
 func bestImageCandidate(value gjson.Result) gjson.Result {
@@ -298,7 +186,7 @@ func candidateHeight(value gjson.Result) int {
 
 func v1StatsPrefix(item gjson.Result) string {
 	play := uintOf(item, "play_count")
-	for _, k := range []string{"video_play_count", "view_count", "video_view_count"} {
+	for _, k := range []string{"video_play_count", "view_count", "video_view_count", "ig_play_count", "fb_play_count"} {
 		if play > 0 {
 			break
 		}

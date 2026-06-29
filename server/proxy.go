@@ -31,11 +31,10 @@ type SessionPool struct {
 	sessions []*Session
 	cfg      Config
 	mu       sync.Mutex
-	rnd      *rand.Rand
 }
 
 func newSessionPool(cfg Config) *SessionPool {
-	pool := &SessionPool{cfg: cfg, rnd: rand.New(rand.NewSource(time.Now().UnixNano()))}
+	pool := &SessionPool{cfg: cfg}
 	now := time.Now()
 	add := func(s *Session) {
 		client, err := buildSessionClient(s.proxyURL)
@@ -116,7 +115,7 @@ func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
 		}
 		picked = append(picked, eligible[:fastCount]...)
 		rest := append([]*Session(nil), eligible[fastCount:]...)
-		p.rnd.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
+		rand.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
 		for _, s := range rest {
 			if len(picked) >= count {
 				break
