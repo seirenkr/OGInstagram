@@ -6,11 +6,27 @@ import (
 	"strings"
 )
 
-func activityCodeFor(postType, shortcode string, mediaIndex int, specified, gallery bool) string {
-	normalized := normalizePostType(postType)
+// A snowcode is an all-digits id encoding the whole post identity, because Discord re-requests /api/v1/statuses/{id} without the query string.
+type snowPost struct {
+	Username   string
+	Shortcode  string
+	PostType   string
+	MediaIndex int
+	Specified  bool
+	Gallery    bool
+}
+
+func profileSnowcode(username string) string {
+	if encoded, ok := encodeSnowcodePayload(`"u":"` + username + `"`); ok {
+		return encoded
+	}
+	return username
+}
+
+func statusSnowcode(postType, shortcode string, mediaIndex int, specified, gallery bool) string {
 	payload := `"i":"` + shortcode + `"`
-	if normalized != "p" {
-		payload += `,"p":"` + normalized + `"`
+	if n := normalizePostType(postType); n != "p" {
+		payload += `,"p":"` + n + `"`
 	}
 	if specified {
 		idx := mediaIndex
@@ -28,38 +44,31 @@ func activityCodeFor(postType, shortcode string, mediaIndex int, specified, gall
 	return shortcode
 }
 
-func profileActivityCode(username string) string {
-	if encoded, ok := encodeSnowcodePayload(`"u":"` + username + `"`); ok {
-		return encoded
-	}
-	return username
-}
-
-func parseActivityCode(code string) ActivityRoute {
+func parseStatusSnowcode(code string) snowPost {
 	if data, ok := decodeSnowcode(code); ok {
 		if u, isStr := data["u"].(string); isStr && u != "" {
-			return ActivityRoute{Username: u}
+			return snowPost{Username: u}
 		}
 		if i, isStr := data["i"].(string); isStr && i != "" {
-			route := ActivityRoute{Shortcode: i, PostType: "p"}
-			if p, isStr := data["p"].(string); isStr {
-				route.PostType = normalizePostType(p)
+			p := snowPost{Shortcode: i, PostType: "p"}
+			if pt, isStr := data["p"].(string); isStr {
+				p.PostType = normalizePostType(pt)
 			}
 			if n, isNum := data["n"].(float64); isNum {
 				idx := int(n) - 1
 				if idx < 0 {
 					idx = 0
 				}
-				route.MediaIndex = idx
-				route.MediaIndexSpecified = true
+				p.MediaIndex = idx
+				p.Specified = true
 			}
 			if g, isNum := data["g"].(float64); isNum && g == 1 {
-				route.Gallery = true
+				p.Gallery = true
 			}
-			return route
+			return p
 		}
 	}
-	return ActivityRoute{Shortcode: code, PostType: "p"}
+	return snowPost{Shortcode: code, PostType: "p", MediaIndex: 0}
 }
 
 func encodeSnowcodePayload(payload string) (string, bool) {
@@ -84,7 +93,7 @@ func decodeSnowcode(code string) (map[string]any, bool) {
 		}
 	}
 	raw := digits.String()
-	if raw == "" || len(raw)%2 != 0 {
+	if raw == "" || len(raw)%2 != 0 || len(raw) != len(code) {
 		return nil, false
 	}
 	var payload strings.Builder

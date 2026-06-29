@@ -19,40 +19,9 @@ type homeJS struct {
 }
 
 type homeStrings struct {
-	Lang         string
-	Tagline      string
-	SupportCta   string
-	DarkMode     string
-	LightMode    string
-	UsageH2      string
-	NormalView   string
-	NormalDesc   string
-	GalleryView  string
-	GalleryDesc  string
-	DirectView   string
-	DirectDesc   string
-	SupportedH2  string
-	SupportNote  string
-	Posts        string
-	UserProfile  string
-	Reels        string
-	StatusH2     string
-	StatusSub    string
-	Requests     string
-	ResponseTime string
-	Disclaimer   string
-	JS           homeJS
-}
-
-type homeAppData struct {
-	Brand        string `json:"brand"`
-	Version      string `json:"version"`
-	Host         string `json:"host"`
 	Lang         string `json:"lang"`
 	Tagline      string `json:"tagline"`
-	SupportURL   string `json:"supportURL"`
 	SupportCta   string `json:"supportCta"`
-	GitHubURL    string `json:"githubURL"`
 	DarkMode     string `json:"darkMode"`
 	LightMode    string `json:"lightMode"`
 	UsageH2      string `json:"usageH2"`
@@ -73,6 +42,15 @@ type homeAppData struct {
 	ResponseTime string `json:"responseTime"`
 	Disclaimer   string `json:"disclaimer"`
 	JS           homeJS `json:"js"`
+}
+
+type homeAppData struct {
+	Brand      string `json:"brand"`
+	Version    string `json:"version"`
+	Host       string `json:"host"`
+	SupportURL string `json:"supportURL"`
+	GitHubURL  string `json:"githubURL"`
+	homeStrings
 }
 
 var homeStringsByLocale = map[HomeLocale]homeStrings{
@@ -118,15 +96,9 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 	}
 	t := homeStringsByLocale[locale]
 	appJSON, _ := json.Marshal(homeAppData{
-		Brand: a.cfg.BrandName, Version: a.cfg.Version, Host: host, Lang: t.Lang,
-		Tagline: t.Tagline, SupportURL: a.cfg.SupportURL, SupportCta: t.SupportCta, GitHubURL: a.cfg.GitHubURL,
-		DarkMode: t.DarkMode, LightMode: t.LightMode, UsageH2: t.UsageH2,
-		NormalView: t.NormalView, NormalDesc: t.NormalDesc, GalleryView: t.GalleryView,
-		GalleryDesc: t.GalleryDesc, DirectView: t.DirectView, DirectDesc: t.DirectDesc,
-		SupportedH2: t.SupportedH2, SupportNote: t.SupportNote, Posts: t.Posts,
-		UserProfile: t.UserProfile, Reels: t.Reels, StatusH2: t.StatusH2,
-		StatusSub: t.StatusSub, Requests: t.Requests, ResponseTime: t.ResponseTime,
-		Disclaimer: t.Disclaimer, JS: t.JS,
+		Brand: a.cfg.BrandName, Version: a.cfg.Version, Host: host,
+		SupportURL: a.cfg.SupportURL, GitHubURL: a.cfg.GitHubURL,
+		homeStrings: t,
 	})
 
 	base := a.publicBaseURLFromHost(host)

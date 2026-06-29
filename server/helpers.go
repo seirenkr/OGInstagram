@@ -1,12 +1,34 @@
 package main
 
 import (
+	"encoding/json"
+	"math/big"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+func shortcodeToPK(shortcode string) string {
+	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	n := new(big.Int)
+	base := big.NewInt(64)
+	for _, ch := range shortcode {
+		idx := strings.IndexRune(enc, ch)
+		if idx < 0 {
+			return ""
+		}
+		n.Mul(n, base)
+		n.Add(n, big.NewInt(int64(idx)))
+	}
+	return n.String()
+}
+
+func jsonBytes(v any) []byte {
+	b, _ := json.Marshal(v)
+	return append(b, '\n')
+}
 
 var htmlEscaper = strings.NewReplacer(
 	"&", "&amp;",
@@ -117,11 +139,10 @@ func postDescription(caption, reaction string) string {
 }
 
 func isoTime(t time.Time) string {
-	return strings.Replace(t.UTC().Format("2006-01-02T15:04:05.000Z"), ".000Z", "Z", 1)
+	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
-func nowUTC() time.Time   { return time.Now().UTC() }
-func epochUTC() time.Time { return time.Unix(0, 0).UTC() }
+func nowUTC() time.Time { return time.Now().UTC() }
 
 func mediaIndexFor(post Post, requested int) int {
 	if len(post.Attachments) == 0 || requested < 0 {
@@ -153,7 +174,18 @@ func offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
 	return baseURL + "/offload/" + pathEscape(shortcode) + "/" + strconv.Itoa(index+1) + suffix
 }
 
-func optionalString(v string) string { return strings.TrimSpace(v) }
+func videoDisplaySize(att Attachment) (int, int) {
+	m := 1.0
+	if att.Kind == "video" {
+		if att.Width > 1920 || att.Height > 1920 {
+			m = 0.5
+		}
+		if att.Width < 400 && att.Height < 400 {
+			m = 2
+		}
+	}
+	return int(float64(att.Width)*m + 0.5), int(float64(att.Height)*m + 0.5)
+}
 
 const galleryEmoji = "🖼️"
 
@@ -193,8 +225,7 @@ func selectActivityAttachments(post Post, mediaIndex int, specified bool) attach
 			}
 		}
 	}
-	// A capped gallery shows fewer images than the post has, but the indicator is
-	// just the total count — an "X / Y" here would read like a specific-image pick.
+
 	return attachmentSelection{items: images, indicator: galleryEmoji + " " + strconv.Itoa(total)}
 }
 

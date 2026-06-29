@@ -15,9 +15,6 @@ const (
 	reasonMediaNotFound  = "MediaNotFound"
 )
 
-// reasonInfo declares how we treat each classification:
-//   - rotateIP:  the proxy session/IP looks at fault → rotate + cooldown
-//   - transient: not a permanent fact → short cache, "Temporarily unavailable" card
 type reasonInfo struct {
 	rotateIP  bool
 	transient bool
