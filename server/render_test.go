@@ -28,7 +28,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	for _, tag := range []string{
 		`name="description" content=""`,
 		`property="og:description" content=""`,
-		`property="twitter:description" content=""`,
+		`name="twitter:description" content=""`,
 	} {
 		if !strings.Contains(gallery, tag) {
 			t.Errorf("gallery embed is missing %s", tag)
@@ -37,26 +37,157 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	if strings.Contains(gallery, `property="og:image:alt"`) || strings.Contains(gallery, `property="twitter:image:alt"`) {
 		t.Error("gallery embed must not expose the caption through image alt metadata")
 	}
-	galleryCode := activityCodeFor("p", "CODE", 0, false, true)
-	if !strings.Contains(gallery, `/users/user/statuses/`+galleryCode) {
-		t.Error("gallery embed does not preserve gallery mode in its ActivityPub link")
-	}
-	if galleryCode == activityCodeFor("p", "CODE", 0, false, false) {
-		t.Error("gallery and normal ActivityPub IDs must differ")
-	}
-	if route := parseActivityCode(galleryCode); !route.Gallery || route.Shortcode != "CODE" {
-		t.Errorf("gallery ActivityPub ID decoded incorrectly: %#v", route)
+
+	wantHref := statusURL("https://oginstagram.com", "user", "p", "CODE", 0, false, true)
+	if !strings.Contains(gallery, `href="`+wantHref+`"`) {
+		t.Errorf("gallery embed activity link wrong, want %s in: %s", wantHref, gallery)
 	}
 
-	var status map[string]any
-	body := a.buildActivityStatus("https://oginstagram.com", "status", post, "p", 0, false, true)
-	if err := json.Unmarshal(body, &status); err != nil {
+	var note map[string]any
+	body := a.buildActivityStatus("https://oginstagram.com", post, "p", 0, false, true)
+	if err := json.Unmarshal(body, &note); err != nil {
 		t.Fatal(err)
 	}
-	if status["content"] != "" {
-		t.Errorf("gallery ActivityPub content = %q, want empty", status["content"])
+	ctx, ok := note["@context"].(string)
+	if !ok || ctx != "https://www.w3.org/ns/activitystreams" || note["type"] != "Note" {
+		t.Errorf("not a standard AS2 Note: @context=%v type=%v", note["@context"], note["type"])
 	}
-	if media, ok := status["media_attachments"].([]any); !ok || len(media) != 1 {
-		t.Errorf("gallery ActivityPub media_attachments = %#v, want one item", status["media_attachments"])
+	if note["id"] != wantHref {
+		t.Errorf("Note id wrong, got %v want %v", note["id"], wantHref)
+	}
+	if note["attributedTo"] != "https://oginstagram.com/users/user" {
+		t.Errorf("attributedTo must be the actor URL, got %v", note["attributedTo"])
+	}
+	if note["content"] != "" {
+		t.Errorf("gallery Note content = %q, want empty", note["content"])
+	}
+	att, ok := note["attachment"].([]any)
+	if !ok || len(att) != 1 {
+		t.Fatalf("gallery Note attachment = %#v, want one item", note["attachment"])
+	}
+	if m := att[0].(map[string]any); m["type"] != "Document" || m["mediaType"] != "image/jpeg" {
+		t.Errorf("attachment should be Document+mediaType: %#v", m)
+	}
+
+	for _, k := range []string{"media_attachments", "spoiler_text", "visibility", "account", "sensitive", "uri", "reblog"} {
+		if _, present := note[k]; present {
+			t.Errorf("non-standard field %q must not appear", k)
+		}
+	}
+}
+
+func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
+	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	post := Post{
+		Shortcode: "CODE", Username: "user", FullName: "User", StatsLine: "stats",
+		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080}},
+	}
+	var st map[string]any
+	if err := json.Unmarshal(a.buildMastodonStatus("https://oginstagram.com", post, "reel", 0, false, false), &st); err != nil {
+		t.Fatal(err)
+	}
+
+	wantID := statusSnowcode("reel", "CODE", 0, false, false)
+	if st["id"] != wantID || st["visibility"] != "public" {
+		t.Errorf("status core fields wrong: id=%v want=%v visibility=%v", st["id"], wantID, st["visibility"])
+	}
+	if strings.TrimFunc(wantID, func(r rune) bool { return r >= '0' && r <= '9' }) != "" {
+		t.Errorf("snowcode id must be all digits, got %q", wantID)
+	}
+
+	for _, k := range []string{"media_attachments", "mentions", "tags", "emojis"} {
+		if _, ok := st[k].([]any); !ok {
+			t.Errorf("%q must be a present array", k)
+		}
+	}
+	if _, ok := st["account"].(map[string]any); !ok {
+		t.Fatal("account object missing")
+	}
+	media, ok := st["media_attachments"].([]any)
+	if !ok || len(media) != 1 {
+		t.Fatalf("want one media_attachment, got %#v", st["media_attachments"])
+	}
+	m := media[0].(map[string]any)
+	if m["type"] != "video" {
+		t.Errorf("media type = %v, want video", m["type"])
+	}
+
+	wantPreview := "https://oginstagram.com/offload/CODE/1?thumbnail=1"
+	if m["preview_url"] != wantPreview {
+		t.Errorf("preview_url = %v, want %v", m["preview_url"], wantPreview)
+	}
+	if m["url"] != "https://oginstagram.com/offload/CODE/1" {
+		t.Errorf("url = %v, want playable offload", m["url"])
+	}
+}
+
+func TestVideoDisplaySize(t *testing.T) {
+	cases := []struct {
+		name  string
+		att   Attachment
+		wantW int
+		wantH int
+	}{
+		{"oversized halved", Attachment{Kind: "video", Width: 2160, Height: 3840}, 1080, 1920},
+		{"tiny doubled", Attachment{Kind: "video", Width: 320, Height: 320}, 640, 640},
+		{"normal unchanged", Attachment{Kind: "video", Width: 1080, Height: 1080}, 1080, 1080},
+		{"tall not doubled when one axis large", Attachment{Kind: "video", Width: 320, Height: 640}, 320, 640},
+		{"image never scaled", Attachment{Kind: "image", Width: 4000, Height: 4000}, 4000, 4000},
+	}
+	for _, c := range cases {
+		if w, h := videoDisplaySize(c.att); w != c.wantW || h != c.wantH {
+			t.Errorf("%s: videoDisplaySize = %dx%d, want %dx%d", c.name, w, h, c.wantW, c.wantH)
+		}
+	}
+}
+
+func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"mention", "hi @bob.smith", `hi <a href="https://www.instagram.com/bob.smith">@bob.smith</a>`},
+		{"hashtag", "love #food", `love <a href="https://www.instagram.com/explore/search/keyword/?q=%23food">#food</a>`},
+		{"hashtag unicode", "맛 #굴라쉬", `맛 <a href="https://www.instagram.com/explore/search/keyword/?q=%23%EA%B5%B4%EB%9D%BC%EC%89%AC">#굴라쉬</a>`},
+		{"hashtag numeric start", "#100days", `<a href="https://www.instagram.com/explore/search/keyword/?q=%23100days">#100days</a>`},
+		{"email linked", "mail me at foo@bar.com", `mail me at <a href="mailto:foo@bar.com">foo@bar.com</a>`},
+		{"escaped quote not a hashtag", "it's #real", `it&#39;s <a href="https://www.instagram.com/explore/search/keyword/?q=%23real">#real</a>`},
+		{"pure number is a hashtag on Instagram", "win #100", `win <a href="https://www.instagram.com/explore/search/keyword/?q=%23100">#100</a>`},
+		{"underscore-only not a hashtag", "a #___ b", "a #___ b"},
+		{"adjacent hashtags both link", "#a#b", `<a href="https://www.instagram.com/explore/search/keyword/?q=%23a">#a</a><a href="https://www.instagram.com/explore/search/keyword/?q=%23b">#b</a>`},
+		{"hashtag attached to word not linked", "abc#def", "abc#def"},
+		{"angle brackets escaped", "a <b> #x", `a &lt;b&gt; <a href="https://www.instagram.com/explore/search/keyword/?q=%23x">#x</a>`},
+		{"scheme url", "see https://example.com/x", `see <a href="https://example.com/x">https://example.com/x</a>`},
+		{"url trailing dot trimmed", "go https://example.com.", `go <a href="https://example.com">https://example.com</a>.`},
+		{"www prepended scheme", "at www.example.com now", `at <a href="https://www.example.com">www.example.com</a> now`},
+		{"fuzzy domain with path", "watch youtube.com/abc here", `watch <a href="https://youtube.com/abc">youtube.com/abc</a> here`},
+		{"non-tld not linked", "open report.pdf please", "open report.pdf please"},
+	}
+	for _, c := range cases {
+		if got := captionHTML(c.in); got != c.want {
+			t.Errorf("%s: captionHTML(%q) =\n  %q\nwant\n  %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
+	a := &App{cfg: Config{BrandName: "OGInstagram", BrandColor: "#ff0069"}}
+	post := Post{
+		Shortcode: "CODE", Username: "user", FullName: "User",
+		Attachments: []Attachment{{Kind: "video", Width: 2160, Height: 3840}},
+	}
+	html := a.buildEmbedHTML("https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
+	for _, tag := range []string{
+		`property="og:video:width" content="1080"`,
+		`property="og:video:height" content="1920"`,
+	} {
+		if !strings.Contains(html, tag) {
+			t.Errorf("video embed missing scaled tag %s\n%s", tag, html)
+		}
+	}
+
+	if strings.Contains(html, "twitter:player") || strings.Contains(html, `twitter:card" content="player"`) {
+		t.Errorf("video embed must not use a Twitter player card:\n%s", html)
 	}
 }
