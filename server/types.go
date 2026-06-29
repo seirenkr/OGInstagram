@@ -3,6 +3,7 @@ package main
 import "time"
 
 type Attachment struct {
+	ID        string
 	Kind      string
 	URL       string
 	Thumbnail string
@@ -15,6 +16,7 @@ type Attachment struct {
 type Post struct {
 	Shortcode   string
 	Username    string
+	OwnerID     string
 	FullName    string
 	ProfilePic  string
 	Caption     string
@@ -46,34 +48,16 @@ type RequestQuery struct {
 	IndexSet    bool
 	Order       int
 	OrderSet    bool
-	PostType    string
-	Shortcode   string
-	Text        string
-	Status      string
-	Provider    string
 	Gallery     bool
-}
-
-type ActivityRoute struct {
-	Username            string
-	Shortcode           string
-	PostType            string
-	MediaIndex          int
-	MediaIndexSpecified bool
-	Gallery             bool
 }
 
 type AppError struct {
 	Status  int
 	Message string
 	Reason  string
-	// Ephemeral marks a purely local, momentary condition (e.g. the proxy pool
-	// is exhausted/cooling down) that never reached Instagram, so callers must
-	// not cache it — the next request may succeed immediately.
+
 	Ephemeral bool
 }
-
-func (e *AppError) Error() string { return e.Message }
 
 func newAppError(status int, message string) *AppError {
 	return &AppError{Status: status, Message: message}
