@@ -1,7 +1,7 @@
-:root { --font-sans: "Pretendard JP Variable", Pretendard, ui-sans-serif, system-ui, sans-serif; --text-color-kumo-brand: #ff0069; }
+:root { --font-sans: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; }
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
-body { margin: 0; background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: "Pretendard JP Variable", Pretendard, ui-sans-serif, system-ui, sans-serif; font-optical-sizing: auto; }
+body { margin: 0; background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; font-optical-sizing: auto; }
 button, a { touch-action: manipulation; }
 body { overflow-x: hidden; }
 h1, h2, h3 { text-wrap: balance; }
@@ -19,11 +19,8 @@ p { text-wrap: pretty; }
 .site-brand:focus-visible { outline: 2px solid var(--color-kumo-focus); outline-offset: 3px; }
 .page-main { width: min(100%, 1200px); margin-inline: auto; padding: 0 32px 72px; display: flex; flex-direction: column; gap: 72px; }
 .page-section { display: flex; flex-direction: column; gap: 24px; }
-.usage-grid > * { min-height: 100%; }
-.supported-grid > * { height: 100%; }
-.supported-grid > * > :last-child { flex-grow: 1; }
-.usage-card { height: 100%; }
-.usage-card > :last-child { min-height: 100px; flex-grow: 1; }
+.card-grid > * { height: 100%; }
+.card-grid > * > :last-child { flex-grow: 1; }
 .status-stack { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
 .status-stack > * { min-width: 0; }
 .status-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 8px; padding-inline: 8px; }
