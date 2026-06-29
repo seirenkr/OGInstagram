@@ -12,7 +12,10 @@ import (
 const (
 	instagramOrigin = "https://www.instagram.com"
 	instagramAppID  = "936619743392459"
-	instagramDocID  = "8845758582119845"
+
+	instagramWebLoggedOutDocID = "27130156389949648"
+
+	snowcodeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}[]\":,.-_"
 
 	proxyGateEndpoint       = "gate.decodo.com:7000"
 	proxyCountry            = "us"
@@ -20,7 +23,7 @@ const (
 	proxySessionCount       = 10
 
 	defaultCacheTTLSeconds  = 3600
-	defaultProxyHourlyLimit = 180
+	defaultProxyHourlyLimit = 1000
 
 	transientErrorCacheSecond = 300
 	permanentErrorCacheSecond = 3600
@@ -54,8 +57,6 @@ const (
 	instagramAsbdID = "129477"
 
 	profileCacheTTLSeconds = 1800
-
-	snowcodeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}[]\":,.-_"
 )
 
 func configFromEnv() Config {
@@ -110,6 +111,15 @@ func decodoProxyURL(user, pass, sessionID string) string {
 func newSessionID() string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, 8)
+	for i := range b {
+		b[i] = alphabet[rand.IntN(len(alphabet))]
+	}
+	return string(b)
+}
+
+func newLSD() string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 23+rand.IntN(5))
 	for i := range b {
 		b[i] = alphabet[rand.IntN(len(alphabet))]
 	}

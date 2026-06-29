@@ -82,7 +82,7 @@ function Chart({ times, lines, dark, loading, xAxisName }: { times: number[]; li
 }
 
 function UsageCard({ title, url, description }: { title: string; url: React.ReactNode; description: string }) {
-  return <LayerCard className="usage-card min-w-0">
+  return <LayerCard className="min-w-0">
     <LayerCard.Secondary>{title}</LayerCard.Secondary>
     <LayerCard.Primary>
       <div className="flex flex-col gap-3">
@@ -166,7 +166,7 @@ function App() {
 
         <section className="page-section" aria-labelledby="usage-title">
           <Text id="usage-title" variant="heading2" as="h2">{data.usageH2}</Text>
-          <Grid className="usage-grid" variant="3up" gap="sm">
+          <Grid className="card-grid" variant="3up" gap="sm">
             <UsageCard title={data.normalView} url={<><span className="text-kumo-subtle">https://</span><HighlightedHost host={data.host} /></>} description={data.normalDesc} />
             <UsageCard title={data.galleryView} url={<><span className="text-kumo-subtle">https://</span><strong className="key-prefix">g.</strong><HighlightedHost host={data.host} /></>} description={data.galleryDesc} />
             <UsageCard title={data.directView} url={<><span className="text-kumo-subtle">https://</span><strong className="key-prefix">d.</strong><HighlightedHost host={data.host} /></>} description={data.directDesc} />
@@ -175,7 +175,7 @@ function App() {
 
         <section className="page-section" aria-labelledby="supported-title">
           <Text id="supported-title" variant="heading2" as="h2">{data.supportedH2}</Text>
-          <Grid variant="3up" gap="sm" className="supported-grid">
+          <Grid variant="3up" gap="sm" className="card-grid">
             <LayerCard><LayerCard.Secondary>{data.posts}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">p</strong>/…</Text><Text variant="secondary" size="base">instagram.com/username/<strong className="text-kumo-default">p</strong>/…</Text></LayerCard.Primary></LayerCard>
             <LayerCard><LayerCard.Secondary>{data.reels}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">reel</strong>(s)/…</Text><Text variant="secondary" size="base">instagram.com/username/<strong className="text-kumo-default">reel</strong>(s)/…</Text></LayerCard.Primary></LayerCard>
             <LayerCard><LayerCard.Secondary>{data.userProfile}</LayerCard.Secondary><LayerCard.Primary><Text variant="secondary" size="base">instagram.com/<strong className="text-kumo-default">username</strong></Text></LayerCard.Primary></LayerCard>

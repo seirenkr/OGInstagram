@@ -14,28 +14,36 @@ import (
 )
 
 type gqlSpec struct {
+	name    string
+	target  string
 	method  string
 	url     string
 	body    string
 	headers map[string]string
 }
 
-func docIDSpec(shortcode string) gqlSpec {
-	variables, _ := json.Marshal(map[string]string{"shortcode": shortcode})
+func webLoggedOutSpec(shortcode string) gqlSpec {
+	pk := shortcodeToPK(shortcode)
+	variables, _ := json.Marshal(map[string]string{"media_id": pk})
+	lsd := newLSD()
 	form := url.Values{}
+	form.Set("lsd", lsd)
 	form.Set("variables", string(variables))
-	form.Set("doc_id", instagramDocID)
+	form.Set("doc_id", instagramWebLoggedOutDocID)
 	form.Set("server_timestamps", "true")
 	return gqlSpec{
+		name:   "post",
+		target: shortcode,
 		method: http.MethodPost,
-		url:    instagramOrigin + "/graphql/query/",
+		url:    instagramOrigin + "/api/graphql",
 		body:   form.Encode(),
 		headers: map[string]string{
-			"User-Agent":      instagramAppUA,
-			"Accept":          "*/*",
-			"Accept-Language": "en-US,en;q=0.8",
-			"Content-Type":    "application/x-www-form-urlencoded",
-			"Referer":         instagramOrigin + "/p/" + url.PathEscape(shortcode) + "/",
+			"User-Agent":         instagramWebUA,
+			"Content-Type":       "application/x-www-form-urlencoded",
+			"Sec-Fetch-Site":     "same-origin",
+			"X-FB-Friendly-Name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+			"X-FB-LSD":           lsd,
+			"X-Requested-With":   "XMLHttpRequest",
 		},
 	}
 }
@@ -96,10 +104,8 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 			if r.err == nil {
 				return r.body, nil
 			}
-			// Prefer the most authoritative error: a permanent answer from
-			// Instagram (e.g. 404 not-found) beats a transient one (e.g. a
-			// rate-limited session's 401), so racing a busy IP can't mask a
-			// genuine "account doesn't exist".
+
+			// Prefer a permanent error (real 404) over a transient one (a throttled IP's 401).
 			if lastErr == nil || (isTransient(lastErr.Reason) && !isTransient(r.err.Reason)) {
 				lastErr = r.err
 			}
@@ -114,10 +120,26 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	return "", lastErr
 }
 
-func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (string, *AppError) {
+func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body string, ferr *AppError) {
 	started := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
+
+	defer func() {
+		ms := time.Since(started).Milliseconds()
+		endpoint := spec.url
+		if i := strings.IndexByte(endpoint, '?'); i >= 0 {
+			endpoint = endpoint[:i]
+		}
+		msg := spec.method + " " + endpoint
+		switch {
+		case ferr == nil:
+			slog.Info(msg, "op", spec.name, "target", spec.target, "status", 200, "session", s.name, "ms", ms, "bytes", len(body))
+		case ferr.Status != 499:
+			slog.Warn(msg, "op", spec.name, "target", spec.target, "status", ferr.Status,
+				"reason", ferr.Reason, "session", s.name, "ms", ms, "detail", ferr.Message)
+		}
+	}()
 
 	var bodyReader io.Reader
 	if spec.body != "" {
@@ -145,7 +167,6 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (strin
 		if ctx.Err() != nil {
 			return "", newAppError(499, "cancelled")
 		}
-		slog.Warn("fetch_failed", "session", s.name, "ms", time.Since(started).Milliseconds(), "err", err.Error())
 		failOnce(reasonConnection)
 		return "", igErr(502, reasonConnection, err.Error())
 	}
@@ -233,4 +254,28 @@ func instagramMessage(body string) string {
 		return ""
 	}
 	return strings.TrimSpace(gjson.Get(body, "message").String())
+}
+
+func (c Config) oembedURL(shortcode string) string {
+	q := url.Values{}
+	q.Set("url", instagramOrigin+"/p/"+shortcode+"/")
+	return instagramOrigin + "/api/v1/oembed/?" + q.Encode()
+}
+
+func (a *App) oembedRefine(shortcode string) (reason, title, desc string, override bool) {
+	status, body, ok := a.proxyRawGet(a.cfg.oembedURL(shortcode), map[string]string{
+		"User-Agent":  instagramAppUA,
+		"Accept":      "*/*",
+		"X-IG-App-ID": instagramAppID,
+	})
+	if !ok || status == 404 || !gjson.Valid(body) {
+		return "", "", "", false
+	}
+	if gjson.Get(body, "status").String() == "fail" {
+		t := gjson.Get(body, "title").String()
+		if msg := gjson.Get(body, "message").String(); msg != "" && t != "" {
+			return msg, t, gjson.Get(body, "description").String(), true
+		}
+	}
+	return "", "", "", false
 }

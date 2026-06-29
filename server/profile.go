@@ -9,8 +9,45 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const (
+	profilePrivateNotice = "🔒 This profile is private."
+
+	profileGalleryMax = 6
+)
+
+func profileURL(username string) string {
+	return instagramOrigin + "/" + pathEscape(username) + "/"
+}
+
+func profileDisplayName(p Profile) string {
+	if p.FullName != "" {
+		return p.FullName
+	}
+	return p.Username
+}
+
+func profileStatsLine(p Profile) string {
+	return "📝 " + fmtCount(p.MediaCount) + " 👤 " + fmtCount(p.FollowerCount)
+}
+
+func profileBioHTML(p Profile) string {
+	bio := normalizeCaption(p.Biography)
+	if bio == "" {
+		return ""
+	}
+	return "<p>" + captionHTML(bio) + "</p>"
+}
+
+func profileErrorCard(reason string) (title, desc string) {
+	if isTransient(reason) {
+		return "Temporarily unavailable", "Couldn't load this profile right now. Please try again in a moment."
+	}
+	return "Account unavailable", "This account isn't available - it may not exist, be deactivated, or the username is incorrect."
+}
+
 type Profile struct {
 	Username       string
+	UserID         string
 	FullName       string
 	Biography      string
 	ProfilePic     string
@@ -18,7 +55,15 @@ type Profile struct {
 	FollowingCount int
 	MediaCount     int
 	IsPrivate      bool
-	Recent         []string
+	RecentMedia    []ProfileMedia
+}
+
+type ProfileMedia struct {
+	ID        string
+	Thumbnail string
+	Width     int
+	Height    int
+	TakenAt   time.Time
 }
 
 var usernameRE = regexp.MustCompile(`^[A-Za-z0-9._]{1,30}$`)
@@ -27,6 +72,8 @@ func validUsername(s string) bool { return usernameRE.MatchString(s) }
 
 func webProfileSpec(username string) gqlSpec {
 	return gqlSpec{
+		name:   "profile",
+		target: username,
 		method: http.MethodGet,
 		url:    instagramOrigin + "/api/v1/users/web_profile_info/?username=" + url.QueryEscape(username),
 		headers: map[string]string{
@@ -62,6 +109,7 @@ func parseProfile(body string) (Profile, *AppError) {
 	}
 	p := Profile{
 		Username:       u.Get("username").String(),
+		UserID:         u.Get("id").String(),
 		FullName:       u.Get("full_name").String(),
 		Biography:      u.Get("biography").String(),
 		ProfilePic:     normalizeCDNHost(firstNonEmpty(u.Get("profile_pic_url_hd").String(), u.Get("profile_pic_url").String())),
@@ -73,29 +121,25 @@ func parseProfile(body string) (Profile, *AppError) {
 	if p.Username == "" {
 		return Profile{}, igErr(404, reasonMediaNotFound, "profile had no username")
 	}
-	for _, e := range u.Get("edge_owner_to_timeline_media.edges").Array() {
-		img := bestProfileImage(e.Get("node"))
-		if img == "" {
-			continue
+	u.Get("edge_owner_to_timeline_media.edges").ForEach(func(_, e gjson.Result) bool {
+		n := e.Get("node")
+		thumb := normalizeCDNHost(firstNonEmpty(n.Get("thumbnail_src").String(), n.Get("display_url").String()))
+		if thumb != "" {
+			var takenAt time.Time
+			if ts := n.Get("taken_at_timestamp").Int(); ts > 0 {
+				takenAt = time.Unix(ts, 0).UTC()
+			}
+			p.RecentMedia = append(p.RecentMedia, ProfileMedia{
+				ID:        firstNonEmpty(n.Get("pk").String(), n.Get("id").String()),
+				Thumbnail: thumb,
+				Width:     int(n.Get("dimensions.width").Int()),
+				Height:    int(n.Get("dimensions.height").Int()),
+				TakenAt:   takenAt,
+			})
 		}
-		p.Recent = append(p.Recent, normalizeCDNHost(img))
-		if len(p.Recent) >= profileGalleryMax {
-			break
-		}
-	}
+		return len(p.RecentMedia) < profileGalleryMax
+	})
 	return p, nil
-}
-
-func bestProfileImage(node gjson.Result) string {
-	if u := bestCandidateURL(node.Get("thumbnail_resources")); u != "" {
-		return u
-	}
-	for _, k := range []string{"thumbnail_src", "display_url"} {
-		if u := node.Get(k).String(); u != "" {
-			return u
-		}
-	}
-	return ""
 }
 
 func firstNonEmpty(values ...string) string {
@@ -107,77 +151,12 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-type profileEntry struct {
-	profile   Profile
-	err       *AppError
-	expiresAt time.Time
-}
-
-type profileCall struct {
-	done  chan struct{}
-	entry *profileEntry
-	err   *AppError
-}
-
 func (a *App) getProfile(username string, meta *fetchMeta) (Profile, *AppError) {
 	if !validUsername(username) {
 		return Profile{}, igErr(404, reasonNotFound, "invalid username")
 	}
-
-	a.profileMu.Lock()
-	if e, ok := a.profiles[username]; ok && e.expiresAt.After(time.Now()) {
-		a.profileMu.Unlock()
-		return e.profile, e.err
-	}
-	a.profileMu.Unlock()
-
-	a.profileFlightMu.Lock()
-	if call, ok := a.profileFlight[username]; ok {
-		a.profileFlightMu.Unlock()
-		<-call.done
-		if call.entry != nil {
-			return call.entry.profile, call.err
-		}
-		return Profile{}, call.err
-	}
-	call := &profileCall{done: make(chan struct{})}
-	a.profileFlight[username] = call
-	a.profileFlightMu.Unlock()
-
-	if meta != nil {
-		meta.fetched = true
-	}
-
-	profile, err := a.fetchProfile(username)
-	if err == nil || !err.Ephemeral {
-		ttl := profileCacheTTLSeconds
-		if err != nil {
-			ttl = errorCacheSeconds(err.Reason)
-		}
-		entry := &profileEntry{profile: profile, err: err, expiresAt: time.Now().Add(time.Duration(ttl) * time.Second)}
-		a.storeProfile(username, entry)
-		call.entry, call.err = entry, err
-	} else {
-		call.err = err
-	}
-
-	a.profileFlightMu.Lock()
-	delete(a.profileFlight, username)
-	a.profileFlightMu.Unlock()
-	close(call.done)
-	return profile, err
-}
-
-func (a *App) storeProfile(username string, entry *profileEntry) {
-	a.profileMu.Lock()
-	defer a.profileMu.Unlock()
-	if _, exists := a.profiles[username]; !exists {
-		a.profileOrder = append(a.profileOrder, username)
-	}
-	a.profiles[username] = entry
-	for len(a.profiles) > maxCacheEntries && len(a.profileOrder) > 0 {
-		oldest := a.profileOrder[0]
-		a.profileOrder = a.profileOrder[1:]
-		delete(a.profiles, oldest)
-	}
+	return a.profiles.get(username, meta, func() (Profile, time.Duration, *AppError) {
+		p, err := a.fetchProfile(username)
+		return p, profileCacheTTLSeconds * time.Second, err
+	})
 }

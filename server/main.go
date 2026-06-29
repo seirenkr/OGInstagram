@@ -11,7 +11,20 @@ import (
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 {
+				switch a.Key {
+				case slog.TimeKey:
+					return slog.Attr{}
+				case slog.LevelKey:
+					a.Value = slog.StringValue(strings.ToLower(a.Value.String()))
+				}
+			}
+			return a
+		},
+	})))
 
 	cfg := configFromEnv()
 	assets, err := loadAssets(cfg.AssetsDir)
@@ -55,6 +68,9 @@ func htmlResp(status int, body string) resp {
 func jsonResp(status int, body []byte) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "application/json"}, body: body}
 }
+func activityJSONResp(status int, body []byte) resp {
+	return resp{status: status, headers: map[string]string{"Content-Type": "application/activity+json"}, body: body}
+}
 func textResp(status int, text string) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"}, body: []byte(text)}
 }
@@ -80,8 +96,8 @@ func tagFetch(r resp, meta *fetchMeta) resp {
 }
 
 func (a *App) handle(w http.ResponseWriter, req *http.Request) {
-	r := a.route(req)
-	a.write(w, r)
+
+	a.write(w, a.route(req))
 }
 
 func (a *App) route(req *http.Request) resp {
@@ -108,25 +124,16 @@ func (a *App) route(req *http.Request) resp {
 		}
 		return cacheable(r, iconCacheSeconds)
 	}
-	if path == "/oembed" {
-		return a.handleOEmbed(req)
-	}
-	if path == "/owoembed" {
-		return cacheable(jsonResp(200, a.buildOwOEmbed(a.publicBaseURL(req), parseRequestQuery(req.URL.Query()))), edgeCacheSeconds)
-	}
-
 	segments := splitPath(path)
 	if (len(segments) == 2 || len(segments) == 3) && segments[0] == "offload" {
 		return a.handleOffload(req, segments)
 	}
+
 	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
-		return a.handleActivity(req, segments[3], false)
-	}
-	if len(segments) == 2 && segments[0] == "statuses" {
-		return a.handleActivity(req, segments[1], false)
+		return a.handleMastodonStatus(req, segments[3])
 	}
 	if len(segments) == 4 && segments[0] == "users" && segments[2] == "statuses" {
-		return a.handleActivity(req, segments[3], false)
+		return a.handleActivity(req, segments[1], segments[3])
 	}
 	if len(segments) == 2 && segments[0] == "users" {
 		return a.handleUserAccount(req, segments[1])
@@ -142,6 +149,64 @@ func (a *App) route(req *http.Request) resp {
 		return a.handleProfile(req, segments[0])
 	}
 	return resp{status: 404, headers: map[string]string{}}
+}
+
+func (a *App) handleUserAccount(req *http.Request, username string) resp {
+	baseURL := a.publicBaseURL(req)
+	p, err := a.getProfile(username, nil)
+	if err != nil {
+		return cacheable(activityJSONResp(200, a.buildFallbackAccount(baseURL, username)), errorCacheSeconds(err.Reason))
+	}
+	return cacheable(activityJSONResp(200, a.buildProfileAccount(baseURL, p)), edgeCacheSeconds)
+}
+
+func (a *App) handleActivity(req *http.Request, username, code string) resp {
+	sp := parseStatusSnowcode(code)
+	baseURL := a.publicBaseURL(req)
+	if sp.Username != "" {
+		p, err := a.getProfile(sp.Username, nil)
+		if err != nil {
+			return textResp(err.Status, err.Message)
+		}
+		return cacheable(activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p)), edgeCacheSeconds)
+	}
+	post, err := a.getPost(sp.Shortcode, nil)
+	if err != nil {
+		if isTransient(err.Reason) {
+			return activityJSONResp(err.Status, a.buildRateLimitActivityStatus(baseURL, sp.Shortcode))
+		}
+		return textResp(err.Status, err.Message)
+	}
+	body := a.buildActivityStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
+	return cacheable(activityJSONResp(200, body), edgeCacheSeconds)
+}
+
+func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
+	sp := parseStatusSnowcode(code)
+	baseURL := a.publicBaseURL(req)
+	if sp.Username != "" {
+		p, err := a.getProfile(sp.Username, nil)
+		if err != nil {
+			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
+		}
+		return cacheable(jsonResp(200, a.buildMastodonProfileStatus(baseURL, p)), edgeCacheSeconds)
+	}
+	if !validShortcode(sp.Shortcode) {
+		return jsonResp(404, jsonBytes(map[string]any{"error": "Record not found"}))
+	}
+	post, err := a.getPost(sp.Shortcode, nil)
+	if err != nil {
+		return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
+	}
+	body := a.buildMastodonStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
+	return cacheable(jsonResp(200, body), edgeCacheSeconds)
+}
+
+func snowMediaIndex(sp snowPost) int {
+	if sp.Specified {
+		return sp.MediaIndex
+	}
+	return -1
 }
 
 func (a *App) handleProfile(req *http.Request, username string) resp {
@@ -164,26 +229,7 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 		r = cacheable(r, errorCacheSeconds(err.Reason))
 		return tagFetch(r, meta)
 	}
-	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, req.Header.Get("User-Agent"), p, q.Gallery)), edgeCacheSeconds), meta)
-}
-
-func (a *App) handleUserAccount(req *http.Request, username string) resp {
-	p, err := a.getProfile(username, nil)
-	if err != nil {
-		return cacheable(jsonResp(200, a.buildFallbackAccount(username)), errorCacheSeconds(err.Reason))
-	}
-	return cacheable(jsonResp(200, a.buildProfileAccount(p)), edgeCacheSeconds)
-}
-
-func (a *App) handleProfileStatus(req *http.Request, statusID, username string) resp {
-	p, err := a.getProfile(username, nil)
-	if err != nil {
-		if isTransient(err.Reason) {
-			return jsonResp(err.Status, a.buildRateLimitActivityStatus(username))
-		}
-		return textResp(err.Status, err.Message)
-	}
-	return cacheable(jsonResp(200, a.buildProfileStatus(statusID, p)), edgeCacheSeconds)
+	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, q.Gallery)), edgeCacheSeconds), meta)
 }
 
 func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathIndex int) resp {
@@ -203,8 +249,6 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 		reason := err.Reason
 		title, desc := postErrorCard(reason)
 
-		// Only MediaNotFound (200 + null media) can carry a specific reason via
-		// oembed; a genuine HTTP 404 and everything else cannot be refined.
 		if reason == reasonMediaNotFound {
 			if r2, t2, d2, ok := a.oembedRefine(shortcode); ok {
 				reason, title, desc = r2, t2, d2
@@ -227,7 +271,8 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	shortcode := segments[1]
 	index := 0
 	if len(segments) == 3 {
-		if n, err := strconv.Atoi(segments[2]); err == nil && n > 0 {
+		seg := strings.TrimSuffix(segments[2], ".mp4")
+		if n, err := strconv.Atoi(seg); err == nil && n > 0 {
 			index = n - 1
 		}
 	}
@@ -250,54 +295,6 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	return tagFetch(cacheable(redirectResp(target, 302), edgeCacheSeconds), meta)
 }
 
-func (a *App) handleActivity(req *http.Request, statusID string, gallery bool) resp {
-	q := parseRequestQuery(req.URL.Query())
-	route := parseActivityCode(statusID)
-	if route.Username != "" {
-		return a.handleProfileStatus(req, statusID, route.Username)
-	}
-	gallery = gallery || q.Gallery || route.Gallery
-	if q.Shortcode != "" {
-		route.Shortcode = q.Shortcode
-	}
-	if q.PostType != "" {
-		route.PostType = normalizePostType(q.PostType)
-	}
-	if querySpecified(q) {
-		route.MediaIndex = mediaIndexFromQuery(q, -1)
-		route.MediaIndexSpecified = true
-	}
-	post, err := a.getPost(route.Shortcode, nil)
-	if err != nil {
-		if isTransient(err.Reason) {
-			return jsonResp(err.Status, a.buildRateLimitActivityStatus(route.Shortcode))
-		}
-		return textResp(err.Status, err.Message)
-	}
-	body := a.buildActivityStatus(a.publicBaseURL(req), statusID, post, route.PostType, route.MediaIndex, route.MediaIndexSpecified, gallery)
-	return cacheable(jsonResp(200, body), edgeCacheSeconds)
-}
-
-func (a *App) handleOEmbed(req *http.Request) resp {
-	q := parseRequestQuery(req.URL.Query())
-	fillQueryFromURL(&q, req.URL.Query().Get("url"))
-	if q.Shortcode == "" {
-		return textResp(400, "shortcode required")
-	}
-	postType := normalizePostType(q.PostType)
-	mediaIndex := mediaIndexFromQuery(q, -1)
-	specified := querySpecified(q)
-	baseURL := a.publicBaseURL(req)
-	post, err := a.getPost(q.Shortcode, nil)
-	if err != nil {
-		if isTransient(err.Reason) {
-			return jsonResp(err.Status, a.buildRateLimitOEmbed(baseURL, postType, q.Shortcode, mediaIndex, specified))
-		}
-		return textResp(err.Status, err.Message)
-	}
-	return cacheable(jsonResp(200, a.buildOEmbed(baseURL, post, postType, mediaIndex, specified)), edgeCacheSeconds)
-}
-
 func (a *App) publicBaseURL(req *http.Request) string {
 	if a.cfg.BaseURL != "" {
 		return a.cfg.BaseURL
@@ -306,15 +303,10 @@ func (a *App) publicBaseURL(req *http.Request) string {
 	if host == "" {
 		host = "localhost:" + strconv.Itoa(a.cfg.Port)
 	}
-	proto := firstHeaderValue(req.Header.Get("X-Forwarded-Proto"))
-	if proto == "" {
-		if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
-			proto = "http"
-		} else {
-			proto = "https"
-		}
+	if proto := firstHeaderValue(req.Header.Get("X-Forwarded-Proto")); proto != "" {
+		return proto + "://" + host
 	}
-	return proto + "://" + host
+	return a.publicBaseURLFromHost(host)
 }
 
 func (a *App) publicBaseURLFromHost(host string) string {
