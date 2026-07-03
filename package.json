@@ -16,10 +16,9 @@
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7",
-    "@cloudflare/kumo": "^2.5.2",
+    "@cloudflare/kumo": "^2.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "echarts": "^6.1.0",
-    "hono": "^4.12.25",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
