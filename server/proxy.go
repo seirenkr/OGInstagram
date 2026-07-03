@@ -2,7 +2,6 @@ package main
 
 import (
 	"log/slog"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"sort"
@@ -13,12 +12,12 @@ import (
 type Session struct {
 	name string
 
-	mu         sync.Mutex
-	proxyURL   string
-	client     *http.Client
-	sessionID  string
-	decodoUser string
-	decodoPass string
+	mu        sync.Mutex
+	proxyURL  string
+	client    *http.Client
+	sessionID string
+	user      string
+	pass      string
 
 	ewmaMs        float64
 	hasEWMA       bool
@@ -31,6 +30,9 @@ type SessionPool struct {
 	sessions []*Session
 	cfg      Config
 	mu       sync.Mutex
+
+	globalWindowStart time.Time
+	globalUsed        int
 }
 
 func newSessionPool(cfg Config) *SessionPool {
@@ -39,7 +41,7 @@ func newSessionPool(cfg Config) *SessionPool {
 	add := func(s *Session) {
 		client, err := buildSessionClient(s.proxyURL)
 		if err != nil {
-			slog.Warn("proxy_skip", "name", s.name, "err", err.Error())
+			slog.Warn("skipped proxy session", "name", s.name, "err", err.Error())
 			return
 		}
 		s.client = client
@@ -47,21 +49,21 @@ func newSessionPool(cfg Config) *SessionPool {
 		pool.sessions = append(pool.sessions, s)
 	}
 
-	if cfg.DecodoUser != "" && cfg.DecodoPass != "" {
+	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
 		for i := 0; i < proxySessionCount; i++ {
 			id := newSessionID()
 			add(&Session{
-				name:       "us-" + id,
-				proxyURL:   decodoProxyURL(cfg.DecodoUser, cfg.DecodoPass, id),
-				sessionID:  id,
-				decodoUser: cfg.DecodoUser,
-				decodoPass: cfg.DecodoPass,
+				name:      "us-" + id,
+				proxyURL:  proxyURL(cfg.ProxyUser, cfg.ProxyPass, id),
+				sessionID: id,
+				user:      cfg.ProxyUser,
+				pass:      cfg.ProxyPass,
 			})
 		}
 	}
 
 	if len(pool.sessions) == 0 {
-		slog.Warn("proxy_pool_empty", "hint", "set DECODO_USERNAME and DECODO_PASSWORD")
+		slog.Warn("no proxy sessions configured", "hint", "set PROXY_USERNAME and PROXY_PASSWORD")
 	}
 	return pool
 }
@@ -88,6 +90,12 @@ func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
 	defer p.mu.Unlock()
 	now := time.Now()
 
+	// Global hourly cap, counted on successful (data-downloaded) requests only.
+	p.resetGlobalWindowLocked(now)
+	if p.cfg.GlobalHourlyLimit > 0 && p.globalUsed >= p.cfg.GlobalHourlyLimit {
+		return nil
+	}
+
 	var eligible []*Session
 	for _, s := range p.sessions {
 		if exclude != nil && exclude[s] {
@@ -95,33 +103,21 @@ func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
 		}
 		s.mu.Lock()
 		s.resetBucketWindowLocked(now)
-		ok := !s.cooldownUntil.After(now) && s.used < p.cfg.HourlyLimit
+		ok := !s.cooldownUntil.After(now) && s.used < defaultProxyHourlyLimit
 		s.mu.Unlock()
 		if ok {
 			eligible = append(eligible, s)
 		}
 	}
 
-	var picked []*Session
-	if len(eligible) <= count {
-		picked = eligible
-	} else {
+	// ponytail: fastest-EWMA pick only; sessions without an EWMA rank first
+	// (-1), so new/rotated-in sessions still get explored via the hedge pick.
+	picked := eligible
+	if len(eligible) > count {
 		sort.Slice(eligible, func(i, j int) bool {
 			return ewmaRank(eligible[i]) < ewmaRank(eligible[j])
 		})
-		fastCount := count - fetchRaceExplorers
-		if fastCount < 0 {
-			fastCount = 0
-		}
-		picked = append(picked, eligible[:fastCount]...)
-		rest := append([]*Session(nil), eligible[fastCount:]...)
-		rand.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
-		for _, s := range rest {
-			if len(picked) >= count {
-				break
-			}
-			picked = append(picked, s)
-		}
+		picked = eligible[:count]
 	}
 
 	for _, s := range picked {
@@ -130,6 +126,32 @@ func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
 		s.mu.Unlock()
 	}
 	return picked
+}
+
+func (p *SessionPool) resetGlobalWindowLocked(now time.Time) {
+	if p.globalWindowStart.IsZero() || now.Sub(p.globalWindowStart) >= time.Hour {
+		p.globalWindowStart = now
+		p.globalUsed = 0
+	}
+}
+
+// countRequest records one successful (data-downloaded) proxy request against
+// the hourly budget. Race losers cancelled mid-flight are not counted.
+func (p *SessionPool) countRequest() {
+	p.mu.Lock()
+	p.resetGlobalWindowLocked(time.Now())
+	p.globalUsed++
+	p.mu.Unlock()
+}
+
+func (p *SessionPool) overBudget() bool {
+	if p.cfg.GlobalHourlyLimit <= 0 {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resetGlobalWindowLocked(time.Now())
+	return p.globalUsed >= p.cfg.GlobalHourlyLimit
 }
 
 func ewmaRank(s *Session) float64 {
@@ -168,14 +190,14 @@ func (p *SessionPool) fail(s *Session, reason string) {
 		s.cooldownUntil = until
 	}
 	s.mu.Unlock()
-	slog.Info("proxy_rotated", "session", s.name, "reason", reason)
+	slog.Info("rotated proxy session", "session", s.name, "reason", reason)
 }
 
 func (p *SessionPool) rotate(s *Session) {
 	s.mu.Lock()
-	if s.decodoUser != "" {
+	if s.user != "" {
 		s.sessionID = newSessionID()
-		s.proxyURL = decodoProxyURL(s.decodoUser, s.decodoPass, s.sessionID)
+		s.proxyURL = proxyURL(s.user, s.pass, s.sessionID)
 	}
 	proxyURL := s.proxyURL
 	s.mu.Unlock()

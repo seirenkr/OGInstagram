@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -9,19 +11,28 @@ const (
 	asPublic  = "https://www.w3.org/ns/activitystreams#Public"
 )
 
-func personObject(baseURL, username, name, profileURLStr, avatar string, withContext bool) map[string]any {
+func personObject(baseURL, username, name, profileURLStr, avatar string) map[string]any {
+	if name == "" {
+		name = username
+	}
+	actor := actorURL(baseURL, username)
+	if profileURLStr == "" {
+		profileURLStr = actor
+	}
 	p := map[string]any{
-		"id":                actorURL(baseURL, username),
+		"@context":          asContext,
+		"id":                actor,
 		"type":              "Person",
 		"preferredUsername": username,
 		"name":              name,
 		"url":               profileURLStr,
+		"inbox":             actor + "/inbox",
+		"outbox":            actor + "/outbox",
+		"followers":         actor + "/followers",
+		"following":         actor + "/following",
 	}
 	if avatar != "" {
 		p["icon"] = map[string]any{"type": "Image", "url": avatar}
-	}
-	if withContext {
-		p["@context"] = asContext
 	}
 	return p
 }
@@ -62,7 +73,7 @@ func mediaObject(mediaType, url string, width, height int) map[string]any {
 }
 
 func actorURL(baseURL, username string) string {
-	return baseURL + "/users/" + pathEscape(username)
+	return baseURL + "/users/" + url.PathEscape(username)
 }
 
 func statusURL(baseURL, username, postType, shortcode string, mediaIndex int, specified, gallery bool) string {
@@ -73,7 +84,7 @@ func statusURL(baseURL, username, postType, shortcode string, mediaIndex int, sp
 func (a *App) buildActivityStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 
-	postURL := baseURL + "/" + normalizePostType(postType) + "/" + pathEscape(post.Shortcode)
+	postURL := baseURL + "/" + normalizePostType(postType) + "/" + url.PathEscape(post.Shortcode)
 	id := statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	selection := selectActivityAttachments(post, mediaIndex, specified)
 
@@ -118,14 +129,6 @@ func imageMediaType(rawURL string) string {
 	}
 }
 
-func (a *App) buildProfileAccount(baseURL string, p Profile) []byte {
-	person := personObject(baseURL, p.Username, profileDisplayName(p), profileURL(p.Username), p.ProfilePic, true)
-	if bio := profileBioHTML(p); bio != "" {
-		person["summary"] = bio
-	}
-	return jsonBytes(person)
-}
-
 func profileStatusURL(baseURL, username string) string {
 	return actorURL(baseURL, username) + "/statuses/" + profileSnowcode(username)
 }
@@ -134,6 +137,9 @@ func profileDigestContent(p Profile) string {
 	content := "<p><b>" + htmlEscape(profileStatsLine(p)) + "</b></p>"
 	if bio := profileBioHTML(p); bio != "" {
 		content += bio
+	}
+	if p.IsPrivate {
+		content += "<p>" + htmlEscape(profilePrivateNotice) + "</p>"
 	}
 	return content
 }
@@ -144,7 +150,7 @@ func (a *App) buildProfileActivityStatus(baseURL string, p Profile) []byte {
 		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), m.Thumbnail, m.Width, m.Height))
 	}
 	return noteObject(profileStatusURL(baseURL, p.Username), actorURL(baseURL, p.Username),
-		profileDigestContent(p), baseURL+"/"+pathEscape(p.Username), "", attachment)
+		profileDigestContent(p), baseURL+"/"+url.PathEscape(p.Username), "", attachment)
 }
 
 func (a *App) buildFallbackAccount(baseURL, username string) []byte {
@@ -152,12 +158,27 @@ func (a *App) buildFallbackAccount(baseURL, username string) []byte {
 	if safe == "" {
 		safe = a.cfg.BrandName
 	}
-	return jsonBytes(personObject(baseURL, safe, safe, profileURL(safe), "", true))
+	return jsonBytes(personObject(baseURL, safe, safe, actorURL(baseURL, safe), ""))
 }
 
-func (a *App) buildRateLimitActivityStatus(baseURL, shortcode string) []byte {
-	content := "<p><b>" + htmlEscape(rateLimitTitle) + "</b></p><p>" + htmlEscape(rateLimitDescription) + "</p>"
-	id := statusURL(baseURL, a.cfg.BrandName, "p", shortcode, 0, false, false)
-	postURL := instagramOrigin + "/p/" + pathEscape(shortcode) + "/"
-	return noteObject(id, actorURL(baseURL, a.cfg.BrandName), content, postURL, isoTime(nowUTC()), nil)
+func (a *App) handleUserCollection(req *http.Request, username, name string) resp {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		r := textResp(405, "Method Not Allowed")
+		r.headers["Allow"] = "GET, HEAD"
+		return r
+	}
+
+	switch name {
+	case "inbox", "outbox", "followers", "following":
+		body := jsonBytes(map[string]any{
+			"@context":     asContext,
+			"id":           actorURL(a.publicBaseURL(req), username) + "/" + name,
+			"type":         "OrderedCollection",
+			"totalItems":   0,
+			"orderedItems": []any{},
+		})
+		return cacheable(activityJSONResp(200, body), edgeCacheSeconds)
+	default:
+		return resp{status: 404, headers: map[string]string{}}
+	}
 }

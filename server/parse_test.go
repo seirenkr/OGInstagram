@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const sampleCarousel = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{
+const sampleCarousel = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
   "code":"DZWI_exgXz7","media_type":8,
   "user":{"username":"designcompass","full_name":"Design Compass","profile_pic_url":"https://cdn/pp.jpg"},
   "caption":{"text":"hello\nworld"},"like_count":226,"comment_count":5,
@@ -13,7 +13,7 @@ const sampleCarousel = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":
     {"media_type":1,"original_width":1080,"original_height":1350,"image_versions2":{"candidates":[{"url":"https://cdn/img1.jpg","width":1080,"height":1350}]}},
     {"media_type":2,"original_width":720,"original_height":1280,"image_versions2":{"candidates":[{"url":"https://cdn/vcover.jpg","width":720,"height":1280}]},"video_versions":[{"url":"https://cdn/vid.mp4"}]}
   ]
-}}}}`
+}]}}}`
 
 func TestParseCarousel(t *testing.T) {
 	post, err := parseInstagramPost(sampleCarousel)
@@ -66,7 +66,7 @@ func TestNormalizeCDNHost(t *testing.T) {
 	}
 }
 
-const sampleLoggedOut = `{"data":{"xig_polaris_media":{"__typename":"XIGPolarisVideoMedia","if_not_gated_logged_out":{
+const sampleLoggedOut = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
   "pk":"3929188310019024770","code":"DaHR_NCTSeC","taken_at":1782615823,
   "media_type":2,"product_type":"clips","like_count":13215,"comment_count":49,
   "caption":{"text":"初アリーナツアー 開催決定👑🌈✨\n\n#CUTIESTREET"},
@@ -74,7 +74,7 @@ const sampleLoggedOut = `{"data":{"xig_polaris_media":{"__typename":"XIGPolarisV
   "user":{"pk":"67661243995","username":"cutie_street_","full_name":"CUTIE STREET","profile_pic_url":"https://cdn/pp.jpg"},
   "image_versions2":{"candidates":[{"url":"https://cdn/cover_big.jpg","width":1206,"height":2144},{"url":"https://cdn/cover_small.jpg","width":640,"height":1138}]},
   "video_versions":[{"type":101,"url":"https://cdn/video.mp4"}]
-}}}}`
+}]}}}`
 
 func TestParseLoggedOut(t *testing.T) {
 	post, err := parseInstagramPost(sampleLoggedOut)

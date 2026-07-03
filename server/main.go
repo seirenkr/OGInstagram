@@ -1,13 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -17,7 +16,9 @@ func main() {
 			if len(groups) == 0 {
 				switch a.Key {
 				case slog.TimeKey:
-					return slog.Attr{}
+					return slog.Attr{} // Workers Logs adds its own timestamp
+				case slog.MessageKey:
+					a.Key = "message" // Workers Logs displays the "message" JSON key in the log list
 				case slog.LevelKey:
 					a.Value = slog.StringValue(strings.ToLower(a.Value.String()))
 				}
@@ -29,19 +30,19 @@ func main() {
 	cfg := configFromEnv()
 	assets, err := loadAssets(cfg.AssetsDir)
 	if err != nil {
-		slog.Error("assets_load_failed", "dir", cfg.AssetsDir, "err", err.Error())
+		slog.Error("failed to load assets", "dir", cfg.AssetsDir, "err", err.Error())
 		os.Exit(1)
 	}
 	app := newApp(cfg, newSessionPool(cfg), assets)
 
-	slog.Info("container_start", "service", serviceName, "version", cfg.Version,
+	slog.Info("container started", "service", serviceName, "version", cfg.Version,
 		"proxies", len(app.pool.sessions), "port", cfg.Port)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", app.handle)
 
 	if err := http.ListenAndServe("0.0.0.0:"+strconv.Itoa(cfg.Port), mux); err != nil {
-		slog.Error("server_exit", "err", err.Error())
+		slog.Error("server exited", "err", err.Error())
 		os.Exit(1)
 	}
 }
@@ -83,7 +84,7 @@ func cacheable(r resp, seconds int) resp {
 	return r
 }
 func cacheableHome(r resp) resp {
-	r.headers["Cache-Control"] = "public, max-age=" + strconv.Itoa(homeBrowserCacheSecs) + ", s-maxage=" + strconv.Itoa(homeEdgeCacheSeconds)
+	r.headers["Cache-Control"] = "public, max-age=" + strconv.Itoa(homeBrowserCacheSeconds) + ", s-maxage=" + strconv.Itoa(homeEdgeCacheSeconds)
 	return r
 }
 func tagFetch(r resp, meta *fetchMeta) resp {
@@ -111,10 +112,7 @@ func (a *App) route(req *http.Request) resp {
 		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), &l)))
 	}
 	if path == "/_container/health" {
-		return jsonResp(200, mustJSON(map[string]any{"ok": true, "service": serviceName + "-container"}))
-	}
-	if path == "/_status" && a.cfg.LocalPreview {
-		return cacheable(jsonResp(200, localPreviewStatus(time.Now())), 60)
+		return jsonResp(200, jsonBytes(map[string]any{"ok": true, "service": serviceName + "-container"}))
 	}
 	if f, ok := a.assets.static(path); ok {
 		r := resp{status: 200, headers: map[string]string{"Content-Type": f.contentType}, body: f.body}
@@ -135,15 +133,14 @@ func (a *App) route(req *http.Request) resp {
 	if len(segments) == 4 && segments[0] == "users" && segments[2] == "statuses" {
 		return a.handleActivity(req, segments[1], segments[3])
 	}
+	if len(segments) == 3 && segments[0] == "users" {
+		return a.handleUserCollection(req, segments[1], segments[2])
+	}
 	if len(segments) == 2 && segments[0] == "users" {
 		return a.handleUserAccount(req, segments[1])
 	}
 	if route := parseEmbedSegments(segments); route != nil {
-		pathIndex := -1
-		if route.HasIndex {
-			pathIndex = route.PathIndex
-		}
-		return a.handleEmbed(req, route.PostType, route.Shortcode, pathIndex)
+		return a.handleEmbed(req, route.PostType, route.Shortcode, route.PathIndex)
 	}
 	if len(segments) == 1 && validUsername(segments[0]) {
 		return a.handleProfile(req, segments[0])
@@ -153,11 +150,7 @@ func (a *App) route(req *http.Request) resp {
 
 func (a *App) handleUserAccount(req *http.Request, username string) resp {
 	baseURL := a.publicBaseURL(req)
-	p, err := a.getProfile(username, nil)
-	if err != nil {
-		return cacheable(activityJSONResp(200, a.buildFallbackAccount(baseURL, username)), errorCacheSeconds(err.Reason))
-	}
-	return cacheable(activityJSONResp(200, a.buildProfileAccount(baseURL, p)), edgeCacheSeconds)
+	return cacheable(activityJSONResp(200, a.buildFallbackAccount(baseURL, username)), edgeCacheSeconds)
 }
 
 func (a *App) handleActivity(req *http.Request, username, code string) resp {
@@ -168,13 +161,10 @@ func (a *App) handleActivity(req *http.Request, username, code string) resp {
 		if err != nil {
 			return textResp(err.Status, err.Message)
 		}
-		return cacheable(activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p)), edgeCacheSeconds)
+		return cacheable(activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p)), cdnEdgeSeconds(profileCDNURLs(p)...))
 	}
 	post, err := a.getPost(sp.Shortcode, nil)
 	if err != nil {
-		if isTransient(err.Reason) {
-			return activityJSONResp(err.Status, a.buildRateLimitActivityStatus(baseURL, sp.Shortcode))
-		}
 		return textResp(err.Status, err.Message)
 	}
 	body := a.buildActivityStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
@@ -189,7 +179,7 @@ func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
 		if err != nil {
 			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
 		}
-		return cacheable(jsonResp(200, a.buildMastodonProfileStatus(baseURL, p)), edgeCacheSeconds)
+		return cacheable(jsonResp(200, a.buildMastodonProfileStatus(baseURL, p)), cdnEdgeSeconds(profileCDNURLs(p)...))
 	}
 	if !validShortcode(sp.Shortcode) {
 		return jsonResp(404, jsonBytes(map[string]any{"error": "Record not found"}))
@@ -219,7 +209,7 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 	meta := &fetchMeta{}
 	p, err := a.getProfile(username, meta)
 	if err != nil {
-		title, desc := profileErrorCard(err.Reason)
+		title, desc := profileErrorCard(err.Reason, a.cfg.SupportURL)
 		embed := a.buildStatusEmbedHTML(baseURL, origin, title, desc)
 		r := htmlResp(200, embed)
 		r.headers["x-og-status"] = strconv.Itoa(err.Status)
@@ -229,14 +219,14 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 		r = cacheable(r, errorCacheSeconds(err.Reason))
 		return tagFetch(r, meta)
 	}
-	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, q.Gallery)), edgeCacheSeconds), meta)
+	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, q.Gallery)), cdnEdgeSeconds(profileCDNURLs(p)...)), meta)
 }
 
 func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathIndex int) resp {
 	q := parseRequestQuery(req.URL.Query())
 	mediaIndex := mediaIndexFromQuery(q, pathIndex)
 	specified := pathIndex >= 0 || querySpecified(q)
-	origin := instagramURLForSelection(postType, shortcode, mediaIndex, specified)
+	origin := instagramPostURL(postType, shortcode, mediaIndex, specified)
 
 	if !botRE.MatchString(req.Header.Get("User-Agent")) {
 		return redirectResp(origin, 307)
@@ -247,7 +237,7 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 	post, err := a.getPost(shortcode, meta)
 	if err != nil {
 		reason := err.Reason
-		title, desc := postErrorCard(reason)
+		title, desc := postErrorCard(reason, a.cfg.SupportURL)
 
 		if reason == reasonMediaNotFound {
 			if r2, t2, d2, ok := a.oembedRefine(shortcode); ok {
@@ -281,7 +271,7 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	post, err := a.getPost(shortcode, meta)
 	if err != nil {
 		if isTransient(err.Reason) {
-			return tagFetch(redirectResp(instagramOrigin+"/p/"+pathEscape(shortcode)+"/", 302), meta)
+			return tagFetch(redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302), meta)
 		}
 		return resp{status: err.Status, headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"}, body: []byte(err.Message)}
 	}
@@ -292,7 +282,7 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 			target = att.Thumbnail
 		}
 	}
-	return tagFetch(cacheable(redirectResp(target, 302), edgeCacheSeconds), meta)
+	return tagFetch(cacheable(redirectResp(target, 302), cdnEdgeSeconds(target)), meta)
 }
 
 func (a *App) publicBaseURL(req *http.Request) string {
@@ -325,9 +315,4 @@ func firstHeaderValue(v string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
-}
-
-func mustJSON(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }

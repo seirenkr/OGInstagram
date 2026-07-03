@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html"
 	"math/big"
 	"net/url"
 	"regexp"
@@ -10,19 +11,38 @@ import (
 	"time"
 )
 
-func shortcodeToPK(shortcode string) string {
+func shortcodePK(shortcode string) *big.Int {
 	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 	n := new(big.Int)
 	base := big.NewInt(64)
 	for _, ch := range shortcode {
 		idx := strings.IndexRune(enc, ch)
 		if idx < 0 {
-			return ""
+			return nil
 		}
 		n.Mul(n, base)
 		n.Add(n, big.NewInt(int64(idx)))
 	}
-	return n.String()
+	return n
+}
+
+// igEpochMs is the Instagram snowflake epoch, 2011-08-24T21:07:01.721Z.
+const igEpochMs = 1314220021721
+
+// shortcodeTime decodes the creation time embedded in a post shortcode: the
+// media PK is a snowflake whose upper bits are milliseconds since the IG
+// epoch. Zero time when the code doesn't decode to a plausible snowflake
+// (invalid chars, empty, or the 24-char private-post codes).
+func shortcodeTime(shortcode string) time.Time {
+	pk := shortcodePK(shortcode)
+	if pk == nil || pk.Sign() == 0 || !pk.IsInt64() {
+		return time.Time{}
+	}
+	t := time.UnixMilli((pk.Int64() >> 23) + igEpochMs).UTC()
+	if t.After(time.Now()) {
+		return time.Time{}
+	}
+	return t
 }
 
 func jsonBytes(v any) []byte {
@@ -30,25 +50,13 @@ func jsonBytes(v any) []byte {
 	return append(b, '\n')
 }
 
-var htmlEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	"\"", "&quot;",
-	"'", "&#39;",
-)
-
-func htmlEscape(v string) string { return htmlEscaper.Replace(v) }
-
-func attr(v string) string { return htmlEscape(v) }
+func htmlEscape(v string) string { return html.EscapeString(v) }
 
 var compactRE = regexp.MustCompile(`>\s+<`)
 
 func compactHTML(v string) string {
 	return compactRE.ReplaceAllString(strings.TrimSpace(v), "><")
 }
-
-func pathEscape(v string) string { return url.PathEscape(v) }
 
 func normalizeCDNHost(raw string) string {
 	if raw == "" {
@@ -139,10 +147,54 @@ func postDescription(caption, reaction string) string {
 }
 
 func isoTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
 	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
-func nowUTC() time.Time { return time.Now().UTC() }
+const (
+	cdnFallbackTTL = 24 * time.Hour
+	cdnTTLMargin   = 30 * time.Minute
+)
+
+// cdnExpiry reads the "oe" query param (hex Unix expiry) from an Instagram CDN URL.
+func cdnExpiry(rawURL string) (time.Time, bool) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return time.Time{}, false
+	}
+	n, err := strconv.ParseInt(u.Query().Get("oe"), 16, 64)
+	if err != nil || n <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(n, 0), true
+}
+
+// cacheTTLFromURLs caches until the earliest CDN URL expiry (minus a margin), so
+// a cached post never hands out a dead media URL. Falls back to cdnFallbackTTL
+// when no URL carries an oe expiry.
+func cacheTTLFromURLs(urls ...string) time.Duration {
+	var earliest time.Time
+	for _, u := range urls {
+		if t, ok := cdnExpiry(u); ok && (earliest.IsZero() || t.Before(earliest)) {
+			earliest = t
+		}
+	}
+	if earliest.IsZero() {
+		return cdnFallbackTTL
+	}
+	if ttl := time.Until(earliest) - cdnTTLMargin; ttl > time.Minute {
+		return ttl
+	}
+	return time.Minute
+}
+
+// cdnEdgeSeconds converts the same oe-based TTL into an edge s-maxage, so a
+// cached response embedding raw CDN URLs never outlives the media it points at.
+func cdnEdgeSeconds(urls ...string) int {
+	return int(cacheTTLFromURLs(urls...) / time.Second)
+}
 
 func mediaIndexFor(post Post, requested int) int {
 	if len(post.Attachments) == 0 || requested < 0 {
@@ -154,8 +206,8 @@ func mediaIndexFor(post Post, requested int) int {
 	return requested
 }
 
-func instagramURLForSelection(postType, shortcode string, mediaIndex int, specified bool) string {
-	target := instagramOrigin + "/" + normalizePostType(postType) + "/" + pathEscape(shortcode) + "/"
+func instagramPostURL(postType, shortcode string, mediaIndex int, specified bool) string {
+	target := instagramOrigin + "/" + normalizePostType(postType) + "/" + url.PathEscape(shortcode) + "/"
 	if specified {
 		idx := mediaIndex
 		if idx < 0 {
@@ -171,7 +223,7 @@ func offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
 	if thumbnail {
 		suffix = "?thumbnail=1"
 	}
-	return baseURL + "/offload/" + pathEscape(shortcode) + "/" + strconv.Itoa(index+1) + suffix
+	return baseURL + "/offload/" + url.PathEscape(shortcode) + "/" + strconv.Itoa(index+1) + suffix
 }
 
 func videoDisplaySize(att Attachment) (int, int) {

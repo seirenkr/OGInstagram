@@ -12,8 +12,7 @@ var botRE = regexp.MustCompile(`(?i)bot|discordbot|telegrambot|facebook|twitterb
 type EmbedRoute struct {
 	PostType  string
 	Shortcode string
-	PathIndex int
-	HasIndex  bool
+	PathIndex int // -1 when the path carries no media index
 }
 
 var shortcodeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,24}$`)
@@ -31,31 +30,33 @@ func isPostRouteType(value string) bool {
 	return value == "p" || value == "reel" || value == "reels"
 }
 
-func optionalPathIndex(segments []string, index int) (int, bool, bool) {
+// optionalPathIndex returns the numeric segment at index (-1 when absent);
+// ok is false when the segment is present but not a number.
+func optionalPathIndex(segments []string, index int) (int, bool) {
 	if len(segments) <= index {
-		return 0, false, true
+		return -1, true
 	}
 	n, err := strconv.Atoi(segments[index])
 	if err != nil {
-		return 0, false, false
+		return -1, false
 	}
-	return n, true, true
+	return n, true
 }
 
 func parseEmbedSegments(segments []string) *EmbedRoute {
 	if (len(segments) == 2 || len(segments) == 3) && isPostRouteType(segments[0]) && validShortcode(segments[1]) {
-		idx, has, ok := optionalPathIndex(segments, 2)
+		idx, ok := optionalPathIndex(segments, 2)
 		if !ok {
 			return nil
 		}
-		return &EmbedRoute{PostType: normalizePostType(segments[0]), Shortcode: segments[1], PathIndex: idx, HasIndex: has}
+		return &EmbedRoute{PostType: normalizePostType(segments[0]), Shortcode: segments[1], PathIndex: idx}
 	}
 	if (len(segments) == 3 || len(segments) == 4) && isPostRouteType(segments[1]) && validShortcode(segments[2]) {
-		idx, has, ok := optionalPathIndex(segments, 3)
+		idx, ok := optionalPathIndex(segments, 3)
 		if !ok {
 			return nil
 		}
-		return &EmbedRoute{PostType: normalizePostType(segments[1]), Shortcode: segments[2], PathIndex: idx, HasIndex: has}
+		return &EmbedRoute{PostType: normalizePostType(segments[1]), Shortcode: segments[2], PathIndex: idx}
 	}
 	return nil
 }

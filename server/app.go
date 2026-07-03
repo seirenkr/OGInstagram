@@ -44,18 +44,77 @@ func (a *App) getPost(shortcode string, meta *fetchMeta) (Post, *AppError) {
 	}
 	return a.posts.get(shortcode, meta, func() (Post, time.Duration, *AppError) {
 		post, err := a.fetchPost(shortcode)
-		return post, time.Duration(a.cfg.CacheTTLSeconds) * time.Second, err
+		urls := make([]string, 0, len(post.Attachments)*2)
+		for _, att := range post.Attachments {
+			urls = append(urls, att.URL, att.Thumbnail)
+		}
+		return post, cacheTTLFromURLs(urls...), err
 	})
 }
 
 func (a *App) fetchPost(shortcode string) (Post, *AppError) {
-
-	post, err := a.fetchPostWith(webLoggedOutSpec(shortcode))
+	post, err := raceEmbedFirst(
+		func() (Post, *AppError) { return a.fetchPostEmbed(shortcode) },
+		func() (Post, *AppError) { return a.fetchPostWith(webLoggedOutSpec(shortcode)) },
+	)
 	if err != nil {
 		return Post{}, err
 	}
+	if post.CreatedAt.IsZero() {
+		post.CreatedAt = shortcodeTime(shortcode)
+	}
 	a.flagOversizedVideos(&post)
 	return post, nil
+}
+
+// raceEmbedFirst starts the proxy-free embed fetch immediately and adds the
+// proxied GraphQL fetch once the embed fails or hasn't answered within
+// fetchHedgeDelay; the first success wins. Worst case is bounded by a single
+// fetchTimeout after the last launch instead of the sum of serial attempts.
+func raceEmbedFirst(embed, gql func() (Post, *AppError)) (Post, *AppError) {
+	type result struct {
+		post Post
+		err  *AppError
+	}
+	results := make(chan result, 2)
+	launch := func(f func() (Post, *AppError)) {
+		go func() {
+			p, err := f()
+			results <- result{p, err}
+		}()
+	}
+	launch(embed)
+	pending := 1
+	gqlLaunched := false
+	launchGQL := func() {
+		if !gqlLaunched {
+			gqlLaunched = true
+			pending++
+			launch(gql)
+		}
+	}
+
+	timer := time.NewTimer(fetchHedgeDelay)
+	defer timer.Stop()
+
+	var lastErr *AppError
+	for pending > 0 {
+		select {
+		case <-timer.C:
+			launchGQL()
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				return r.post, nil
+			}
+			// Prefer a permanent error (real 404) over a transient one.
+			if lastErr == nil || (isTransient(lastErr.Reason) && !isTransient(r.err.Reason)) {
+				lastErr = r.err
+			}
+			launchGQL()
+		}
+	}
+	return Post{}, lastErr
 }
 
 func (a *App) fetchPostWith(spec gqlSpec) (Post, *AppError) {
@@ -76,7 +135,7 @@ func (a *App) flagOversizedVideos(post *Post) {
 		wg.Add(1)
 		go func(att *Attachment) {
 			defer wg.Done()
-			if a.contentLength(att.URL) > maxInlineVideoBytes {
+			if a.contentLength(post.Shortcode, att.URL) > maxInlineVideoBytes {
 				att.OversizedInline = true
 			}
 		}(att)
@@ -84,8 +143,9 @@ func (a *App) flagOversizedVideos(post *Post) {
 	wg.Wait()
 }
 
-func (a *App) contentLength(rawURL string) int64 {
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+func (a *App) contentLength(target, rawURL string) int64 {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), headProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
 	if err != nil {
@@ -94,9 +154,11 @@ func (a *App) contentLength(rawURL string) int64 {
 	req.Header.Set("User-Agent", instagramAppUA)
 	resp, err := a.direct.Do(req)
 	if err != nil {
+		logOutbound("videosize", target, "direct", http.MethodHead, rawURL, started, 502, 0, igErr(502, reasonConnection, err.Error()))
 		return -1
 	}
 	resp.Body.Close()
+	logOutbound("videosize", target, "direct", http.MethodHead, rawURL, started, resp.StatusCode, int(resp.ContentLength), nil)
 	if resp.StatusCode != 200 {
 		return -1
 	}

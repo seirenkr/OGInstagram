@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,27 +24,30 @@ type gqlSpec struct {
 }
 
 func webLoggedOutSpec(shortcode string) gqlSpec {
-	pk := shortcodeToPK(shortcode)
-	variables, _ := json.Marshal(map[string]string{"media_id": pk})
+	variables, _ := json.Marshal(map[string]any{
+		"shortcode": shortcode,
+		"__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": false,
+	})
 	lsd := newLSD()
 	form := url.Values{}
-	form.Set("lsd", lsd)
 	form.Set("variables", string(variables))
 	form.Set("doc_id", instagramWebLoggedOutDocID)
 	form.Set("server_timestamps", "true")
+	form.Set("lsd", lsd)
 	return gqlSpec{
 		name:   "post",
 		target: shortcode,
 		method: http.MethodPost,
-		url:    instagramOrigin + "/api/graphql",
+		url:    instagramOrigin + "/graphql/query",
 		body:   form.Encode(),
 		headers: map[string]string{
-			"User-Agent":         instagramWebUA,
+			// A modern-browser UA makes IG return an HTML login shell instead of
+			// JSON here; a minimal UA gets the anonymous JSON payload.
+			"User-Agent":         "Mozilla/5.0",
+			"Accept":             "*/*",
 			"Content-Type":       "application/x-www-form-urlencoded",
-			"Sec-Fetch-Site":     "same-origin",
-			"X-FB-Friendly-Name": "PolarisLoggedOutDesktopWWWPostRootContentQuery",
+			"X-FB-Friendly-Name": "PolarisPostRootQuery",
 			"X-FB-LSD":           lsd,
-			"X-Requested-With":   "XMLHttpRequest",
 		},
 	}
 }
@@ -51,6 +55,9 @@ func webLoggedOutSpec(shortcode string) gqlSpec {
 func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	sessions := a.pool.pick(fetchRaceCount, nil)
 	if len(sessions) == 0 {
+		if a.pool.overBudget() {
+			return "", ephemeralErr(503, reasonBudgetExceeded, "hourly request budget reached")
+		}
 		if len(a.pool.sessions) == 0 {
 			return "", igErr(503, reasonConnection, "Instagram proxy sessions are not configured")
 		}
@@ -120,25 +127,41 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	return "", lastErr
 }
 
+// logOutbound writes one access-log style line per outbound request, e.g.
+// "POST https://www.instagram.com/graphql/query 200 812ms", so the Workers
+// Logs list is scannable without expanding entries; details stay as fields.
+func logOutbound(op, target, session, method, rawURL string, started time.Time, status, bytes int, ferr *AppError) {
+	endpoint := rawURL
+	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
+		endpoint = endpoint[:i]
+	}
+	ms := time.Since(started).Milliseconds()
+	msg := method + " " + endpoint + " " + strconv.Itoa(status) + " " + strconv.FormatInt(ms, 10) + "ms"
+	if ferr == nil {
+		slog.Info(msg, "op", op, "target", target, "status", status, "session", session, "ms", ms, "bytes", bytes)
+		return
+	}
+	if ferr.Status == 499 { // cancelled race loser; not a real outcome
+		return
+	}
+	if ferr.Reason != "" {
+		msg += " reason=" + ferr.Reason
+	}
+	slog.Warn(msg, "op", op, "target", target, "status", status,
+		"reason", ferr.Reason, "session", session, "ms", ms, "detail", ferr.Message)
+}
+
 func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body string, ferr *AppError) {
 	started := time.Now()
 	reqCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 
 	defer func() {
-		ms := time.Since(started).Milliseconds()
-		endpoint := spec.url
-		if i := strings.IndexByte(endpoint, '?'); i >= 0 {
-			endpoint = endpoint[:i]
+		status := 200
+		if ferr != nil {
+			status = ferr.Status
 		}
-		msg := spec.method + " " + endpoint
-		switch {
-		case ferr == nil:
-			slog.Info(msg, "op", spec.name, "target", spec.target, "status", 200, "session", s.name, "ms", ms, "bytes", len(body))
-		case ferr.Status != 499:
-			slog.Warn(msg, "op", spec.name, "target", spec.target, "status", ferr.Status,
-				"reason", ferr.Reason, "session", s.name, "ms", ms, "detail", ferr.Message)
-		}
+		logOutbound(spec.name, spec.target, s.name, spec.method, spec.url, started, status, len(body), ferr)
 	}()
 
 	var bodyReader io.Reader
@@ -222,15 +245,17 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 	}
 
 	a.pool.recordLatency(s, time.Since(started))
+	a.pool.countRequest()
 	return bodyText, nil
 }
 
-func (a *App) proxyRawGet(rawURL string, headers map[string]string) (int, string, bool) {
+func (a *App) proxyRawGet(op, target, rawURL string, headers map[string]string) (int, string, bool) {
 	sessions := a.pool.pick(1, nil)
 	if len(sessions) == 0 {
 		return 0, "", false
 	}
 	s := sessions[0]
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -242,10 +267,12 @@ func (a *App) proxyRawGet(rawURL string, headers map[string]string) (int, string
 	}
 	resp, err := s.getClient().Do(req)
 	if err != nil {
+		logOutbound(op, target, s.name, http.MethodGet, rawURL, started, 502, 0, igErr(502, reasonConnection, err.Error()))
 		return 0, "", false
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	logOutbound(op, target, s.name, http.MethodGet, rawURL, started, resp.StatusCode, len(raw), nil)
 	return resp.StatusCode, string(raw), true
 }
 
@@ -263,7 +290,7 @@ func (c Config) oembedURL(shortcode string) string {
 }
 
 func (a *App) oembedRefine(shortcode string) (reason, title, desc string, override bool) {
-	status, body, ok := a.proxyRawGet(a.cfg.oembedURL(shortcode), map[string]string{
+	status, body, ok := a.proxyRawGet("oembed", shortcode, a.cfg.oembedURL(shortcode), map[string]string{
 		"User-Agent":  instagramAppUA,
 		"Accept":      "*/*",
 		"X-IG-App-ID": instagramAppID,
