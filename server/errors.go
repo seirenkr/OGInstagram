@@ -2,7 +2,6 @@ package main
 
 const (
 	reasonConnection     = "ClientConnectionError"
-	reasonIncompleteRead = "ClientIncompleteReadError"
 	reasonJSONDecode     = "ClientJSONDecodeError"
 	reasonLoginRequired  = "ClientLoginRequired"
 	reasonUnauthorized   = "ClientUnauthorizedError"
@@ -13,6 +12,7 @@ const (
 	reasonBadRequest     = "ClientBadRequestError"
 	reasonNotFound       = "ClientNotFoundError"
 	reasonMediaNotFound  = "MediaNotFound"
+	reasonBudgetExceeded = "HourlyBudgetExceeded"
 )
 
 type reasonInfo struct {
@@ -22,7 +22,6 @@ type reasonInfo struct {
 
 var reasonRegistry = map[string]reasonInfo{
 	reasonConnection:     {rotateIP: true, transient: true},
-	reasonIncompleteRead: {rotateIP: true, transient: true},
 	reasonJSONDecode:     {rotateIP: true, transient: true},
 	reasonLoginRequired:  {rotateIP: true, transient: true},
 	reasonUnauthorized:   {rotateIP: true, transient: true},
@@ -33,6 +32,7 @@ var reasonRegistry = map[string]reasonInfo{
 	reasonBadRequest:     {rotateIP: false, transient: false},
 	reasonNotFound:       {rotateIP: false, transient: false},
 	reasonMediaNotFound:  {rotateIP: false, transient: false},
+	reasonBudgetExceeded: {rotateIP: false, transient: true},
 }
 
 func reasonOf(reason string) reasonInfo {
@@ -47,7 +47,7 @@ func isTransient(reason string) bool  { return reasonOf(reason).transient }
 
 func errorCacheSeconds(reason string) int {
 	if isTransient(reason) {
-		return transientErrorCacheSecond
+		return transientErrorCacheSeconds
 	}
-	return permanentErrorCacheSecond
+	return permanentErrorCacheSeconds
 }

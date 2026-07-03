@@ -10,8 +10,9 @@ func parseInstagramPost(body string) (Post, *AppError) {
 	root := gjson.Parse(body)
 	data := root.Get("data")
 
-	if m := data.Get("xig_polaris_media.if_not_gated_logged_out"); present(m) {
-		return parseV1(m)
+	// PolarisPostRootQuery (doc_id) returns a v1-shaped item under this key.
+	if it := data.Get("xdt_api__v1__media__shortcode__web_info.items.0"); present(it) {
+		return parseV1(it)
 	}
 	if data.Exists() {
 		return Post{}, igErr(404, reasonMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
@@ -26,9 +27,6 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	}
 	username := user.Get("username").String()
 	fullName := user.Get("full_name").String()
-	if fullName == "" {
-		fullName = username
-	}
 	shortcode := item.Get("code").String()
 	if shortcode == "" {
 		shortcode = item.Get("shortcode").String()
@@ -212,5 +210,5 @@ func unixTime(seconds int64) time.Time {
 	if seconds > 0 {
 		return time.Unix(seconds, 0).UTC()
 	}
-	return time.Now().UTC()
+	return time.Time{} // unknown; consumers null-handle
 }

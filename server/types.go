@@ -26,19 +26,17 @@ type Post struct {
 }
 
 type Config struct {
-	Port            int
-	Version         string
-	DecodoUser      string
-	DecodoPass      string
-	BrandName       string
-	BrandColor      string
-	SupportURL      string
-	GitHubURL       string
-	BaseURL         string
-	CacheTTLSeconds int
-	HourlyLimit     int
-	AssetsDir       string
-	LocalPreview    bool
+	Port              int
+	Version           string
+	ProxyUser         string
+	ProxyPass         string
+	BrandName         string
+	BrandColor        string
+	SupportURL        string
+	GitHubURL         string
+	BaseURL           string
+	GlobalHourlyLimit int
+	AssetsDir         string
 }
 
 type RequestQuery struct {

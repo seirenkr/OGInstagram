@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
@@ -118,6 +119,107 @@ func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
 	}
 	if m["url"] != "https://oginstagram.com/offload/CODE/1" {
 		t.Errorf("url = %v, want playable offload", m["url"])
+	}
+}
+
+func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
+	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	post := Post{
+		Shortcode: "CODE",
+		Username:  "user",
+		StatsLine: "stats",
+		Attachments: []Attachment{{
+			Kind: "image", URL: "https://cdn/x.jpg", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080,
+		}},
+	}
+
+	var st map[string]any
+	if err := json.Unmarshal(a.buildMastodonStatus("https://oginstagram.com", post, "p", 0, false, false), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st["created_at"] != nil {
+		t.Fatalf("missing post timestamp must be JSON null, got %#v", st["created_at"])
+	}
+	for _, k := range []string{"edited_at", "poll", "card", "language", "text", "quote"} {
+		if st[k] != nil {
+			t.Errorf("%s must be JSON null when unavailable, got %#v", k, st[k])
+		}
+	}
+	if st["quotes_count"] != float64(0) {
+		t.Errorf("quotes_count = %#v, want 0", st["quotes_count"])
+	}
+	if _, ok := st["tagged_collections"].([]any); !ok {
+		t.Errorf("tagged_collections must be a present array, got %#v", st["tagged_collections"])
+	}
+	qa, ok := st["quote_approval"].(map[string]any)
+	if !ok || qa["current_user"] != "denied" {
+		t.Fatalf("quote_approval wrong: %#v", st["quote_approval"])
+	}
+
+	acct, ok := st["account"].(map[string]any)
+	if !ok {
+		t.Fatal("account object missing")
+	}
+	if acct["display_name"] != "user" {
+		t.Errorf("display_name should fall back to username, got %#v", acct["display_name"])
+	}
+	if acct["acct"] != "user" {
+		t.Errorf("acct must remain local username without domain, got %#v", acct["acct"])
+	}
+	if acct["url"] != "https://www.instagram.com/user/" || acct["uri"] != "https://www.instagram.com/user/" {
+		t.Errorf("account URLs wrong: url=%#v uri=%#v", acct["url"], acct["uri"])
+	}
+	for _, k := range []string{"note", "avatar", "avatar_static", "avatar_description", "header", "header_static", "header_description", "discoverable", "created_at", "last_status_at", "hide_collections"} {
+		if acct[k] != nil {
+			t.Errorf("account %s must be JSON null when unavailable, got %#v", k, acct[k])
+		}
+	}
+	if acct["indexable"] != false || acct["show_media"] != false || acct["show_media_replies"] != false || acct["show_featured"] != false {
+		t.Errorf("account boolean defaults wrong: %#v", acct)
+	}
+	fa, ok := acct["feature_approval"].(map[string]any)
+	if !ok || fa["current_user"] != "missing" {
+		t.Fatalf("feature_approval wrong: %#v", acct["feature_approval"])
+	}
+}
+
+func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
+	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	taken := time.Date(2026, 4, 23, 10, 1, 13, 0, time.UTC)
+	p := Profile{
+		Username:       "user",
+		UserID:         "123",
+		FullName:       "User Name",
+		Biography:      "hello #tag",
+		ProfilePic:     "https://cdn/avatar.jpg",
+		FollowerCount:  7,
+		FollowingCount: 3,
+		MediaCount:     11,
+		RecentMedia:    []ProfileMedia{{ID: "m1", Thumbnail: "https://cdn/thumb.jpg", Width: 640, Height: 480, TakenAt: taken}},
+	}
+
+	var st map[string]any
+	if err := json.Unmarshal(a.buildMastodonProfileStatus("https://oginstagram.com", p), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st["created_at"] != "2026-04-23T10:01:13.000Z" {
+		t.Fatalf("status created_at = %#v", st["created_at"])
+	}
+	acct := st["account"].(map[string]any)
+	if acct["id"] != "123" || acct["display_name"] != "User Name" {
+		t.Errorf("account identity wrong: %#v", acct)
+	}
+	if acct["created_at"] != nil {
+		t.Errorf("account creation date is unknown and must be null, got %#v", acct["created_at"])
+	}
+	if acct["last_status_at"] != "2026-04-23" {
+		t.Errorf("last_status_at = %#v", acct["last_status_at"])
+	}
+	if acct["followers_count"] != float64(7) || acct["following_count"] != float64(3) || acct["statuses_count"] != float64(11) {
+		t.Errorf("account counts wrong: %#v", acct)
+	}
+	if acct["note"] == nil || acct["avatar"] != "https://cdn/avatar.jpg" {
+		t.Errorf("known profile fields missing: %#v", acct)
 	}
 }
 

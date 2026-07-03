@@ -13,50 +13,58 @@ const (
 	instagramOrigin = "https://www.instagram.com"
 	instagramAppID  = "936619743392459"
 
-	instagramWebLoggedOutDocID = "27130156389949648"
+	instagramWebLoggedOutDocID = "27128499623469141"
 
 	snowcodeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}[]\":,.-_"
 
-	proxyGateEndpoint       = "gate.decodo.com:7000"
-	proxyCountry            = "us"
-	proxySessionDurationMin = 10
-	proxySessionCount       = 10
+	proxyGateEndpoint = "gw.dataimpulse.com:823"
+	proxyCountry      = "us"
+	proxySessionCount = 10
 
-	defaultCacheTTLSeconds  = 3600
 	defaultProxyHourlyLimit = 1000
+	// defaultGlobalHourlyLimit caps total proxy requests/hour across all sessions
+	// for predictable (residential-bandwidth) cost. 0 = unlimited.
+	// Sized for ~100GB/month: 137MB/h at an assumed ~55KB wire per GraphQL
+	// round trip ≈ 2500 req/h; tune against the provider bandwidth dashboard.
+	defaultGlobalHourlyLimit = 2500
 
-	transientErrorCacheSecond = 300
-	permanentErrorCacheSecond = 3600
+	transientErrorCacheSeconds = 300
+	permanentErrorCacheSeconds = 3600
 
-	fetchRaceCount     = 3
-	fetchRaceExplorers = 1
-	ewmaAlpha          = 0.3
-	fetchTimeout       = 4500 * time.Millisecond
+	fetchRaceCount = 1
+	ewmaAlpha      = 0.3
+	fetchTimeout   = 4500 * time.Millisecond
 
 	fetchHedgeDelay = 1500 * time.Millisecond
-	fetchHedgeCount = 2
+	fetchHedgeCount = 1
+
+	// headProbeTimeout caps the CDN HEAD size probe so a slow CDN can't hold
+	// the whole post response; on timeout the video counts as not oversized.
+	headProbeTimeout = 1500 * time.Millisecond
 
 	rotateCooldown  = 3 * time.Second
-	maxCacheEntries = 500
+	maxCacheEntries = 5000
 
 	maxResponseBytes = 1 << 20
 
 	maxInlineVideoBytes = 200 << 20
 
-	edgeCacheSeconds     = 3600
-	homeEdgeCacheSeconds = 120
-	homeBrowserCacheSecs = 60
-	iconCacheSeconds     = 86400
+	edgeCacheSeconds        = 3600
+	homeEdgeCacheSeconds    = 120
+	homeBrowserCacheSeconds = 60
+	iconCacheSeconds        = 86400
 
-	serviceName          = "oginstagram"
-	rateLimitTitle       = "Rate Limit Exceeded"
-	rateLimitDescription = "Instagram fetching is temporarily rate limited. Please try again later."
+	serviceName = "oginstagram"
 
-	instagramAppUA  = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
-	instagramWebUA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
+	budgetTitle       = "Hourly limit reached"
+	budgetDescription = "This service has reached its hourly request limit. Please try again later."
+
+	instagramAppUA = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
+	instagramWebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
+	// embedUA is intentionally non-browser: IG server-renders the embed payload
+	// only for crawler-like UAs (a modern Chrome UA gets an empty JS shell).
+	embedUA         = "facebookexternalhit/1.1"
 	instagramAsbdID = "129477"
-
-	profileCacheTTLSeconds = 1800
 )
 
 func configFromEnv() Config {
@@ -86,40 +94,46 @@ func configFromEnv() Config {
 		}
 	}
 	return Config{
-		Port:            port,
-		Version:         version,
-		DecodoUser:      strings.TrimSpace(os.Getenv("DECODO_USERNAME")),
-		DecodoPass:      strings.TrimSpace(os.Getenv("DECODO_PASSWORD")),
-		BrandName:       brandName,
-		BrandColor:      brandColor,
-		SupportURL:      supportURL,
-		GitHubURL:       githubURL,
-		BaseURL:         strings.TrimSpace(os.Getenv("BASE_URL")),
-		CacheTTLSeconds: defaultCacheTTLSeconds,
-		HourlyLimit:     defaultProxyHourlyLimit,
-		AssetsDir:       assets,
-		LocalPreview:    preview,
+		Port:              port,
+		Version:           version,
+		ProxyUser:         strings.TrimSpace(os.Getenv("PROXY_USERNAME")),
+		ProxyPass:         strings.TrimSpace(os.Getenv("PROXY_PASSWORD")),
+		BrandName:         brandName,
+		BrandColor:        brandColor,
+		SupportURL:        supportURL,
+		GitHubURL:         githubURL,
+		BaseURL:           strings.TrimSpace(os.Getenv("BASE_URL")),
+		GlobalHourlyLimit: envInt("PROXY_HOURLY_LIMIT", defaultGlobalHourlyLimit),
+		AssetsDir:         assets,
 	}
 }
 
-func decodoProxyURL(user, pass, sessionID string) string {
-	username := "user-" + user + "-country-" + proxyCountry +
-		"-session-" + sessionID + "-sessionduration-" + strconv.Itoa(proxySessionDurationMin)
+func envInt(key string, fallback int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil {
+		return v
+	}
+	return fallback
+}
+
+// proxyURL builds a DataImpulse gateway URL: login__cr.<country>;sessid.<id>
+// pins a residential IP to the session id (sticky ~30 min).
+func proxyURL(user, pass, sessionID string) string {
+	username := user + "__cr." + proxyCountry + ";sessid." + sessionID
 	return "http://" + url.QueryEscape(username) + ":" + url.QueryEscape(pass) + "@" + proxyGateEndpoint
 }
 
-func newSessionID() string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 8)
+func newLSD() string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 23+rand.IntN(5))
 	for i := range b {
 		b[i] = alphabet[rand.IntN(len(alphabet))]
 	}
 	return string(b)
 }
 
-func newLSD() string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 23+rand.IntN(5))
+func newSessionID() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 8)
 	for i := range b {
 		b[i] = alphabet[rand.IntN(len(alphabet))]
 	}

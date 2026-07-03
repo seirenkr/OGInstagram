@@ -90,20 +90,7 @@ func (c *cache[V]) store(key string, entry *cacheEntry[V]) *cacheEntry[V] {
 	if len(c.entries) <= c.maxEntries {
 		return entry
 	}
-	now := time.Now()
-	kept := c.order[:0]
-	for _, k := range c.order {
-		if len(c.entries) <= c.maxEntries {
-			kept = append(kept, k)
-			continue
-		}
-		if e, ok := c.entries[k]; ok && !e.expiresAt.After(now) {
-			delete(c.entries, k)
-			continue
-		}
-		kept = append(kept, k)
-	}
-	c.order = kept
+	// ponytail: plain FIFO eviction; expired entries age out with the queue
 	for len(c.entries) > c.maxEntries && len(c.order) > 0 {
 		oldest := c.order[0]
 		c.order = c.order[1:]

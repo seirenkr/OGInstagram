@@ -16,14 +16,7 @@ const (
 )
 
 func profileURL(username string) string {
-	return instagramOrigin + "/" + pathEscape(username) + "/"
-}
-
-func profileDisplayName(p Profile) string {
-	if p.FullName != "" {
-		return p.FullName
-	}
-	return p.Username
+	return instagramOrigin + "/" + url.PathEscape(username) + "/"
 }
 
 func profileStatsLine(p Profile) string {
@@ -38,7 +31,10 @@ func profileBioHTML(p Profile) string {
 	return "<p>" + captionHTML(bio) + "</p>"
 }
 
-func profileErrorCard(reason string) (title, desc string) {
+func profileErrorCard(reason, supportURL string) (title, desc string) {
+	if reason == reasonBudgetExceeded {
+		return budgetCard(supportURL)
+	}
 	if isTransient(reason) {
 		return "Temporarily unavailable", "Couldn't load this profile right now. Please try again in a moment."
 	}
@@ -97,6 +93,9 @@ func webProfileSpec(username string) gqlSpec {
 func (a *App) fetchProfile(username string) (Profile, *AppError) {
 	body, err := a.raceFetch(webProfileSpec(username))
 	if err != nil {
+		if ep, eerr := a.fetchProfileEmbed(username); eerr == nil {
+			return ep, nil
+		}
 		return Profile{}, err
 	}
 	return parseProfile(body)
@@ -151,12 +150,20 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func profileCDNURLs(p Profile) []string {
+	urls := []string{p.ProfilePic}
+	for _, m := range p.RecentMedia {
+		urls = append(urls, m.Thumbnail)
+	}
+	return urls
+}
+
 func (a *App) getProfile(username string, meta *fetchMeta) (Profile, *AppError) {
 	if !validUsername(username) {
 		return Profile{}, igErr(404, reasonNotFound, "invalid username")
 	}
 	return a.profiles.get(username, meta, func() (Profile, time.Duration, *AppError) {
 		p, err := a.fetchProfile(username)
-		return p, profileCacheTTLSeconds * time.Second, err
+		return p, cacheTTLFromURLs(profileCDNURLs(p)...), err
 	})
 }

@@ -1,12 +1,38 @@
 package main
 
 import (
+	"net/url"
 	"strconv"
 	"time"
 )
 
-func mastodonTime(t time.Time) string {
+func mastodonTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+func mastodonDate(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.UTC().Format("2006-01-02")
+}
+
+func stringOrNil(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+func mastodonPolicy(currentUser string) map[string]any {
+	return map[string]any{
+		"automatic":    []any{},
+		"manual":       []any{},
+		"current_user": currentUser,
+	}
 }
 
 func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
@@ -26,7 +52,9 @@ func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[str
 
 	id := att.ID
 	if id == "" {
-		id = shortcodeToPK(shortcode)
+		if pk := shortcodePK(shortcode); pk != nil {
+			id = pk.String()
+		}
 	}
 	return map[string]any{
 		"id":          id,
@@ -40,37 +68,61 @@ func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[str
 	}
 }
 
-func (a *App) mastodonAccount(accountID, username, fullName, avatar string, created time.Time) map[string]any {
-	display := fullName
+type mastodonAccountData struct {
+	ID             string
+	Username       string
+	FullName       string
+	Avatar         string
+	Note           string
+	CreatedAt      time.Time
+	LastStatusAt   time.Time
+	FollowersCount int
+	FollowingCount int
+	StatusesCount  int
+}
+
+func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[string]any {
+	username := data.Username
+	display := data.FullName
 	if display == "" {
 		display = username
 	}
+	accountID := data.ID
 	if accountID == "" {
 		accountID = username
 	}
 	return map[string]any{
-		"id":           accountID,
-		"username":     username,
-		"acct":         username,
-		"display_name": display,
-		"locked":       false,
-		"bot":          false,
-		"discoverable": true,
-		"group":        false,
-		// These are spec non-nullable; null makes Discord drop the status (breaks video embeds).
-		"created_at":      mastodonTime(created),
-		"last_status_at":  created.UTC().Format("2006-01-02"),
-		"note":            "",
-		"url":             profileURL(username),
-		"avatar":          avatar,
-		"avatar_static":   avatar,
-		"header":          "",
-		"header_static":   "",
-		"followers_count": 0,
-		"following_count": 0,
-		"statuses_count":  0,
-		"emojis":          []any{},
-		"fields":          []any{},
+		"id":                 accountID,
+		"username":           username,
+		"acct":               username,
+		"url":                profileURL(username),
+		"uri":                profileURL(username),
+		"display_name":       display,
+		"note":               stringOrNil(data.Note),
+		"avatar":             stringOrNil(data.Avatar),
+		"avatar_static":      stringOrNil(data.Avatar),
+		"avatar_description": nil,
+		"header":             nil,
+		"header_static":      nil,
+		"header_description": nil,
+		"locked":             false,
+		"bot":                false,
+		"group":              false,
+		"discoverable":       nil,
+		"indexable":          false,
+		"created_at":         mastodonTime(data.CreatedAt),
+		"last_status_at":     mastodonDate(data.LastStatusAt),
+		"followers_count":    data.FollowersCount,
+		"following_count":    data.FollowingCount,
+		"statuses_count":     data.StatusesCount,
+		"hide_collections":   nil,
+		"show_media":         false,
+		"show_media_replies": false,
+		"show_featured":      false,
+		"roles":              []any{},
+		"feature_approval":   mastodonPolicy("missing"),
+		"emojis":             []any{},
+		"fields":             []any{},
 	}
 }
 
@@ -104,14 +156,14 @@ func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 		media = append(media, profileMastodonMedia(m, i))
 	}
 
-	created := nowUTC()
+	var created time.Time // zero when unknown; emitted as JSON null rather than faked
 	if len(p.RecentMedia) > 0 && !p.RecentMedia[0].TakenAt.IsZero() {
 		created = p.RecentMedia[0].TakenAt
 	}
 	status := map[string]any{
 		"id":                     profileSnowcode(p.Username),
 		"uri":                    profileStatusURL(baseURL, p.Username),
-		"url":                    baseURL + "/" + pathEscape(p.Username),
+		"url":                    baseURL + "/" + url.PathEscape(p.Username),
 		"created_at":             mastodonTime(created),
 		"edited_at":              nil,
 		"in_reply_to_id":         nil,
@@ -127,11 +179,26 @@ func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 		"replies_count":          0,
 		"reblogs_count":          0,
 		"favourites_count":       0,
-		"account":                a.mastodonAccount(p.UserID, p.Username, profileDisplayName(p), p.ProfilePic, created),
-		"media_attachments":      media,
-		"mentions":               []any{},
-		"tags":                   []any{},
-		"emojis":                 []any{},
+		"quotes_count":           0,
+		"text":                   nil,
+		"quote":                  nil,
+		"quote_approval":         mastodonPolicy("denied"),
+		"tagged_collections":     []any{},
+		"account": a.mastodonAccount(baseURL, mastodonAccountData{
+			ID:             p.UserID,
+			Username:       p.Username,
+			FullName:       p.FullName,
+			Avatar:         p.ProfilePic,
+			Note:           profileBioHTML(p),
+			LastStatusAt:   created,
+			FollowersCount: p.FollowerCount,
+			FollowingCount: p.FollowingCount,
+			StatusesCount:  p.MediaCount,
+		}),
+		"media_attachments": media,
+		"mentions":          []any{},
+		"tags":              []any{},
+		"emojis":            []any{},
 	}
 	return jsonBytes(status)
 }
@@ -154,7 +221,7 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 	status := map[string]any{
 		"id":                     statusSnowcode(postType, post.Shortcode, mediaIndex, specified, gallery),
 		"uri":                    statusURL(baseURL, post.Username, postType, post.Shortcode, mediaIndex, specified, false),
-		"url":                    baseURL + "/" + normalizePostType(postType) + "/" + pathEscape(post.Shortcode),
+		"url":                    baseURL + "/" + normalizePostType(postType) + "/" + url.PathEscape(post.Shortcode),
 		"created_at":             mastodonTime(post.CreatedAt),
 		"edited_at":              nil,
 		"in_reply_to_id":         nil,
@@ -170,11 +237,22 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 		"replies_count":          0,
 		"reblogs_count":          0,
 		"favourites_count":       0,
-		"account":                a.mastodonAccount(post.OwnerID, post.Username, post.FullName, post.ProfilePic, post.CreatedAt),
-		"media_attachments":      media,
-		"mentions":               []any{},
-		"tags":                   []any{},
-		"emojis":                 []any{},
+		"quotes_count":           0,
+		"text":                   nil,
+		"quote":                  nil,
+		"quote_approval":         mastodonPolicy("denied"),
+		"tagged_collections":     []any{},
+		"account": a.mastodonAccount(baseURL, mastodonAccountData{
+			ID:           post.OwnerID,
+			Username:     post.Username,
+			FullName:     post.FullName,
+			Avatar:       post.ProfilePic,
+			LastStatusAt: post.CreatedAt,
+		}),
+		"media_attachments": media,
+		"mentions":          []any{},
+		"tags":              []any{},
+		"emojis":            []any{},
 	}
 	return jsonBytes(status)
 }

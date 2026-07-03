@@ -107,15 +107,15 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 		canonicalPath = "/" + string(*forced)
 	}
 	headLinks := strings.Join([]string{
-		`<link rel="canonical" href="` + attr(base+canonicalPath) + `">`,
-		`<meta name="theme-color" content="` + attr(a.cfg.BrandColor) + `">`,
-		`<meta property="og:url" content="` + attr(base+canonicalPath) + `">`,
-		`<meta property="og:image" content="` + attr(base+"/favicon-192.png") + `">`,
-		`<meta property="twitter:image" content="` + attr(base+"/favicon-192.png") + `">`,
-		`<link rel="alternate" hreflang="en" href="` + attr(base+"/en") + `">`,
-		`<link rel="alternate" hreflang="ja" href="` + attr(base+"/ja") + `">`,
-		`<link rel="alternate" hreflang="ko" href="` + attr(base+"/ko") + `">`,
-		`<link rel="alternate" hreflang="x-default" href="` + attr(base+"/") + `">`,
+		`<link rel="canonical" href="` + htmlEscape(base+canonicalPath) + `">`,
+		`<meta name="theme-color" content="` + htmlEscape(a.cfg.BrandColor) + `">`,
+		`<meta property="og:url" content="` + htmlEscape(base+canonicalPath) + `">`,
+		`<meta property="og:image" content="` + htmlEscape(base+"/favicon-192.png") + `">`,
+		`<meta property="twitter:image" content="` + htmlEscape(base+"/favicon-192.png") + `">`,
+		`<link rel="alternate" hreflang="en" href="` + htmlEscape(base+"/en") + `">`,
+		`<link rel="alternate" hreflang="ja" href="` + htmlEscape(base+"/ja") + `">`,
+		`<link rel="alternate" hreflang="ko" href="` + htmlEscape(base+"/ko") + `">`,
+		`<link rel="alternate" hreflang="x-default" href="` + htmlEscape(base+"/") + `">`,
 	}, "")
 
 	repl := strings.NewReplacer(
