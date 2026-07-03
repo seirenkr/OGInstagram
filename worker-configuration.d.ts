@@ -9,8 +9,8 @@ interface __BaseEnv_Env {
 	BRAND_COLOR: "#ff0069";
 	SUPPORT_URL: "" | "https://ko-fi.com/voyage1";
 	GITHUB_URL: "https://github.com/LilasKR/OGInstagram";
-	DECODO_USERNAME: string;
-	DECODO_PASSWORD: string;
+	PROXY_USERNAME: string;
+	PROXY_PASSWORD: string;
 	AE_ACCOUNT_ID: string;
 	AE_API_TOKEN: string;
 	OG_CONTAINER: DurableObjectNamespace<import("./src/index").OgUsContainer>;
@@ -28,8 +28,8 @@ declare namespace Cloudflare {
 		BRAND_COLOR: "#ff0069";
 		SUPPORT_URL: "";
 		GITHUB_URL: "https://github.com/LilasKR/OGInstagram";
-		DECODO_USERNAME: string;
-		DECODO_PASSWORD: string;
+		PROXY_USERNAME: string;
+		PROXY_PASSWORD: string;
 		AE_ACCOUNT_ID: string;
 		AE_API_TOKEN: string;
 		OG_CONTAINER: DurableObjectNamespace<import("./src/index").OgUsContainer>;
@@ -41,7 +41,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "BASE_URL" | "BRAND_NAME" | "BRAND_COLOR" | "SUPPORT_URL" | "GITHUB_URL" | "DECODO_USERNAME" | "DECODO_PASSWORD" | "AE_ACCOUNT_ID" | "AE_API_TOKEN">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "BASE_URL" | "BRAND_NAME" | "BRAND_COLOR" | "SUPPORT_URL" | "GITHUB_URL" | "PROXY_USERNAME" | "PROXY_PASSWORD" | "AE_ACCOUNT_ID" | "AE_API_TOKEN">> {}
 }
 declare module "*.html" {
 	const value: string;
