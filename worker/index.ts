@@ -1,5 +1,4 @@
 import { Container } from "@cloudflare/containers";
-import { Hono } from "hono";
 import { botRE, homePathLocale, parseEmbedSegments, resolveHomeLocale, splitPath, validUsername } from "../shared/routes";
 
 const instagramOrigin = "https://www.instagram.com";
@@ -19,45 +18,40 @@ export class OgUsContainer extends Container<Env> {
 const CONTAINER_NAME = "oginstagram-us";
 const CONTAINER_HINT: DurableObjectLocationHint = "enam";
 
-const STATUS_PATH = "/_status";
+export default {
+  async fetch(request, env, ctx): Promise<Response> {
+    const started = Date.now();
+    const url = new URL(request.url);
+    if (url.pathname === "/_worker/health") {
+      return healthResponse(env);
+    }
+    if (url.pathname === "/_status") {
+      return serveStatus(env, ctx, url);
+    }
 
-const app = new Hono<{ Bindings: Env }>();
-
-app.all("*", async c => {
-  const request = c.req.raw;
-  const env = c.env;
-  const ctx = c.executionCtx as ExecutionContext;
-  const started = Date.now();
-  const url = new URL(request.url);
-  if (url.pathname === "/_worker/health") {
-    return healthResponse(env);
+    const meta: RequestMeta = { cacheHit: false };
+    let response: Response;
+    try {
+      response = await handleAppRequest(request, env, ctx, url, meta);
+    } catch (err) {
+      meta.reason = "exception";
+      logRequestMetric(request, url, meta, Date.now() - started, 500, false, env.AE);
+      throw err;
+    }
+    const metricStatus = meta.metricStatus ?? response.status;
+    logRequestMetric(request, url, meta, Date.now() - started, metricStatus, metricStatus < 400, env.AE);
+    return response;
   }
-  if (url.pathname === STATUS_PATH) {
-    return serveStatus(env, ctx, url);
-  }
+} satisfies ExportedHandler<Env>;
 
-  const meta: RequestMeta = { cacheHit: false };
-  let response: Response;
-  try {
-    response = await handleAppRequest(request, env, ctx, url, meta);
-  } catch (err) {
-    logRequestMetric(request, url, Date.now() - started, 500, false, env.AE, meta.cacheHit, "exception");
-    throw err;
-  }
-  const metricStatus = meta.metricStatus ?? response.status;
-  logRequestMetric(request, url, Date.now() - started, metricStatus, metricStatus < 400, env.AE, meta.cacheHit, meta.reason);
-  return response;
-});
-
-export default app;
-
-type RequestMeta = { cacheHit: boolean; metricStatus?: number; reason?: string };
+type RequestMeta = { cacheHit: boolean; metricStatus?: number; reason?: string; metric?: string };
 
 async function handleAppRequest(request: Request, env: Env, ctx: ExecutionContext, url: URL, meta: RequestMeta): Promise<Response> {
   const route = resolveContainerRoute(url);
   if (!route) {
     return new Response(null, { status: 404 });
   }
+  meta.metric = route.metric;
 
   if (route.humanRedirect && !botRE.test(request.headers.get("user-agent") ?? "")) {
     return Response.redirect(route.humanRedirect, 307);
@@ -92,13 +86,11 @@ async function handleAppRequest(request: Request, env: Env, ctx: ExecutionContex
   }
 
   if (
-    response.headers.has("x-og-config") ||
     response.headers.has("x-og-cache") ||
     response.headers.has("x-og-status") ||
     response.headers.has("x-og-reason")
   ) {
     response = new Response(response.body, response);
-    response.headers.delete("x-og-config");
     response.headers.delete("x-og-cache");
     response.headers.delete("x-og-status");
     response.headers.delete("x-og-reason");
@@ -117,8 +109,8 @@ function containerInstance(env: Env): DurableObjectStub<Container<Env>> {
 
 function containerEnv(env: Env): Record<string, string> {
   return {
-    DECODO_USERNAME: env.DECODO_USERNAME ?? "",
-    DECODO_PASSWORD: env.DECODO_PASSWORD ?? "",
+    PROXY_USERNAME: env.PROXY_USERNAME ?? "",
+    PROXY_PASSWORD: env.PROXY_PASSWORD ?? "",
     BASE_URL: env.BASE_URL ?? "",
     BRAND_NAME: env.BRAND_NAME ?? "",
     BRAND_COLOR: env.BRAND_COLOR ?? "",
@@ -131,15 +123,14 @@ function containerEnv(env: Env): Record<string, string> {
 function logRequestMetric(
   request: Request,
   url: URL,
+  meta: RequestMeta,
   ms: number,
   status: number,
   ok: boolean,
-  ae?: AnalyticsEngineDataset,
-  cacheHit = false,
-  reason?: string
+  ae?: AnalyticsEngineDataset
 ): void {
-  const route = routeMetricName(url);
-  if (!isMetricsRoute(route)) {
+  const route = meta.metric;
+  if (!route) {
     return;
   }
   const client = clientClass(request.headers.get("user-agent") ?? "");
@@ -147,10 +138,13 @@ function logRequestMetric(
     return;
   }
   const outcome = ok ? "ok" : "fail";
-  const cache = cacheHit ? "hit" : "miss";
-  const reasonBlob = reason || (ok ? "ok" : "fail");
-  console.log({ event: "http_request", route, client, outcome, status, ms, cache, reason: reasonBlob, path: url.pathname });
-  if (cacheHit) {
+  const cache = meta.cacheHit ? "hit" : "miss";
+  const reasonBlob = meta.reason || (ok ? "ok" : "fail");
+  // "message" is the JSON key Workers Logs shows in the log list; keep it an
+  // access-log style line so entries are scannable without expanding fields.
+  const message = `${request.method} ${url.pathname} ${status} ${ms}ms cache=${cache} client=${client}${ok ? "" : ` reason=${reasonBlob}`}`;
+  console.log({ message, event: "http_request", route, client, outcome, status, ms, cache, reason: reasonBlob, path: url.pathname });
+  if (meta.cacheHit) {
     return;
   }
   ae?.writeDataPoint({
@@ -160,16 +154,8 @@ function logRequestMetric(
   });
 }
 
-function isMetricsRoute(route: string): boolean {
-  return route === "embed" || route === "direct";
-}
-
-function hasProxyConfig(env: Env): boolean {
-  return Boolean(env.DECODO_USERNAME?.trim() && env.DECODO_PASSWORD?.trim());
-}
-
 function healthResponse(env: Env): Response {
-  const proxyConfig = hasProxyConfig(env);
+  const proxyConfig = Boolean(env.PROXY_USERNAME?.trim() && env.PROXY_PASSWORD?.trim());
   return Response.json(
     {
       ok: proxyConfig,
@@ -191,6 +177,7 @@ type ContainerRoute = {
   varyLang?: boolean;
   humanRedirect: string | null;
   rewritePath?: string;
+  metric?: "embed" | "direct";
 };
 
 function isDirectHost(url: URL): boolean {
@@ -217,14 +204,8 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
   if (path === "/favicon.ico" || /^\/favicon-\d+\.png$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
-  if (path === "/uplot.js" || path === "/uplot.css") {
-    return { cacheKey: path, varyBot: false, humanRedirect: null };
-  }
   if (/^\/main-[\w-]+\.(?:js|css)$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
-  }
-  if (path === "/oembed" || path === "/owoembed") {
-    return { cacheKey: `${path}?${sortedSearch(url)}`, varyBot: false, humanRedirect: null };
   }
 
   const segments = splitPath(path);
@@ -233,11 +214,12 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
     return { cacheKey: `${path}${thumbnail}`, varyBot: false, humanRedirect: null };
   }
   if (
-    (segments.length === 2 && segments[0] === "statuses") ||
     (segments.length === 4 && segments[0] === "api" && segments[1] === "v1" && segments[2] === "statuses") ||
     (segments.length === 4 && segments[0] === "users" && segments[2] === "statuses")
   ) {
-    return { cacheKey: `${path}?${sortedSearch(url)}`, varyBot: false, humanRedirect: null };
+    // The snowcode path segment encodes all state; the container ignores the
+    // query here, so the cache key must too.
+    return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
   if (segments.length === 2 && segments[0] === "users") {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
@@ -251,7 +233,8 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
         cacheKey: `/direct/${encodeURIComponent(embed.shortcode)}/${selected ?? "-"}`,
         varyBot: false,
         humanRedirect: null,
-        rewritePath: `/offload/${encodeURIComponent(embed.shortcode)}/${(selected ?? 0) + 1}`
+        rewritePath: `/offload/${encodeURIComponent(embed.shortcode)}/${(selected ?? 0) + 1}`,
+        metric: "direct"
       };
     }
     const gallery = isGalleryHost(url);
@@ -263,7 +246,8 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
       cacheKey: `/${gallery ? "gallery" : "embed"}/${embed.postType}/${encodeURIComponent(embed.shortcode)}/${selected ?? "-"}`,
       varyBot: true,
       humanRedirect: origin,
-      rewritePath: gallery ? galleryRewritePath(url) : undefined
+      rewritePath: gallery ? galleryRewritePath(url) : undefined,
+      metric: "embed"
     };
   }
 
@@ -293,7 +277,10 @@ function edgeCacheKey(route: ContainerRoute, request: Request, url: URL): string
   }
   let key = `${url.origin}/__edge${route.cacheKey}`;
   if (route.varyBot) {
-    key += `${key.includes("?") ? "&" : "?"}bot=${botClass(request.headers.get("user-agent") ?? "")}`;
+    // The container response only differs for Telegram (meta-refresh omitted),
+    // so the cache key varies on that alone; discord/generic share one entry.
+    const telegram = /telegrambot/i.test(request.headers.get("user-agent") ?? "");
+    key += `${key.includes("?") ? "&" : "?"}bot=${telegram ? "telegram" : "other"}`;
   }
   if (route.varyLang) {
     const locale = resolveHomeLocale(request.headers.get("accept-language") ?? "");
@@ -317,40 +304,6 @@ function clientClass(userAgent: string): string {
     return "human";
   }
   return botClass(userAgent);
-}
-
-function routeMetricName(url: URL): string {
-  const path = url.pathname;
-  if (path === "/" || homePathLocale(path)) {
-    return "home";
-  }
-  if (path === "/_container/health") {
-    return "container-health";
-  }
-  if (path === "/favicon.ico" || /^\/favicon-\d+\.png$/.test(path)) {
-    return "icon";
-  }
-  if (path === "/oembed" || path === "/owoembed") {
-    return "oembed";
-  }
-  const segments = splitPath(path);
-  if ((segments.length === 2 || segments.length === 3) && segments[0] === "offload") {
-    return "offload";
-  }
-  if (
-    (segments.length === 2 && segments[0] === "statuses") ||
-    (segments.length === 4 && segments[0] === "api" && segments[1] === "v1" && segments[2] === "statuses") ||
-    (segments.length === 4 && segments[0] === "users" && segments[2] === "statuses")
-  ) {
-    return "activity";
-  }
-  if (segments.length === 2 && segments[0] === "users") {
-    return "activity-user";
-  }
-  if (!parseEmbedSegments(segments)) {
-    return "not-found";
-  }
-  return isDirectHost(url) ? "direct" : "embed";
 }
 
 function mediaSelection(params: URLSearchParams, pathIndex: number | null): number | null {
@@ -378,11 +331,6 @@ function queryInt(params: URLSearchParams, key: string): number | null {
   }
   const parsed = Number.parseInt(params.get(key) ?? "", 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-}
-
-function sortedSearch(url: URL): string {
-  const entries = [...url.searchParams.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return new URLSearchParams(entries).toString();
 }
 
 const STATUS_QUERY =
@@ -419,7 +367,7 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
       }
     );
     if (!upstream.ok) {
-      console.error({ event: "status_query_failed", status: upstream.status, body: await upstream.text() });
+      console.error({ message: `status query failed: upstream ${upstream.status}`, event: "status_query_failed", status: upstream.status, body: await upstream.text() });
       return statusJSON(emptyStatusSeries(), 502);
     }
     const parsed = (await upstream.json()) as {
@@ -427,7 +375,8 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
     };
     rows = parsed.data ?? [];
   } catch (err) {
-    console.error({ event: "status_query_error", error: err instanceof Error ? err.message : String(err) });
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error({ message: `status query error: ${detail}`, event: "status_query_error", error: detail });
     return statusJSON(emptyStatusSeries(), 502);
   }
   const series = {
