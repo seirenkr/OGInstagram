@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Banner } from "@cloudflare/kumo/components/banner";
 import { Button, LinkButton } from "@cloudflare/kumo/components/button";
@@ -45,7 +45,6 @@ type AppData = {
 };
 
 type Status = { t?: number[]; resolved?: number[]; failed?: number[]; latency?: number[] };
-type PlotLine = { values: number[]; label: string; stroke: string };
 
 const data = JSON.parse(document.getElementById("app-data")!.textContent!) as AppData;
 const languages = { en: "English", ja: "日本語", ko: "한국어" };
@@ -63,22 +62,9 @@ function HighlightedHost({ host }: { host: string }) {
   return <><strong className="key-prefix">{host.slice(0, 2)}</strong>{host.slice(2)}</>;
 }
 
-function Chart({ times, lines, dark, loading, xAxisName }: { times: number[]; lines: PlotLine[]; dark: boolean; loading: boolean; xAxisName: string }) {
-  const series = useMemo(() => lines.map((line) => ({
-    name: line.label,
-    color: line.stroke,
-    data: times.map((time, index) => [time * 1000, line.values[index] ?? 0] as [number, number]),
-  })), [times, lines]);
-  if (!loading && !times.length) return <div className="chart-empty">{data.js.noDataYet}</div>;
-  return <TimeseriesChart
-    echarts={chartEcharts}
-    isDarkMode={dark}
-    data={series}
-    loading={loading}
-    height={300}
-    xAxisName={xAxisName}
-    ariaDescription={lines.map((line) => line.label).join(", ")}
-  />;
+// The last 10-minute bucket is still being aggregated; dash it as incomplete.
+function incompleteAfter(times: number[]): { after: number } | undefined {
+  return times.length >= 2 ? { after: times[times.length - 2] * 1000 } : undefined;
 }
 
 function UsageCard({ title, url, description }: { title: string; url: React.ReactNode; description: string }) {
@@ -121,10 +107,27 @@ function App() {
   const latency = status?.latency ?? EMPTY_VALUES;
   const successColor = ChartPalette.semantic("Success", dark);
   const errorColor = ChartPalette.semantic("Attention", dark);
-  const requestLines = useMemo(() => [
-    { values: resolved, label: data.js.successful, stroke: successColor },
-    { values: failed, label: data.js.failed, stroke: errorColor },
-  ], [resolved, failed, successColor, errorColor]);
+  const requestSeries = useMemo(() => [
+    { name: data.js.successful, color: successColor, data: times.map((time, index) => [time * 1000, resolved[index] ?? 0] as [number, number]) },
+    { name: data.js.failed, color: errorColor, data: times.map((time, index) => [time * 1000, failed[index] ?? 0] as [number, number]) },
+  ], [times, resolved, failed, successColor, errorColor]);
+  const requestsChartRef = useRef<echarts.ECharts>(null);
+  // Name of the one hidden series, or null when both are visible.
+  const [hidden, setHidden] = useState<string | null>(null);
+  // A theme switch re-inits the ECharts instance, resetting legend selection
+  // to all-visible; reset our state to match so the legend doesn't desync.
+  useEffect(() => { setHidden(null); }, [dark]);
+  // Click isolates a series via the hidden ECharts legend; clicking the
+  // already-isolated series restores both.
+  function toggleSeries(name: string) {
+    const chart = requestsChartRef.current;
+    if (!chart) return;
+    const other = name === data.js.successful ? data.js.failed : data.js.successful;
+    const restore = hidden === other;
+    chart.dispatchAction({ type: "legendSelect", name });
+    chart.dispatchAction({ type: restore ? "legendSelect" : "legendUnSelect", name: other });
+    setHidden(restore ? null : other);
+  }
   const latencySeries = useMemo(() => [
     { name: data.js.avg, data: times.map((time, index) => [time * 1000, latency[index] ?? 0] as [number, number]), color: ChartPalette.semantic("Neutral", dark) },
   ], [times, latency, dark]);
@@ -194,10 +197,15 @@ function App() {
               <LayerCard.Secondary>{data.requests}</LayerCard.Secondary>
               <LayerCard.Primary>
                 <div className="status-legend flex divide-x divide-kumo-hairline gap-4 px-2 mb-2">
-                  <ChartLegend.LargeItem name={data.js.successful} color={successColor} value={format(sum(resolved))} />
-                  <ChartLegend.LargeItem name={data.js.failed} color={errorColor} value={format(sum(failed))} />
+                  <ChartLegend.LargeItem name={data.js.successful} color={successColor} value={format(sum(resolved))}
+                    inactive={hidden === data.js.successful} onClick={() => toggleSeries(data.js.successful)} />
+                  <ChartLegend.LargeItem name={data.js.failed} color={errorColor} value={format(sum(failed))}
+                    inactive={hidden === data.js.failed} onClick={() => toggleSeries(data.js.failed)} />
                 </div>
-                <Chart dark={dark} loading={status === null} xAxisName={chartTimeLabel} times={times} lines={requestLines} />
+                {status !== null && !times.length ? <div className="chart-empty">{data.js.noDataYet}</div> :
+                  <TimeseriesChart ref={requestsChartRef} echarts={chartEcharts} isDarkMode={dark} data={requestSeries}
+                    loading={status === null} height={300} xAxisName={chartTimeLabel} incomplete={incompleteAfter(times)}
+                    enableLegendSelection ariaDescription={`${data.js.successful}, ${data.js.failed}`} />}
               </LayerCard.Primary>
             </LayerCard>
             <LayerCard>
@@ -206,7 +214,7 @@ function App() {
                 <div className="status-legend flex divide-x divide-kumo-hairline gap-4 px-2 mb-2">
                   <ChartLegend.LargeItem name={data.js.avg} color={ChartPalette.semantic("Neutral", dark)} value={format(latest(latency))} unit={data.js.ms} />
                 </div>
-                <TimeseriesChart xAxisName={chartTimeLabel} echarts={chartEcharts} isDarkMode={dark} data={latencySeries} height={300} loading={status === null} ariaDescription={data.responseTime} />
+                <TimeseriesChart xAxisName={chartTimeLabel} echarts={chartEcharts} isDarkMode={dark} data={latencySeries} height={300} loading={status === null} incomplete={incompleteAfter(times)} ariaDescription={data.responseTime} />
               </LayerCard.Primary>
             </LayerCard>
           </div>}
