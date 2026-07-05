@@ -50,13 +50,13 @@ func TestParseEmbedPostVideoBlocked(t *testing.T) {
 }
 
 const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
-	`<div class="Embed" data-media-type="GraphImage" data-media-id="393167" data-owner-id="676612" data-permalink="https://www.instagram.com/p/DaQGU_ET8X3/?utm_source=ig_embed">` +
+	`<div class="Embed" data-media-type="GraphImage" data-media-id="3928250036051888465" data-owner-id="25025320" data-permalink="https://www.instagram.com/p/DaD8phTyclR/?utm_source=ig_embed">` +
 	`<a class="Avatar InsideRing" href="/x"><img src="https://cdn/avatar.jpg?oe=1" alt="u" /></a>` +
-	`<span class="UsernameText">cutie_street_</span>` +
+	`<span class="UsernameText">instagram</span>` +
 	`<div class="Content EmbedFrame" style="padding-bottom: 133.33%;">` +
 	`<img class="EmbeddedMediaImage" alt="x" src="https://cdn/small.jpg?oe=1" srcset="https://cdn/big.jpg?oe=1 3072w,https://cdn/small.jpg?oe=1 640w" /></div>` +
 	`<div class="SocialProof"><a href="/x">4,809 likes</a></div>` +
-	`<div class="Caption"><a class="CaptionUsername" href="/x">cutie_street_</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
+	`<div class="Caption"><a class="CaptionUsername" href="/x">instagram</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
 	`<div class="CaptionComments"><a href="/x">View all 19 comments</a></div></div>`
 
 func TestParseEmbedSimpleImage(t *testing.T) {
@@ -64,7 +64,7 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if post.Username != "cutie_street_" || post.Shortcode != "DaQGU_ET8X3" || post.OwnerID != "676612" {
+	if post.Username != "instagram" || post.Shortcode != "DaD8phTyclR" || post.OwnerID != "25025320" {
 		t.Fatalf("bad post: %+v", post)
 	}
 	if len(post.Attachments) != 1 || post.Attachments[0].URL != "https://cdn/big.jpg?oe=1" {
@@ -73,7 +73,7 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	if post.Attachments[0].Width != 3072 || post.Attachments[0].Height != 4095 {
 		t.Fatalf("bad dims: %+v", post.Attachments[0])
 	}
-	if post.Attachments[0].ID != "393167" {
+	if post.Attachments[0].ID != "3928250036051888465" {
 		t.Fatalf("bad media id: %q", post.Attachments[0].ID)
 	}
 	if post.Caption != "Hello & #world\nline2" {

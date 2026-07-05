@@ -6,8 +6,8 @@ import (
 )
 
 const sampleCarousel = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
-  "code":"DZWI_exgXz7","media_type":8,
-  "user":{"username":"designcompass","full_name":"Design Compass","profile_pic_url":"https://cdn/pp.jpg"},
+  "code":"DaQanvRgP-q","media_type":8,
+  "user":{"username":"instagram","full_name":"Instagram","profile_pic_url":"https://cdn/pp.jpg"},
   "caption":{"text":"hello\nworld"},"like_count":226,"comment_count":5,
   "carousel_media":[
     {"media_type":1,"original_width":1080,"original_height":1350,"image_versions2":{"candidates":[{"url":"https://cdn/img1.jpg","width":1080,"height":1350}]}},
@@ -20,7 +20,7 @@ func TestParseCarousel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if post.Username != "designcompass" || post.FullName != "Design Compass" {
+	if post.Username != "instagram" || post.FullName != "Instagram" {
 		t.Fatalf("owner mismatch: %q / %q", post.Username, post.FullName)
 	}
 	if post.Caption != "hello\nworld" {
@@ -67,11 +67,11 @@ func TestNormalizeCDNHost(t *testing.T) {
 }
 
 const sampleLoggedOut = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
-  "pk":"3929188310019024770","code":"DaHR_NCTSeC","taken_at":1782615823,
+  "pk":"3932567351408976603","code":"DaTSSukB-Lb","taken_at":1782615823,
   "media_type":2,"product_type":"clips","like_count":13215,"comment_count":49,
-  "caption":{"text":"初アリーナツアー 開催決定👑🌈✨\n\n#CUTIESTREET"},
+  "caption":{"text":"this glow >>>\n\n#InTheMoment"},
   "original_height":1920,"original_width":1080,
-  "user":{"pk":"67661243995","username":"cutie_street_","full_name":"CUTIE STREET","profile_pic_url":"https://cdn/pp.jpg"},
+  "user":{"pk":"25025320","username":"instagram","full_name":"Instagram","profile_pic_url":"https://cdn/pp.jpg"},
   "image_versions2":{"candidates":[{"url":"https://cdn/cover_big.jpg","width":1206,"height":2144},{"url":"https://cdn/cover_small.jpg","width":640,"height":1138}]},
   "video_versions":[{"type":101,"url":"https://cdn/video.mp4"}]
 }]}}}`
@@ -81,13 +81,13 @@ func TestParseLoggedOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if post.Username != "cutie_street_" || post.FullName != "CUTIE STREET" {
+	if post.Username != "instagram" || post.FullName != "Instagram" {
 		t.Errorf("user = %q / %q", post.Username, post.FullName)
 	}
-	if post.Shortcode != "DaHR_NCTSeC" {
+	if post.Shortcode != "DaTSSukB-Lb" {
 		t.Errorf("shortcode = %q", post.Shortcode)
 	}
-	if !strings.Contains(post.Caption, "初アリーナツアー") {
+	if !strings.Contains(post.Caption, "#InTheMoment") {
 		t.Errorf("caption = %q", post.Caption)
 	}
 	if post.StatsLine != "❤️ 13,215  💬 49" {

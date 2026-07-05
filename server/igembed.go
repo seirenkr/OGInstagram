@@ -44,7 +44,7 @@ func (a *App) directGet(op, target, url string) (body string, ferr *AppError) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", newAppError(500, err.Error())
+		return "", igErr(500, "", err.Error())
 	}
 	req.Header.Set("User-Agent", embedUA)
 	resp, err := a.direct.Do(req)

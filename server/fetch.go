@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -67,34 +69,55 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	type result struct {
-		body string
-		err  *AppError
-	}
-	results := make(chan result, fetchRaceCount+fetchHedgeCount)
 	racing := map[*Session]bool{}
-	var pending int
+	attempts := func(picked []*Session) []attempt[string] {
+		out := make([]attempt[string], 0, len(picked))
+		for _, s := range picked {
+			racing[s] = true
+			out = append(out, func() (string, *AppError) { return a.attemptFetch(ctx, spec, s) })
+		}
+		return out
+	}
+	return hedgedRace(attempts(sessions), func() []attempt[string] {
+		return attempts(a.pool.pick(fetchHedgeCount, racing))
+	})
+}
 
-	launch := func(s *Session) {
-		racing[s] = true
-		pending++
-		go func() {
-			body, err := a.attemptFetch(ctx, spec, s)
-			results <- result{body, err}
-		}()
+type attempt[T any] func() (T, *AppError)
+
+// hedgedRace runs the initial attempts concurrently and launches the hedge
+// attempts once — when fetchHedgeDelay elapses or every launched attempt has
+// failed — returning the first success. On total failure it returns the most
+// permanent error seen (a real 404 beats a throttled IP's 401).
+func hedgedRace[T any](initial []attempt[T], hedge func() []attempt[T]) (T, *AppError) {
+	type result struct {
+		value T
+		err   *AppError
 	}
-	for _, s := range sessions {
-		launch(s)
+	results := make(chan result)
+	done := make(chan struct{})
+	defer close(done)
+
+	pending := 0
+	launch := func(fs []attempt[T]) {
+		pending += len(fs)
+		for _, f := range fs {
+			go func() {
+				v, err := f()
+				select {
+				case results <- result{v, err}:
+				case <-done:
+				}
+			}()
+		}
 	}
+	launch(initial)
 
 	hedged := false
-	hedge := func() {
-		if hedged {
-			return
-		}
-		hedged = true
-		for _, s := range a.pool.pick(fetchHedgeCount, racing) {
-			launch(s)
+	tryHedge := func() {
+		if !hedged {
+			hedged = true
+			launch(hedge())
 		}
 	}
 
@@ -105,26 +128,25 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	for pending > 0 {
 		select {
 		case <-timer.C:
-			hedge()
+			tryHedge()
 		case r := <-results:
 			pending--
 			if r.err == nil {
-				return r.body, nil
+				return r.value, nil
 			}
-
-			// Prefer a permanent error (real 404) over a transient one (a throttled IP's 401).
 			if lastErr == nil || (isTransient(lastErr.Reason) && !isTransient(r.err.Reason)) {
 				lastErr = r.err
 			}
-			if pending == 0 && !hedged {
-				hedge()
+			if pending == 0 {
+				tryHedge()
 			}
 		}
 	}
+	var zero T
 	if lastErr == nil {
 		lastErr = igErr(502, reasonClientError, "Instagram fetch failed")
 	}
-	return "", lastErr
+	return zero, lastErr
 }
 
 // logOutbound writes one access-log style line per outbound request, e.g.
@@ -170,7 +192,7 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 	}
 	req, err := http.NewRequestWithContext(reqCtx, spec.method, spec.url, bodyReader)
 	if err != nil {
-		return "", newAppError(500, err.Error())
+		return "", igErr(500, "", err.Error())
 	}
 	for k, v := range spec.headers {
 		req.Header.Set(k, v)
@@ -188,7 +210,7 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 	if err != nil {
 
 		if ctx.Err() != nil {
-			return "", newAppError(499, "cancelled")
+			return "", igErr(499, "", "cancelled")
 		}
 		failOnce(reasonConnection)
 		return "", igErr(502, reasonConnection, err.Error())
@@ -289,20 +311,58 @@ func (c Config) oembedURL(shortcode string) string {
 	return instagramOrigin + "/api/v1/oembed/?" + q.Encode()
 }
 
-func (a *App) oembedRefine(shortcode string) (reason, title, desc string, override bool) {
+// oembedFallback queries the public oembed endpoint after both primary
+// fetches have failed; some posts still resolve there. A success payload
+// becomes a thumbnail-only Post. A fail payload carries Instagram's own
+// error text, attached to err for the error card.
+func (a *App) oembedFallback(shortcode string, err *AppError) (Post, bool) {
 	status, body, ok := a.proxyRawGet("oembed", shortcode, a.cfg.oembedURL(shortcode), map[string]string{
 		"User-Agent":  instagramAppUA,
 		"Accept":      "*/*",
 		"X-IG-App-ID": instagramAppID,
 	})
 	if !ok || status == 404 || !gjson.Valid(body) {
-		return "", "", "", false
+		return Post{}, false
+	}
+	if p, ok := parseOembedPost(shortcode, body); ok {
+		return p, true
 	}
 	if gjson.Get(body, "status").String() == "fail" {
 		t := gjson.Get(body, "title").String()
 		if msg := gjson.Get(body, "message").String(); msg != "" && t != "" {
-			return msg, t, gjson.Get(body, "description").String(), true
+			err.CardReason, err.CardTitle, err.CardDesc = msg, t, gjson.Get(body, "description").String()
 		}
 	}
-	return "", "", "", false
+	return Post{}, false
+}
+
+// oembedSharedByRE pulls the display name out of the embed blockquote footer:
+// "A post shared by {name} (@{handle})".
+var oembedSharedByRE = regexp.MustCompile(`A post shared by (.*?) \(@`)
+
+// parseOembedPost builds a thumbnail-only Post from an oembed success
+// payload: no video URL, profile pic, or stats are available there.
+func parseOembedPost(shortcode, body string) (Post, bool) {
+	root := gjson.Parse(body)
+	username := root.Get("author_name").String()
+	thumb := normalizeCDNHost(root.Get("thumbnail_url").String())
+	if username == "" || thumb == "" {
+		return Post{}, false
+	}
+	id, _, _ := strings.Cut(root.Get("media_id").String(), "_")
+	return Post{
+		Shortcode: shortcode,
+		Username:  username,
+		OwnerID:   root.Get("author_id").String(),
+		FullName:  html.UnescapeString(firstGroup(oembedSharedByRE, root.Get("html").String())),
+		Caption:   root.Get("title").String(),
+		Attachments: []Attachment{{
+			ID:        id,
+			Kind:      "image", // oembed carries no video URL; reels degrade to a thumbnail card
+			URL:       thumb,
+			Thumbnail: thumb,
+			Width:     uintOf(root, "thumbnail_width"),
+			Height:    uintOf(root, "thumbnail_height"),
+		}},
+	}, true
 }

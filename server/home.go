@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"html"
 	"strings"
 )
 
@@ -107,23 +108,23 @@ func (a *App) buildHomeHTML(host, acceptLanguage string, forced *HomeLocale) str
 		canonicalPath = "/" + string(*forced)
 	}
 	headLinks := strings.Join([]string{
-		`<link rel="canonical" href="` + htmlEscape(base+canonicalPath) + `">`,
-		`<meta name="theme-color" content="` + htmlEscape(a.cfg.BrandColor) + `">`,
-		`<meta property="og:url" content="` + htmlEscape(base+canonicalPath) + `">`,
-		`<meta property="og:image" content="` + htmlEscape(base+"/favicon-192.png") + `">`,
-		`<meta property="twitter:image" content="` + htmlEscape(base+"/favicon-192.png") + `">`,
-		`<link rel="alternate" hreflang="en" href="` + htmlEscape(base+"/en") + `">`,
-		`<link rel="alternate" hreflang="ja" href="` + htmlEscape(base+"/ja") + `">`,
-		`<link rel="alternate" hreflang="ko" href="` + htmlEscape(base+"/ko") + `">`,
-		`<link rel="alternate" hreflang="x-default" href="` + htmlEscape(base+"/") + `">`,
+		`<link rel="canonical" href="` + html.EscapeString(base+canonicalPath) + `">`,
+		`<meta name="theme-color" content="` + html.EscapeString(a.cfg.BrandColor) + `">`,
+		`<meta property="og:url" content="` + html.EscapeString(base+canonicalPath) + `">`,
+		`<meta property="og:image" content="` + html.EscapeString(base+"/favicon-192.png") + `">`,
+		`<meta property="twitter:image" content="` + html.EscapeString(base+"/favicon-192.png") + `">`,
+		`<link rel="alternate" hreflang="en" href="` + html.EscapeString(base+"/en") + `">`,
+		`<link rel="alternate" hreflang="ja" href="` + html.EscapeString(base+"/ja") + `">`,
+		`<link rel="alternate" hreflang="ko" href="` + html.EscapeString(base+"/ko") + `">`,
+		`<link rel="alternate" hreflang="x-default" href="` + html.EscapeString(base+"/") + `">`,
 	}, "")
 
 	repl := strings.NewReplacer(
 		"{{APP_JSON}}", string(appJSON),
 		"{{HEAD_LINKS}}", headLinks,
-		"{{BRAND}}", htmlEscape(a.cfg.BrandName),
+		"{{BRAND}}", html.EscapeString(a.cfg.BrandName),
 		"{{LANG}}", t.Lang,
-		"{{T_TAGLINE}}", htmlEscape(t.Tagline),
+		"{{T_TAGLINE}}", html.EscapeString(t.Tagline),
 		"{{MAIN_JS}}", a.assets.mainJS,
 		"{{MAIN_CSS}}", a.assets.mainCSS,
 	)
