@@ -5,7 +5,9 @@
   "compatibility_date": "2026-06-10",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
-  "preview_urls": true,
+  // Preview URLs are never generated for Workers that implement a Durable
+  // Object, so disable them explicitly to silence the deploy warning.
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
@@ -20,13 +22,6 @@
     "SUPPORT_URL": "https://ko-fi.com/voyage1",
     "GITHUB_URL": "https://github.com/LilasKR/OGInstagram"
   },
-  "rules": [
-    {
-      "type": "Text",
-      "globs": ["**/*.html"],
-      "fallthrough": false
-    }
-  ],
   "routes": [
     {
       "pattern": "oginstagram.com",
