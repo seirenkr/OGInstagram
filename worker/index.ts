@@ -142,8 +142,11 @@ function logRequestMetric(
   const reasonBlob = meta.reason || (ok ? "ok" : "fail");
   // "message" is the JSON key Workers Logs shows in the log list; keep it an
   // access-log style line so entries are scannable without expanding fields.
+  // Workers Logs derives the entry's level from the console method called
+  // (debug/info/log/warn/error), so pick it by severity.
   const message = `${request.method} ${url.pathname} ${status} ${ms}ms cache=${cache} client=${client}${ok ? "" : ` reason=${reasonBlob}`}`;
-  console.log({ message, event: "http_request", route, client, outcome, status, ms, cache, reason: reasonBlob, path: url.pathname });
+  const log = status >= 500 ? console.error : status >= 400 ? console.warn : console.info;
+  log({ message, event: "http_request", route, client, outcome, status, ms, cache, reason: reasonBlob, path: url.pathname });
   if (meta.cacheHit) {
     return;
   }
@@ -201,7 +204,7 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
   if (pathLocale) {
     return { cacheKey: `/__home1/${pathLocale}`, varyBot: false, humanRedirect: null };
   }
-  if (path === "/favicon.ico" || /^\/favicon-\d+\.png$/.test(path)) {
+  if (path === "/favicon.ico" || path === "/default-avatar.jpg" || /^\/favicon-\d+\.png$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
   if (/^\/main-[\w-]+\.(?:js|css)$/.test(path)) {
@@ -289,7 +292,10 @@ function edgeCacheKey(route: ContainerRoute, request: Request, url: URL): string
   return key;
 }
 
-function botClass(userAgent: string): string {
+function clientClass(userAgent: string): string {
+  if (!botRE.test(userAgent)) {
+    return "human";
+  }
   if (/discordbot/i.test(userAgent)) {
     return "discord";
   }
@@ -297,13 +303,6 @@ function botClass(userAgent: string): string {
     return "telegram";
   }
   return "bot";
-}
-
-function clientClass(userAgent: string): string {
-  if (!botRE.test(userAgent)) {
-    return "human";
-  }
-  return botClass(userAgent);
 }
 
 function mediaSelection(params: URLSearchParams, pathIndex: number | null): number | null {

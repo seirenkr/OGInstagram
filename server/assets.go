@@ -27,8 +27,8 @@ func contentTypeFor(name string) string {
 		return "text/css; charset=utf-8"
 	case ".png":
 		return "image/png"
-	case ".ico":
-		return "image/x-icon"
+	case ".jpg":
+		return "image/jpeg"
 	default:
 		return ""
 	}
