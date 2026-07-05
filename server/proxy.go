@@ -16,8 +16,6 @@ type Session struct {
 	proxyURL  string
 	client    *http.Client
 	sessionID string
-	user      string
-	pass      string
 
 	ewmaMs        float64
 	hasEWMA       bool
@@ -56,8 +54,6 @@ func newSessionPool(cfg Config) *SessionPool {
 				name:      "us-" + id,
 				proxyURL:  proxyURL(cfg.ProxyUser, cfg.ProxyPass, id),
 				sessionID: id,
-				user:      cfg.ProxyUser,
-				pass:      cfg.ProxyPass,
 			})
 		}
 	}
@@ -195,9 +191,9 @@ func (p *SessionPool) fail(s *Session, reason string) {
 
 func (p *SessionPool) rotate(s *Session) {
 	s.mu.Lock()
-	if s.user != "" {
+	if p.cfg.ProxyUser != "" {
 		s.sessionID = newSessionID()
-		s.proxyURL = proxyURL(s.user, s.pass, s.sessionID)
+		s.proxyURL = proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, s.sessionID)
 	}
 	proxyURL := s.proxyURL
 	s.mu.Unlock()

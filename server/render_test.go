@@ -169,9 +169,14 @@ func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
 	if acct["url"] != "https://www.instagram.com/user/" || acct["uri"] != "https://www.instagram.com/user/" {
 		t.Errorf("account URLs wrong: url=%#v uri=%#v", acct["url"], acct["uri"])
 	}
-	for _, k := range []string{"note", "avatar", "avatar_static", "avatar_description", "header", "header_static", "header_description", "discoverable", "created_at", "last_status_at", "hide_collections"} {
+	for _, k := range []string{"note", "avatar_description", "header", "header_static", "header_description", "discoverable", "created_at", "last_status_at", "hide_collections"} {
 		if acct[k] != nil {
 			t.Errorf("account %s must be JSON null when unavailable, got %#v", k, acct[k])
+		}
+	}
+	for _, k := range []string{"avatar", "avatar_static"} {
+		if acct[k] != "https://oginstagram.com"+defaultAvatarPath {
+			t.Errorf("account %s must fall back to the default avatar, got %#v", k, acct[k])
 		}
 	}
 	if acct["indexable"] != false || acct["show_media"] != false || acct["show_media_replies"] != false || acct["show_featured"] != false {
@@ -251,7 +256,7 @@ func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
 	}{
 		{"mention", "hi @bob.smith", `hi <a href="https://www.instagram.com/bob.smith">@bob.smith</a>`},
 		{"hashtag", "love #food", `love <a href="https://www.instagram.com/explore/search/keyword/?q=%23food">#food</a>`},
-		{"hashtag unicode", "맛 #굴라쉬", `맛 <a href="https://www.instagram.com/explore/search/keyword/?q=%23%EA%B5%B4%EB%9D%BC%EC%89%AC">#굴라쉬</a>`},
+		{"hashtag unicode", "오늘 #일상", `오늘 <a href="https://www.instagram.com/explore/search/keyword/?q=%23%EC%9D%BC%EC%83%81">#일상</a>`},
 		{"hashtag numeric start", "#100days", `<a href="https://www.instagram.com/explore/search/keyword/?q=%23100days">#100days</a>`},
 		{"email linked", "mail me at foo@bar.com", `mail me at <a href="mailto:foo@bar.com">foo@bar.com</a>`},
 		{"escaped quote not a hashtag", "it's #real", `it&#39;s <a href="https://www.instagram.com/explore/search/keyword/?q=%23real">#real</a>`},

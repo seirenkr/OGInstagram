@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"html"
 	"math/big"
 	"net/url"
 	"regexp"
@@ -45,12 +44,17 @@ func shortcodeTime(shortcode string) time.Time {
 	return t
 }
 
+func avatarOr(baseURL, pic string) string {
+	if pic == "" {
+		return baseURL + defaultAvatarPath
+	}
+	return pic
+}
+
 func jsonBytes(v any) []byte {
 	b, _ := json.Marshal(v)
 	return append(b, '\n')
 }
-
-func htmlEscape(v string) string { return html.EscapeString(v) }
 
 var compactRE = regexp.MustCompile(`>\s+<`)
 

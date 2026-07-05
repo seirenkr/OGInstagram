@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -90,7 +91,7 @@ func (a *App) buildActivityStatus(baseURL string, post Post, postType string, me
 
 	content := ""
 	if !gallery {
-		content = "<p><b>" + htmlEscape(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
+		content = "<p><b>" + html.EscapeString(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
 		if caption := normalizeCaption(post.Caption); caption != "" {
 			content += "<p>" + captionHTML(caption) + "</p>"
 		}
@@ -134,12 +135,12 @@ func profileStatusURL(baseURL, username string) string {
 }
 
 func profileDigestContent(p Profile) string {
-	content := "<p><b>" + htmlEscape(profileStatsLine(p)) + "</b></p>"
+	content := "<p><b>" + html.EscapeString(profileStatsLine(p)) + "</b></p>"
 	if bio := profileBioHTML(p); bio != "" {
 		content += bio
 	}
 	if p.IsPrivate {
-		content += "<p>" + htmlEscape(profilePrivateNotice) + "</p>"
+		content += "<p>" + html.EscapeString(profilePrivateNotice) + "</p>"
 	}
 	return content
 }

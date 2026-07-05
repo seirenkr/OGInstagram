@@ -27,7 +27,7 @@ var reasonRegistry = map[string]reasonInfo{
 	reasonUnauthorized:   {rotateIP: true, transient: true},
 	reasonForbidden:      {rotateIP: true, transient: true},
 	reasonThrottled:      {rotateIP: true, transient: true},
-	reasonClientError:    {rotateIP: false, transient: true},
+	reasonClientError:    {rotateIP: true, transient: true},
 	reasonGraphql:        {rotateIP: false, transient: true},
 	reasonBadRequest:     {rotateIP: false, transient: false},
 	reasonNotFound:       {rotateIP: false, transient: false},

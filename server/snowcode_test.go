@@ -18,7 +18,7 @@ func TestStatusSnowcodeRoundTrip(t *testing.T) {
 		specified bool
 		gallery   bool
 	}{
-		{"plain post", "p", "DZ4YS7sktCx", 0, false, false},
+		{"plain post", "p", "DaTSSukB-Lb", 0, false, false},
 		{"reel", "reel", "CabC_d-Efg", 0, false, false},
 		{"specific image", "p", "ABC123xyz", 2, true, false},
 		{"gallery", "p", "Short_code-1", 0, false, true},
@@ -49,7 +49,7 @@ func TestStatusSnowcodeRoundTrip(t *testing.T) {
 }
 
 func TestProfileSnowcodeRoundTrip(t *testing.T) {
-	for _, username := range []string{"instagram", "k_i_m_i_n_", "a.b.c"} {
+	for _, username := range []string{"instagram", "some_user_", "a.b.c"} {
 		code := profileSnowcode(username)
 		if !allDigits(code) {
 			t.Errorf("%s: profile snowcode not all digits: %q", username, code)
@@ -63,8 +63,8 @@ func TestProfileSnowcodeRoundTrip(t *testing.T) {
 
 func TestParseStatusSnowcodeFallsBackToRawShortcode(t *testing.T) {
 
-	got := parseStatusSnowcode("DZ4YS7sktCx")
-	if got.Shortcode != "DZ4YS7sktCx" || got.PostType != "p" {
+	got := parseStatusSnowcode("DaTSSukB-Lb")
+	if got.Shortcode != "DaTSSukB-Lb" || got.PostType != "p" {
 		t.Errorf("raw shortcode fallback failed: %#v", got)
 	}
 }

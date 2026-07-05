@@ -20,45 +20,23 @@ func queryInt(values url.Values, key string) (int, bool) {
 	return n, true
 }
 
-func parseRequestQuery(values url.Values) RequestQuery {
-	img, imgSet := queryInt(values, "img_index")
-	idx, idxSet := queryInt(values, "index")
-	ord, ordSet := queryInt(values, "order")
-	return RequestQuery{
-		ImgIndex:    img,
-		ImgIndexSet: imgSet,
-		Index:       idx,
-		IndexSet:    idxSet,
-		Order:       ord,
-		OrderSet:    ordSet,
-		Gallery:     values.Get("__gallery") == "1",
-	}
-}
-
-func mediaIndexFromQuery(q RequestQuery, pathIndex int) int {
+// mediaSelection resolves the requested carousel item: the path index
+// (1-based) wins, then ?img_index (1-based), then ?index / ?order (0-based).
+// specified reports whether any of them was present.
+func mediaSelection(values url.Values, pathIndex int) (index int, specified bool) {
 	if pathIndex >= 0 {
-		v := pathIndex - 1
-		if v < 0 {
-			return 0
-		}
-		return v
+		return max(0, pathIndex-1), true
 	}
-	if q.ImgIndexSet {
-		v := q.ImgIndex - 1
-		if v < 0 {
-			return 0
-		}
-		return v
+	if n, ok := queryInt(values, "img_index"); ok {
+		return max(0, n-1), true
 	}
-	if q.IndexSet {
-		return max(0, q.Index)
+	if n, ok := queryInt(values, "index"); ok {
+		return n, true
 	}
-	if q.OrderSet {
-		return max(0, q.Order)
+	if n, ok := queryInt(values, "order"); ok {
+		return n, true
 	}
-	return 0
+	return 0, false
 }
 
-func querySpecified(q RequestQuery) bool {
-	return q.ImgIndexSet || q.IndexSet || q.OrderSet
-}
+func galleryRequested(values url.Values) bool { return values.Get("__gallery") == "1" }
