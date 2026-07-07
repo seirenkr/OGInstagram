@@ -51,7 +51,7 @@ func TestParseEmbedPostVideoBlocked(t *testing.T) {
 
 const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
 	`<div class="Embed" data-media-type="GraphImage" data-media-id="3928250036051888465" data-owner-id="25025320" data-permalink="https://www.instagram.com/p/DaD8phTyclR/?utm_source=ig_embed">` +
-	`<a class="Avatar InsideRing" href="/x"><img src="https://cdn/avatar.jpg?oe=1" alt="u" /></a>` +
+	`<a class="Avatar InsideRing" href="https://www.instagram.com/instagram/?utm_source=ig_embed"><img src="https://cdn/avatar.jpg?oe=1" alt="instagram" /></a>` +
 	`<span class="UsernameText">instagram</span>` +
 	`<div class="Content EmbedFrame" style="padding-bottom: 133.33%;">` +
 	`<img class="EmbeddedMediaImage" alt="x" src="https://cdn/small.jpg?oe=1" srcset="https://cdn/big.jpg?oe=1 3072w,https://cdn/small.jpg?oe=1 640w" /></div>` +
@@ -67,6 +67,9 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	if post.Username != "instagram" || post.Shortcode != "DaD8phTyclR" || post.OwnerID != "25025320" {
 		t.Fatalf("bad post: %+v", post)
 	}
+	if post.ProfilePic != "https://cdn/avatar.jpg?oe=1" {
+		t.Fatalf("bad avatar: %q", post.ProfilePic)
+	}
 	if len(post.Attachments) != 1 || post.Attachments[0].URL != "https://cdn/big.jpg?oe=1" {
 		t.Fatalf("bad attachment: %+v", post.Attachments)
 	}
@@ -81,6 +84,24 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	}
 	if post.StatsLine != "❤️ 4,809  💬 19" {
 		t.Fatalf("bad stats: %q", post.StatsLine)
+	}
+}
+
+// Collab posts stack two avatars; the collaborator's plain CollabAvatar comes
+// first, the owner's carries SecondCollabAvatar. Expect a2, not a1.
+func TestParseEmbedSimpleCollabAvatar(t *testing.T) {
+	page := `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
+		`<div class="Embed" data-media-type="GraphImage" data-media-id="1" data-owner-id="2" data-permalink="https://www.instagram.com/p/COLLAB/?x">` +
+		`<div class="CollabAvatarContainer"><a class="CollabAvatar" href="https://www.instagram.com/collab/?x"><img src="https://cdn/a1.jpg?oe=1" alt="owner" /></a>` +
+		`<a class="CollabAvatar SecondCollabAvatar" href="https://www.instagram.com/owner/?x"><img src="https://cdn/a2.jpg?oe=1" alt="owner" /></a></div>` +
+		`<span class="UsernameText">owner</span>` +
+		`<img class="EmbeddedMediaImage" alt="pic" src="https://cdn/m.jpg?oe=1" />`
+	post, err := parseEmbedPost(page)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if post.Username != "owner" || post.ProfilePic != "https://cdn/a2.jpg?oe=1" {
+		t.Fatalf("bad collab avatar: %+v", post)
 	}
 }
 
