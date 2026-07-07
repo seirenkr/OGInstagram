@@ -44,40 +44,85 @@ func TestFlagOversizedVideos(t *testing.T) {
 	}
 }
 
-func TestRaceEmbedFirst(t *testing.T) {
-	// Embed answers first: GraphQL never launches (no proxy budget spent).
-	gqlCalled := false
-	p, err := raceEmbedFirst(
-		func() (Post, *AppError) { return Post{Shortcode: "a"}, nil },
-		func() (Post, *AppError) { gqlCalled = true; return Post{}, igErr(502, reasonGraphql, "x") },
+func TestHedgedRace(t *testing.T) {
+	one := func(f func() (Post, *AppError)) []attempt[Post] { return []attempt[Post]{f} }
+
+	// Initial attempt answers first: the hedge never launches (no proxy budget spent).
+	hedgeCalled := false
+	p, err := hedgedRace(
+		one(func() (Post, *AppError) { return Post{Shortcode: "a"}, nil }),
+		func() []attempt[Post] {
+			hedgeCalled = true
+			return one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "x") })
+		},
 	)
 	if err != nil || p.Shortcode != "a" {
-		t.Fatalf("embed win: post=%+v err=%+v", p, err)
+		t.Fatalf("initial win: post=%+v err=%+v", p, err)
 	}
-	if gqlCalled {
-		t.Error("gql should not launch when embed answers first")
+	if hedgeCalled {
+		t.Error("hedge should not launch when the initial attempt answers first")
 	}
 
-	// Embed fails: GraphQL launches immediately, without the hedge wait.
+	// Initial attempt fails: the hedge launches immediately, without the hedge wait.
 	start := time.Now()
-	p, err = raceEmbedFirst(
-		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "embed down") },
-		func() (Post, *AppError) { return Post{Shortcode: "b"}, nil },
+	p, err = hedgedRace(
+		one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "embed down") }),
+		func() []attempt[Post] { return one(func() (Post, *AppError) { return Post{Shortcode: "b"}, nil }) },
 	)
 	if err != nil || p.Shortcode != "b" {
-		t.Fatalf("gql fallback: post=%+v err=%+v", p, err)
+		t.Fatalf("hedge fallback: post=%+v err=%+v", p, err)
 	}
 	if time.Since(start) > fetchHedgeDelay/2 {
-		t.Error("gql should launch on embed failure, not after the hedge delay")
+		t.Error("hedge should launch on initial failure, not after the hedge delay")
 	}
 
 	// Both fail: the permanent error (real 404) beats the transient one.
-	_, err = raceEmbedFirst(
-		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "transient") },
-		func() (Post, *AppError) { return Post{}, igErr(404, reasonMediaNotFound, "gone") },
+	_, err = hedgedRace(
+		one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "transient") }),
+		func() []attempt[Post] {
+			return one(func() (Post, *AppError) { return Post{}, igErr(404, reasonMediaNotFound, "gone") })
+		},
 	)
 	if err == nil || err.Reason != reasonMediaNotFound {
 		t.Fatalf("want permanent error to win, got %+v", err)
+	}
+}
+
+func TestParseOembedPost(t *testing.T) {
+	body := `{
+		"version": "1.0",
+		"title": "time to create",
+		"author_name": "instagram",
+		"author_url": "https://www.instagram.com/instagram",
+		"author_id": 25025320,
+		"media_id": "3928250036051888465_25025320",
+		"type": "rich",
+		"html": "<a href=\"https://www.instagram.com/p/DaD8phTyclR/\" target=\"_blank\">A post shared by Instagram (@instagram)</a>",
+		"thumbnail_url": "https://scontent-gmp1-1.cdninstagram.com/v/t51.82787-15/x.jpg?oe=6A4FBF9C",
+		"thumbnail_width": 640,
+		"thumbnail_height": 800
+	}`
+	p, ok := parseOembedPost("DaD8phTyclR", body)
+	if !ok {
+		t.Fatal("oembed success payload should parse")
+	}
+	if p.Username != "instagram" || p.FullName != "Instagram" || p.OwnerID != "25025320" {
+		t.Errorf("author fields: %+v", p)
+	}
+	if p.Shortcode != "DaD8phTyclR" || !strings.Contains(p.Caption, "time to create") {
+		t.Errorf("post fields: %+v", p)
+	}
+	att := p.Attachments[0]
+	if att.ID != "3928250036051888465" || att.Kind != "image" || att.Width != 640 || att.Height != 800 {
+		t.Errorf("attachment: %+v", att)
+	}
+	if att.URL == "" || att.URL != att.Thumbnail {
+		t.Errorf("thumbnail-only attachment expected: %+v", att)
+	}
+
+	// A fail payload must not parse into a post.
+	if _, ok := parseOembedPost("x", `{"status":"fail","title":"게시물을 사용할 수 없음","message":"삭제되었을 수 있습니다."}`); ok {
+		t.Error("fail payload should not parse")
 	}
 }
 

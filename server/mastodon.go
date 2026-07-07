@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html"
 	"net/url"
 	"strconv"
 	"time"
@@ -18,13 +19,6 @@ func mastodonDate(t time.Time) any {
 		return nil
 	}
 	return t.UTC().Format("2006-01-02")
-}
-
-func stringOrNil(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
 }
 
 func mastodonPolicy(currentUser string) map[string]any {
@@ -91,6 +85,11 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 	if accountID == "" {
 		accountID = username
 	}
+	avatar := avatarOr(baseURL, data.Avatar)
+	var note any
+	if data.Note != "" {
+		note = data.Note
+	}
 	return map[string]any{
 		"id":                 accountID,
 		"username":           username,
@@ -98,9 +97,9 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 		"url":                profileURL(username),
 		"uri":                profileURL(username),
 		"display_name":       display,
-		"note":               stringOrNil(data.Note),
-		"avatar":             stringOrNil(data.Avatar),
-		"avatar_static":      stringOrNil(data.Avatar),
+		"note":               note,
+		"avatar":             avatar,
+		"avatar_static":      avatar,
 		"avatar_description": nil,
 		"header":             nil,
 		"header_static":      nil,
@@ -212,7 +211,7 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 
 	content := ""
 	if !gallery {
-		content = "<p><b>" + htmlEscape(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
+		content = "<p><b>" + html.EscapeString(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
 		if caption := normalizeCaption(post.Caption); caption != "" {
 			content += "<p>" + captionHTML(caption) + "</p>"
 		}

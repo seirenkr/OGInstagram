@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html"
 	"net/url"
 	"regexp"
 	"sort"
@@ -27,13 +28,15 @@ func captionHTML(text string) string {
 	var b strings.Builder
 	last := 0
 	for _, s := range spans {
-		b.WriteString(brHTML(htmlEscape(text[last:s.start])))
-		b.WriteString(`<a href="` + htmlEscape(s.href) + `">`)
-		b.WriteString(htmlEscape(text[s.start:s.end]))
+		b.WriteString(brHTML(html.EscapeString(text[last:s.start])))
+		b.WriteString(`<a href="`)
+		b.WriteString(html.EscapeString(s.href))
+		b.WriteString(`">`)
+		b.WriteString(html.EscapeString(text[s.start:s.end]))
 		b.WriteString(`</a>`)
 		last = s.end
 	}
-	b.WriteString(brHTML(htmlEscape(text[last:])))
+	b.WriteString(brHTML(html.EscapeString(text[last:])))
 	return b.String()
 }
 

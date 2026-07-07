@@ -21,11 +21,7 @@ const (
 	proxyCountry      = "us"
 	proxySessionCount = 10
 
-	defaultProxyHourlyLimit = 1000
-	// defaultGlobalHourlyLimit caps total proxy requests/hour across all sessions
-	// for predictable (residential-bandwidth) cost. 0 = unlimited.
-	// Sized for ~100GB/month: 137MB/h at an assumed ~55KB wire per GraphQL
-	// round trip ≈ 2500 req/h; tune against the provider bandwidth dashboard.
+	defaultProxyHourlyLimit  = 1000
 	defaultGlobalHourlyLimit = 2500
 
 	transientErrorCacheSeconds = 300
@@ -49,12 +45,16 @@ const (
 
 	maxInlineVideoBytes = 200 << 20
 
-	edgeCacheSeconds        = 3600
+	edgeCacheSeconds        = 86400
 	homeEdgeCacheSeconds    = 120
 	homeBrowserCacheSeconds = 60
 	iconCacheSeconds        = 86400
 
 	serviceName = "oginstagram"
+
+	// defaultAvatarPath serves as the author avatar when the fetch path
+	// (e.g. the oembed fallback) carries no profile picture.
+	defaultAvatarPath = "/default-avatar.jpg"
 
 	budgetTitle       = "Hourly limit reached"
 	budgetDescription = "This service has reached its hourly request limit. Please try again later."
@@ -73,26 +73,11 @@ func configFromEnv() Config {
 		port = v
 	}
 	assets := envString("ASSETS_DIR", "/app/assets")
-	preview := envBool("LOCAL_PREVIEW")
 	brandName := strings.TrimSpace(os.Getenv("BRAND_NAME"))
 	brandColor := strings.TrimSpace(os.Getenv("BRAND_COLOR"))
 	supportURL := strings.TrimSpace(os.Getenv("SUPPORT_URL"))
 	githubURL := envString("GITHUB_URL", "https://github.com/LilasKR/OGInstagram")
 	version := envString("OG_VERSION", "dev")
-	if preview {
-		if brandName == "" {
-			brandName = "OGInstagram"
-		}
-		if brandColor == "" {
-			brandColor = "#f48120"
-		}
-		if supportURL == "" {
-			supportURL = "https://ko-fi.com/voyage1"
-		}
-		if version == "dev" {
-			version = "2.5.2-local"
-		}
-	}
 	return Config{
 		Port:              port,
 		Version:           version,
@@ -145,13 +130,4 @@ func envString(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func envBool(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
 }

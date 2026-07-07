@@ -13,6 +13,11 @@ const (
 	reasonNotFound       = "ClientNotFoundError"
 	reasonMediaNotFound  = "MediaNotFound"
 	reasonBudgetExceeded = "HourlyBudgetExceeded"
+
+	// Content-side gating (region/age/audience) reported by the oembed fail
+	// payload's "geoblock_required" message; the post exists but Instagram
+	// refuses to serve it, so retrying or rotating IPs won't help.
+	reasonGeoBlocked = "GeoBlockRequired"
 )
 
 type reasonInfo struct {
@@ -27,12 +32,14 @@ var reasonRegistry = map[string]reasonInfo{
 	reasonUnauthorized:   {rotateIP: true, transient: true},
 	reasonForbidden:      {rotateIP: true, transient: true},
 	reasonThrottled:      {rotateIP: true, transient: true},
-	reasonClientError:    {rotateIP: false, transient: true},
+	reasonClientError:    {rotateIP: true, transient: true},
 	reasonGraphql:        {rotateIP: false, transient: true},
 	reasonBadRequest:     {rotateIP: false, transient: false},
 	reasonNotFound:       {rotateIP: false, transient: false},
 	reasonMediaNotFound:  {rotateIP: false, transient: false},
 	reasonBudgetExceeded: {rotateIP: false, transient: true},
+
+	reasonGeoBlocked: {rotateIP: false, transient: false},
 }
 
 func reasonOf(reason string) reasonInfo {

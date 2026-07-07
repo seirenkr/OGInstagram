@@ -105,11 +105,9 @@ func (a *App) route(req *http.Request) resp {
 	path := req.URL.Path
 
 	if path == "/" {
-		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), nil)))
-	}
-	if loc, ok := homePathLocale(path); ok {
-		l := loc
-		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), &l)))
+		// Locale lives in ?hl=, never in the path: every single-segment path
+		// belongs to the Instagram username namespace.
+		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), req.URL.Query().Get("hl"))))
 	}
 	if path == "/_container/health" {
 		return jsonResp(200, jsonBytes(map[string]any{"ok": true, "service": serviceName + "-container"}))
@@ -153,7 +151,9 @@ func (a *App) handleUserAccount(req *http.Request, username string) resp {
 	return cacheable(activityJSONResp(200, a.buildFallbackAccount(baseURL, username)), edgeCacheSeconds)
 }
 
-func (a *App) handleActivity(req *http.Request, username, code string) resp {
+// The path username is intentionally ignored: the snowcode encodes the whole
+// post identity, so it alone is authoritative.
+func (a *App) handleActivity(req *http.Request, _, code string) resp {
 	sp := parseStatusSnowcode(code)
 	baseURL := a.publicBaseURL(req)
 	if sp.Username != "" {
@@ -204,7 +204,7 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 	if !botRE.MatchString(req.Header.Get("User-Agent")) {
 		return redirectResp(origin, 307)
 	}
-	q := parseRequestQuery(req.URL.Query())
+	gallery := galleryRequested(req.URL.Query())
 	baseURL := a.publicBaseURL(req)
 	meta := &fetchMeta{}
 	p, err := a.getProfile(username, meta)
@@ -219,13 +219,13 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 		r = cacheable(r, errorCacheSeconds(err.Reason))
 		return tagFetch(r, meta)
 	}
-	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, q.Gallery)), cdnEdgeSeconds(profileCDNURLs(p)...)), meta)
+	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, gallery)), cdnEdgeSeconds(profileCDNURLs(p)...)), meta)
 }
 
 func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathIndex int) resp {
-	q := parseRequestQuery(req.URL.Query())
-	mediaIndex := mediaIndexFromQuery(q, pathIndex)
-	specified := pathIndex >= 0 || querySpecified(q)
+	values := req.URL.Query()
+	mediaIndex, specified := mediaSelection(values, pathIndex)
+	gallery := galleryRequested(values)
 	origin := instagramPostURL(postType, shortcode, mediaIndex, specified)
 
 	if !botRE.MatchString(req.Header.Get("User-Agent")) {
@@ -238,11 +238,8 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 	if err != nil {
 		reason := err.Reason
 		title, desc := postErrorCard(reason, a.cfg.SupportURL)
-
-		if reason == reasonMediaNotFound {
-			if r2, t2, d2, ok := a.oembedRefine(shortcode); ok {
-				reason, title, desc = r2, t2, d2
-			}
+		if err.CardTitle != "" {
+			reason, title, desc = err.CardReason, err.CardTitle, err.CardDesc
 		}
 		embed := a.buildStatusEmbedHTML(baseURL, origin, title, desc)
 		r := htmlResp(200, embed)
@@ -253,7 +250,7 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 		r = cacheable(r, errorCacheSeconds(err.Reason))
 		return tagFetch(r, meta)
 	}
-	html := a.buildEmbedHTML(baseURL, req.Header.Get("User-Agent"), post, postType, mediaIndex, specified, q.Gallery)
+	html := a.buildEmbedHTML(baseURL, req.Header.Get("User-Agent"), post, postType, mediaIndex, specified, gallery)
 	return tagFetch(cacheable(htmlResp(200, html), edgeCacheSeconds), meta)
 }
 
@@ -270,10 +267,16 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	meta := &fetchMeta{}
 	post, err := a.getPost(shortcode, meta)
 	if err != nil {
-		if isTransient(err.Reason) {
-			return tagFetch(redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302), meta)
+		// Humans still get the 302-to-Instagram fallback on transient errors,
+		// but for the media clients this route serves that is a failed fetch;
+		// x-og-* report it as such (the worker strips them before responding).
+		r := redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302)
+		if !isTransient(err.Reason) {
+			r = textResp(err.Status, err.Message)
 		}
-		return resp{status: err.Status, headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"}, body: []byte(err.Message)}
+		r.headers["x-og-status"] = strconv.Itoa(err.Status)
+		r.headers["x-og-reason"] = err.Reason
+		return tagFetch(r, meta)
 	}
 	att := post.Attachments[mediaIndexFor(post, index)]
 	target := att.URL
@@ -293,7 +296,7 @@ func (a *App) publicBaseURL(req *http.Request) string {
 	if host == "" {
 		host = "localhost:" + strconv.Itoa(a.cfg.Port)
 	}
-	if proto := firstHeaderValue(req.Header.Get("X-Forwarded-Proto")); proto != "" {
+	if proto := strings.TrimSpace(strings.SplitN(req.Header.Get("X-Forwarded-Proto"), ",", 2)[0]); proto != "" {
 		return proto + "://" + host
 	}
 	return a.publicBaseURLFromHost(host)
@@ -308,11 +311,4 @@ func (a *App) publicBaseURLFromHost(host string) string {
 		proto = "http"
 	}
 	return proto + "://" + host
-}
-
-func firstHeaderValue(v string) string {
-	if strings.TrimSpace(v) == "" {
-		return ""
-	}
-	return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"html"
 	"strconv"
 	"strings"
 )
@@ -29,25 +30,25 @@ func (a *App) faviconLinks(baseURL string) []string {
 func (a *App) commonHead(baseURL, originURL, username, title, description, image, card, activityHref string) []string {
 	h := []string{
 		`<meta charset="utf-8">`,
-		`<link rel="canonical" href="` + htmlEscape(originURL) + `">`,
-		`<meta property="og:url" content="` + htmlEscape(originURL) + `">`,
+		`<link rel="canonical" href="` + html.EscapeString(originURL) + `">`,
+		`<meta property="og:url" content="` + html.EscapeString(originURL) + `">`,
 		`<meta property="og:locale" content="en_US">`,
-		`<meta property="og:site_name" content="` + htmlEscape(a.cfg.BrandName) + `">`,
-		`<meta property="og:title" content="` + htmlEscape(title) + `">`,
-		`<meta name="twitter:title" content="` + htmlEscape(title) + `">`,
-		`<meta name="twitter:creator" content="@` + htmlEscape(username) + `">`,
-		`<meta name="theme-color" content="` + htmlEscape(a.cfg.BrandColor) + `">`,
+		`<meta property="og:site_name" content="` + html.EscapeString(a.cfg.BrandName) + `">`,
+		`<meta property="og:title" content="` + html.EscapeString(title) + `">`,
+		`<meta name="twitter:title" content="` + html.EscapeString(title) + `">`,
+		`<meta name="twitter:creator" content="@` + html.EscapeString(username) + `">`,
+		`<meta name="theme-color" content="` + html.EscapeString(a.cfg.BrandColor) + `">`,
 		`<meta name="twitter:card" content="` + card + `">`,
-		`<meta property="og:image" content="` + htmlEscape(image) + `">`,
-		`<meta property="og:image:secure_url" content="` + htmlEscape(image) + `">`,
-		`<meta name="twitter:image" content="` + htmlEscape(image) + `">`,
-		`<meta name="description" content="` + htmlEscape(description) + `">`,
-		`<meta property="og:description" content="` + htmlEscape(description) + `">`,
-		`<meta name="twitter:description" content="` + htmlEscape(description) + `">`,
+		`<meta property="og:image" content="` + html.EscapeString(image) + `">`,
+		`<meta property="og:image:secure_url" content="` + html.EscapeString(image) + `">`,
+		`<meta name="twitter:image" content="` + html.EscapeString(image) + `">`,
+		`<meta name="description" content="` + html.EscapeString(description) + `">`,
+		`<meta property="og:description" content="` + html.EscapeString(description) + `">`,
+		`<meta name="twitter:description" content="` + html.EscapeString(description) + `">`,
 	}
 	h = append(h, a.faviconLinks(baseURL)...)
 	if activityHref != "" {
-		h = append(h, `<link href="`+htmlEscape(activityHref)+`" rel="alternate" type="application/activity+json">`)
+		h = append(h, `<link href="`+html.EscapeString(activityHref)+`" rel="alternate" type="application/activity+json">`)
 	}
 	return h
 }
@@ -85,30 +86,30 @@ func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, med
 	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, card, activityHref)
 	h = append(h,
 		`<meta property="og:type" content="`+ogType+`">`,
-		`<link rel="apple-touch-icon" href="`+htmlEscape(post.ProfilePic)+`">`,
-		`<meta property="article:author" content="`+instagramOrigin+"/"+htmlEscape(post.Username)+`/">`,
+		`<link rel="apple-touch-icon" href="`+html.EscapeString(avatarOr(baseURL, post.ProfilePic))+`">`,
+		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(post.Username)+`/">`,
 		`<meta name="twitter:image:width" content="`+strconv.Itoa(first.Width)+`">`,
 		`<meta name="twitter:image:height" content="`+strconv.Itoa(first.Height)+`">`,
 		`<meta property="og:image:width" content="`+strconv.Itoa(first.Width)+`">`,
 		`<meta property="og:image:height" content="`+strconv.Itoa(first.Height)+`">`,
 	)
 	if published := isoTime(post.CreatedAt); published != "" {
-		h = append(h, `<meta property="article:published_time" content="`+htmlEscape(published)+`">`)
+		h = append(h, `<meta property="article:published_time" content="`+html.EscapeString(published)+`">`)
 	}
 	if imageAlt != "" {
 		h = append(h,
-			`<meta name="twitter:image:alt" content="`+htmlEscape(imageAlt)+`">`,
-			`<meta property="og:image:alt" content="`+htmlEscape(imageAlt)+`">`,
+			`<meta name="twitter:image:alt" content="`+html.EscapeString(imageAlt)+`">`,
+			`<meta property="og:image:alt" content="`+html.EscapeString(imageAlt)+`">`,
 		)
 	}
 	if !isTelegramBot(ua) {
-		h = append(h, `<meta http-equiv="refresh" content="0;url=`+htmlEscape(originURL)+`">`)
+		h = append(h, `<meta http-equiv="refresh" content="0;url=`+html.EscapeString(originURL)+`">`)
 	}
 	if exposeVideo {
 		vidW, vidH := videoDisplaySize(first)
 		h = append(h,
-			`<meta property="og:video" content="`+htmlEscape(mediaHref)+`">`,
-			`<meta property="og:video:secure_url" content="`+htmlEscape(mediaHref)+`">`,
+			`<meta property="og:video" content="`+html.EscapeString(mediaHref)+`">`,
+			`<meta property="og:video:secure_url" content="`+html.EscapeString(mediaHref)+`">`,
 			`<meta property="og:video:type" content="video/mp4">`,
 			`<meta property="og:video:width" content="`+strconv.Itoa(vidW)+`">`,
 			`<meta property="og:video:height" content="`+strconv.Itoa(vidH)+`">`,
@@ -149,7 +150,7 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool) str
 	h := a.commonHead(baseURL, origin, p.Username, title, description, p.ProfilePic, "summary", profileStatusURL(baseURL, p.Username))
 	h = append(h,
 		`<meta property="og:type" content="profile">`,
-		`<meta property="profile:username" content="`+htmlEscape(p.Username)+`">`,
+		`<meta property="profile:username" content="`+html.EscapeString(p.Username)+`">`,
 	)
 	return compactHTML(`<!DOCTYPE html>` + embedBanner + `<html lang="en"><head>` + strings.Join(h, "") + `</head><body></body></html>`)
 }
@@ -176,19 +177,19 @@ func budgetCard(supportURL string) (title, desc string) {
 func (a *App) buildStatusEmbedHTML(baseURL, originURL, title, description string) string {
 	h := []string{
 		`<meta charset="utf-8">`,
-		`<link rel="canonical" href="` + htmlEscape(originURL) + `">`,
-		`<meta property="og:url" content="` + htmlEscape(originURL) + `">`,
+		`<link rel="canonical" href="` + html.EscapeString(originURL) + `">`,
+		`<meta property="og:url" content="` + html.EscapeString(originURL) + `">`,
 		`<meta property="og:type" content="article">`,
-		`<meta property="og:site_name" content="` + htmlEscape(a.cfg.BrandName) + `">`,
-		`<meta property="og:title" content="` + htmlEscape(title) + `">`,
-		`<meta name="twitter:title" content="` + htmlEscape(title) + `">`,
-		`<meta property="og:image" content="` + htmlEscape(baseURL+"/favicon-192.png") + `">`,
-		`<meta name="twitter:image" content="` + htmlEscape(baseURL+"/favicon-192.png") + `">`,
-		`<meta name="description" content="` + htmlEscape(description) + `">`,
-		`<meta property="og:description" content="` + htmlEscape(description) + `">`,
-		`<meta name="twitter:description" content="` + htmlEscape(description) + `">`,
+		`<meta property="og:site_name" content="` + html.EscapeString(a.cfg.BrandName) + `">`,
+		`<meta property="og:title" content="` + html.EscapeString(title) + `">`,
+		`<meta name="twitter:title" content="` + html.EscapeString(title) + `">`,
+		`<meta property="og:image" content="` + html.EscapeString(baseURL+"/favicon-192.png") + `">`,
+		`<meta name="twitter:image" content="` + html.EscapeString(baseURL+"/favicon-192.png") + `">`,
+		`<meta name="description" content="` + html.EscapeString(description) + `">`,
+		`<meta property="og:description" content="` + html.EscapeString(description) + `">`,
+		`<meta name="twitter:description" content="` + html.EscapeString(description) + `">`,
 		`<meta name="twitter:card" content="summary">`,
-		`<meta name="theme-color" content="` + htmlEscape(a.cfg.BrandColor) + `">`,
+		`<meta name="theme-color" content="` + html.EscapeString(a.cfg.BrandColor) + `">`,
 	}
 	h = append(h, a.faviconLinks(baseURL)...)
 	return compactHTML(`<!DOCTYPE html>` + embedBanner + `<html lang="en"><head>` + strings.Join(h, "") + `</head><body></body></html>`)

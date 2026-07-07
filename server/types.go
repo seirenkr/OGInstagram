@@ -39,26 +39,16 @@ type Config struct {
 	AssetsDir         string
 }
 
-type RequestQuery struct {
-	ImgIndex    int
-	ImgIndexSet bool
-	Index       int
-	IndexSet    bool
-	Order       int
-	OrderSet    bool
-	Gallery     bool
-}
-
 type AppError struct {
 	Status  int
 	Message string
 	Reason  string
 
 	Ephemeral bool
-}
 
-func newAppError(status int, message string) *AppError {
-	return &AppError{Status: status, Message: message}
+	// Error-card overrides from the oembed fallback: Instagram's own error
+	// text, shown instead of the generic per-reason card.
+	CardReason, CardTitle, CardDesc string
 }
 
 func igErr(status int, reason, message string) *AppError {

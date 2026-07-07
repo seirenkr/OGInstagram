@@ -53,76 +53,34 @@ func (a *App) getPost(shortcode string, meta *fetchMeta) (Post, *AppError) {
 }
 
 func (a *App) fetchPost(shortcode string) (Post, *AppError) {
-	post, err := raceEmbedFirst(
-		func() (Post, *AppError) { return a.fetchPostEmbed(shortcode) },
-		func() (Post, *AppError) { return a.fetchPostWith(webLoggedOutSpec(shortcode)) },
+	// Proxy-free embed fetch first; the proxied GraphQL fetch joins as the
+	// hedge once the embed fails or hasn't answered within fetchHedgeDelay.
+	post, err := hedgedRace(
+		[]attempt[Post]{func() (Post, *AppError) { return a.fetchPostEmbed(shortcode) }},
+		func() []attempt[Post] {
+			return []attempt[Post]{func() (Post, *AppError) {
+				body, err := a.raceFetch(webLoggedOutSpec(shortcode))
+				if err != nil {
+					return Post{}, err
+				}
+				return parseInstagramPost(body)
+			}}
+		},
 	)
 	if err != nil {
-		return Post{}, err
+		// Both primary fetches failed; the public oembed endpoint sometimes
+		// still resolves (and on failure refines the error card text).
+		oe, ok := a.oembedFallback(shortcode, err)
+		if !ok {
+			return Post{}, err
+		}
+		post = oe
 	}
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
 	a.flagOversizedVideos(&post)
 	return post, nil
-}
-
-// raceEmbedFirst starts the proxy-free embed fetch immediately and adds the
-// proxied GraphQL fetch once the embed fails or hasn't answered within
-// fetchHedgeDelay; the first success wins. Worst case is bounded by a single
-// fetchTimeout after the last launch instead of the sum of serial attempts.
-func raceEmbedFirst(embed, gql func() (Post, *AppError)) (Post, *AppError) {
-	type result struct {
-		post Post
-		err  *AppError
-	}
-	results := make(chan result, 2)
-	launch := func(f func() (Post, *AppError)) {
-		go func() {
-			p, err := f()
-			results <- result{p, err}
-		}()
-	}
-	launch(embed)
-	pending := 1
-	gqlLaunched := false
-	launchGQL := func() {
-		if !gqlLaunched {
-			gqlLaunched = true
-			pending++
-			launch(gql)
-		}
-	}
-
-	timer := time.NewTimer(fetchHedgeDelay)
-	defer timer.Stop()
-
-	var lastErr *AppError
-	for pending > 0 {
-		select {
-		case <-timer.C:
-			launchGQL()
-		case r := <-results:
-			pending--
-			if r.err == nil {
-				return r.post, nil
-			}
-			// Prefer a permanent error (real 404) over a transient one.
-			if lastErr == nil || (isTransient(lastErr.Reason) && !isTransient(r.err.Reason)) {
-				lastErr = r.err
-			}
-			launchGQL()
-		}
-	}
-	return Post{}, lastErr
-}
-
-func (a *App) fetchPostWith(spec gqlSpec) (Post, *AppError) {
-	body, err := a.raceFetch(spec)
-	if err != nil {
-		return Post{}, err
-	}
-	return parseInstagramPost(body)
 }
 
 func (a *App) flagOversizedVideos(post *Post) {
