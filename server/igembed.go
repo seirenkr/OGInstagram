@@ -94,22 +94,24 @@ func parseEmbedPost(page string) (Post, *AppError) {
 }
 
 var (
-	simpleMediaTypeRE   = regexp.MustCompile(`data-media-type="([^"]*)"`)
-	simpleOwnerIDRE     = regexp.MustCompile(`data-owner-id="([^"]*)"`)
-	simpleMediaIDRE     = regexp.MustCompile(`data-media-id="([^"]*)"`)
-	simplePermalinkRE   = regexp.MustCompile(`data-permalink="[^"]*?/p/([A-Za-z0-9_-]+)`)
-	simpleUsernameRE    = regexp.MustCompile(`class="UsernameText">([^<]*)<`)
-	simpleAvatarRE      = regexp.MustCompile(`(?s)class="Avatar[^"]*"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
-	simpleImageTagRE    = regexp.MustCompile(`(?s)<img class="EmbeddedMediaImage"[^>]*>`)
-	simpleSrcRE         = regexp.MustCompile(`\bsrc="([^"]*)"`)
-	simpleSrcsetRE      = regexp.MustCompile(`\bsrcset="([^"]*)"`)
-	simpleFrameRatioRE  = regexp.MustCompile(`EmbedFrame"[^>]*padding-bottom:\s*([\d.]+)%`)
-	simpleLikesRE       = regexp.MustCompile(`>([\d,]+)\s+likes<`)
-	simpleCommentsRE    = regexp.MustCompile(`([\d,]+)\s+comments`)
-	simpleCaptionOpenRE = regexp.MustCompile(`<div class="Caption">`)
-	simpleCaptionUserRE = regexp.MustCompile(`(?s)^\s*<a class="CaptionUsername"[^>]*>[^<]*</a>`)
-	simpleBrRE          = regexp.MustCompile(`(?i)<br\s*/?>`)
-	simpleTagRE         = regexp.MustCompile(`<[^>]+>`)
+	simpleMediaTypeRE = regexp.MustCompile(`data-media-type="([^"]*)"`)
+	simpleOwnerIDRE   = regexp.MustCompile(`data-owner-id="([^"]*)"`)
+	simpleMediaIDRE   = regexp.MustCompile(`data-media-id="([^"]*)"`)
+	simplePermalinkRE = regexp.MustCompile(`data-permalink="[^"]*?/p/([A-Za-z0-9_-]+)`)
+	simpleUsernameRE  = regexp.MustCompile(`class="UsernameText">([^<]*)<`)
+	simpleAvatarRE    = regexp.MustCompile(`(?s)class="Avatar[^"]*"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
+	// Collab posts stack two avatars; the owner's carries SecondCollabAvatar.
+	simpleCollabAvatarRE = regexp.MustCompile(`(?s)class="[^"]*SecondCollabAvatar"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
+	simpleImageTagRE     = regexp.MustCompile(`(?s)<img class="EmbeddedMediaImage"[^>]*>`)
+	simpleSrcRE          = regexp.MustCompile(`\bsrc="([^"]*)"`)
+	simpleSrcsetRE       = regexp.MustCompile(`\bsrcset="([^"]*)"`)
+	simpleFrameRatioRE   = regexp.MustCompile(`EmbedFrame"[^>]*padding-bottom:\s*([\d.]+)%`)
+	simpleLikesRE        = regexp.MustCompile(`>([\d,]+)\s+likes<`)
+	simpleCommentsRE     = regexp.MustCompile(`([\d,]+)\s+comments`)
+	simpleCaptionOpenRE  = regexp.MustCompile(`<div class="Caption">`)
+	simpleCaptionUserRE  = regexp.MustCompile(`(?s)^\s*<a class="CaptionUsername"[^>]*>[^<]*</a>`)
+	simpleBrRE           = regexp.MustCompile(`(?i)<br\s*/?>`)
+	simpleTagRE          = regexp.MustCompile(`<[^>]+>`)
 )
 
 // parseEmbedSimple parses the PolarisEmbedSimple DOM (contextJSON null): single
@@ -156,7 +158,7 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 		Username:   username,
 		OwnerID:    firstGroup(simpleOwnerIDRE, page),
 		FullName:   "",
-		ProfilePic: normalizeCDNHost(html.UnescapeString(firstGroup(simpleAvatarRE, page))),
+		ProfilePic: normalizeCDNHost(html.UnescapeString(firstNonEmpty(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page)))),
 		Caption:    simpleCaption(page),
 		StatsLine: "❤️ " + fmtCount(parseCount(firstGroup(simpleLikesRE, page))) +
 			"  \U0001f4ac " + fmtCount(parseCount(firstGroup(simpleCommentsRE, page))),
