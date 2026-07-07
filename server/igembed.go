@@ -64,11 +64,11 @@ func embedContextJSON(html string) (string, *AppError) {
 	const key = `"contextJSON":`
 	i := strings.Index(html, key)
 	if i < 0 {
-		return "", igErr(502, reasonGraphql, "embed contextJSON not found")
+		return "", igErr(502, reasonClientError, "embed contextJSON not found")
 	}
 	var inner string
 	if err := json.NewDecoder(strings.NewReader(html[i+len(key):])).Decode(&inner); err != nil || inner == "" {
-		return "", igErr(502, reasonGraphql, "embed contextJSON decode failed")
+		return "", igErr(502, reasonClientError, "embed contextJSON decode failed")
 	}
 	return inner, nil
 }
@@ -88,7 +88,7 @@ func parseEmbedPost(page string) (Post, *AppError) {
 	}
 	sm := gjson.Get(inner, "gql_data.shortcode_media")
 	if !present(sm) {
-		return Post{}, igErr(502, reasonGraphql, "embed missing media")
+		return Post{}, igErr(502, reasonClientError, "embed missing media")
 	}
 	return parseGraphMedia(sm)
 }
@@ -117,10 +117,10 @@ var (
 func parseEmbedSimple(page string) (Post, *AppError) {
 	mediaType := firstGroup(simpleMediaTypeRE, page)
 	if mediaType == "" {
-		return Post{}, igErr(502, reasonGraphql, "simple embed: no media node")
+		return Post{}, igErr(502, reasonClientError, "simple embed: no media node")
 	}
 	if !strings.Contains(mediaType, "Image") {
-		return Post{}, igErr(502, reasonGraphql, "simple embed: unsupported media type "+mediaType)
+		return Post{}, igErr(502, reasonClientError, "simple embed: unsupported media type "+mediaType)
 	}
 	username := firstGroup(simpleUsernameRE, page)
 	if username == "" {
@@ -243,7 +243,7 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		add(sm)
 	}
 	if blocked {
-		return Post{}, igErr(502, reasonGraphql, "embed video blocked")
+		return Post{}, igErr(502, reasonClientError, "embed video blocked")
 	}
 	if len(atts) == 0 {
 		return Post{}, igErr(502, reasonClientError, "embed had no attachments")

@@ -1,48 +1,17 @@
-:root { --font-sans: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; }
-* { box-sizing: border-box; }
+@source "../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "tailwindcss";
+
+/* Your custom styles */
+:root { --font-sans: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; }
 html, body, #root { min-height: 100%; }
-body { margin: 0; background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; font-optical-sizing: auto; }
+body { background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: var(--font-sans); font-optical-sizing: auto; overflow-x: hidden; }
 button, a { touch-action: manipulation; }
-body { overflow-x: hidden; }
 h1, h2, h3 { text-wrap: balance; }
 h1[id], h2[id], h3[id] { scroll-margin-top: 72px; }
 p { text-wrap: pretty; }
-.page-shell { width: min(100%, 1200px); margin-inline: auto; padding-inline: 32px; }
-.gnb-inner { min-height: 56px; }
-.footer-inner { padding-block: 24px; }
 .site-header { position: sticky; top: 0; z-index: 40; margin-bottom: -57px; border-bottom: 1px solid transparent; transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
 .site-header.is-top { background: transparent; }
 .site-header.is-scrolled { border-color: var(--color-kumo-hairline); background: color-mix(in srgb, var(--color-kumo-base) 78%, transparent); box-shadow: 0 1px 12px color-mix(in srgb, var(--color-kumo-shadow-drop) 45%, transparent); -webkit-backdrop-filter: blur(16px) saturate(140%); backdrop-filter: blur(16px) saturate(140%); }
-.overlay-portal { position: relative; z-index: 60; }
-.site-brand { border-radius: 4px; transition: color 120ms ease; }
-.site-brand:hover { color: var(--text-color-kumo-brand); }
-.site-brand:focus-visible { outline: 2px solid var(--color-kumo-focus); outline-offset: 3px; }
-.page-main { width: min(100%, 1200px); margin-inline: auto; padding: 0 32px 72px; display: flex; flex-direction: column; gap: 72px; }
-.page-section { display: flex; flex-direction: column; gap: 24px; }
-.card-grid > * { height: 100%; }
-.card-grid > * > :last-child { flex-grow: 1; }
-.status-stack { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
-.status-stack > * { min-width: 0; }
-.status-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 8px; padding-inline: 8px; }
-.status-legend > * + * { border-left: 1px solid var(--color-kumo-hairline); padding-left: 16px; }
-.key-prefix { color: var(--text-color-kumo-brand); }
-/* kumo 2.6 primary buttons derive bg/ring/gradient/hover from --color-kumo-brand;
-   re-tinting the var is the whole patch. */
-.cta-gradient { --color-kumo-brand: #ff0069; }
-.tabular-nums { font-variant-numeric: tabular-nums; }
-.chart-empty { min-height: 180px; display: grid; place-items: center; color: var(--color-kumo-subtle); font-size: 13px; }
-.hero { position: relative; min-height: 400px; display: flex; align-items: center; padding-block: 64px; }
 .hero::before { content: ""; position: absolute; z-index: 0; inset: 0 calc(50% - 50vw); pointer-events: none; background: radial-gradient(circle at 60% 18%, color-mix(in srgb, #ff7a00 16%, transparent), transparent 38%), radial-gradient(circle at 78% 30%, color-mix(in srgb, #ff0069 22%, transparent), transparent 46%), radial-gradient(circle at 92% 58%, color-mix(in srgb, #d300c5 18%, transparent), transparent 42%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%); }
-.hero-copy { position: relative; z-index: 1; max-width: 760px; display: flex; flex-direction: column; align-items: flex-start; gap: 20px; }
-.skip-link { position: fixed; inset: 8px auto auto 8px; z-index: 50; transform: translateY(-160%); border-radius: 8px; background: var(--color-kumo-contrast); color: var(--color-kumo-base); padding: 8px 12px; }
-.skip-link:focus-visible { transform: translateY(0); }
-@media (prefers-reduced-motion: reduce) { .site-header, .site-brand { transition: none; } }
-@media (max-width: 960px) {
-  .status-stack { grid-template-columns: minmax(0, 1fr); }
-}
-@media (max-width: 640px) {
-  .page-shell { padding-inline: 16px; }
-  .page-main { padding: 0 16px 56px; gap: 56px; }
-  .page-section { gap: 20px; }
-  .hero { min-height: 340px; padding-block: 48px; }
-}
+@media (prefers-reduced-motion: reduce) { .site-header { transition: none; } }

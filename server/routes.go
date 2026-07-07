@@ -3,6 +3,7 @@ package main
 import (
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -81,34 +82,43 @@ func splitPath(path string) []string {
 type HomeLocale string
 
 const (
-	localeEN HomeLocale = "en"
-	localeJA HomeLocale = "ja"
-	localeKO HomeLocale = "ko"
+	localeEN     HomeLocale = "en"
+	localeJA     HomeLocale = "ja"
+	localeKO     HomeLocale = "ko"
+	localeZHHant HomeLocale = "zh-hant"
+	localeZHHans HomeLocale = "zh-hans"
+	localeES     HomeLocale = "es"
+	localePT     HomeLocale = "pt"
+	localeFR     HomeLocale = "fr"
 )
 
+// homeLocales fixes the hreflang emission order: BCP 47 code, alphabetical.
+var homeLocales = []HomeLocale{localeEN, localeES, localeFR, localeJA, localeKO, localePT, localeZHHans, localeZHHant}
+
 func asHomeLocale(value string) (HomeLocale, bool) {
-	switch value {
-	case "en":
-		return localeEN, true
-	case "ja":
-		return localeJA, true
-	case "ko":
-		return localeKO, true
+	l := HomeLocale(value)
+	return l, slices.Contains(homeLocales, l)
+}
+
+// matchLocale maps one lowercased Accept-Language tag to a supported locale.
+// Chinese needs the script: an explicit Hant script or a TW/HK/MO region picks
+// Traditional; any other zh falls back to Simplified.
+func matchLocale(tag string) (HomeLocale, bool) {
+	if tag == "zh" || strings.HasPrefix(tag, "zh-") {
+		if strings.Contains(tag, "hant") || strings.HasSuffix(tag, "-tw") || strings.HasSuffix(tag, "-hk") || strings.HasSuffix(tag, "-mo") {
+			return localeZHHant, true
+		}
+		return localeZHHans, true
 	}
-	return "", false
+	return asHomeLocale(strings.SplitN(tag, "-", 2)[0])
 }
 
 func resolveHomeLocale(acceptLanguage string) HomeLocale {
 	for _, part := range strings.Split(acceptLanguage, ",") {
-		primary := strings.ToLower(strings.TrimSpace(strings.SplitN(part, ";", 2)[0]))
-		primary = strings.SplitN(primary, "-", 2)[0]
-		if loc, ok := asHomeLocale(primary); ok {
+		tag := strings.ToLower(strings.TrimSpace(strings.SplitN(part, ";", 2)[0]))
+		if loc, ok := matchLocale(tag); ok {
 			return loc
 		}
 	}
 	return localeEN
-}
-
-func homePathLocale(path string) (HomeLocale, bool) {
-	return asHomeLocale(strings.Trim(path, "/"))
 }
