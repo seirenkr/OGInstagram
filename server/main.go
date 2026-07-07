@@ -105,11 +105,9 @@ func (a *App) route(req *http.Request) resp {
 	path := req.URL.Path
 
 	if path == "/" {
-		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), nil)))
-	}
-	if loc, ok := homePathLocale(path); ok {
-		l := loc
-		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), &l)))
+		// Locale lives in ?hl=, never in the path: every single-segment path
+		// belongs to the Instagram username namespace.
+		return cacheableHome(htmlResp(200, a.buildHomeHTML(req.Host, req.Header.Get("Accept-Language"), req.URL.Query().Get("hl"))))
 	}
 	if path == "/_container/health" {
 		return jsonResp(200, jsonBytes(map[string]any{"ok": true, "service": serviceName + "-container"}))
@@ -269,10 +267,16 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	meta := &fetchMeta{}
 	post, err := a.getPost(shortcode, meta)
 	if err != nil {
-		if isTransient(err.Reason) {
-			return tagFetch(redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302), meta)
+		// Humans still get the 302-to-Instagram fallback on transient errors,
+		// but for the media clients this route serves that is a failed fetch;
+		// x-og-* report it as such (the worker strips them before responding).
+		r := redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302)
+		if !isTransient(err.Reason) {
+			r = textResp(err.Status, err.Message)
 		}
-		return resp{status: err.Status, headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"}, body: []byte(err.Message)}
+		r.headers["x-og-status"] = strconv.Itoa(err.Status)
+		r.headers["x-og-reason"] = err.Reason
+		return tagFetch(r, meta)
 	}
 	att := post.Attachments[mediaIndexFor(post, index)]
 	target := att.URL

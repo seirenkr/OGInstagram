@@ -53,12 +53,13 @@ function optionalPathIndex(segments: string[], index: number): number | null | u
   return Number.isFinite(value) ? value : undefined;
 }
 
-export type HomeLocale = "en" | "ja" | "ko";
+type HomeLocale = "en" | "ja" | "ko" | "zh-hant" | "zh-hans" | "es" | "pt" | "fr";
+
+const HOME_LOCALES: readonly string[] = ["en", "es", "fr", "ja", "ko", "pt", "zh-hans", "zh-hant"];
 
 export function resolveHomeLocale(acceptLanguage: string): HomeLocale {
   for (const part of acceptLanguage.split(",")) {
-    const primary = part.split(";")[0].trim().toLowerCase().split("-")[0];
-    const matched = asHomeLocale(primary);
+    const matched = matchLocale(part.split(";")[0].trim().toLowerCase());
     if (matched) {
       return matched;
     }
@@ -66,12 +67,17 @@ export function resolveHomeLocale(acceptLanguage: string): HomeLocale {
   return "en";
 }
 
-function asHomeLocale(value: string): HomeLocale | null {
-  return value === "en" || value === "ja" || value === "ko" ? value : null;
+// Chinese needs the script: an explicit Hant script or a TW/HK/MO region picks
+// Traditional; any other zh falls back to Simplified.
+function matchLocale(tag: string): HomeLocale | null {
+  if (tag === "zh" || tag.startsWith("zh-")) {
+    return tag.includes("hant") || tag.endsWith("-tw") || tag.endsWith("-hk") || tag.endsWith("-mo") ? "zh-hant" : "zh-hans";
+  }
+  return asHomeLocale(tag.split("-")[0]);
 }
 
-export function homePathLocale(path: string): HomeLocale | null {
-  return asHomeLocale(path.replace(/^\/+|\/+$/g, ""));
+export function asHomeLocale(value: string): HomeLocale | null {
+  return HOME_LOCALES.includes(value) ? (value as HomeLocale) : null;
 }
 
 export function splitPath(path: string): string[] {

@@ -1,5 +1,5 @@
 import { Container } from "@cloudflare/containers";
-import { botRE, homePathLocale, parseEmbedSegments, resolveHomeLocale, splitPath, validUsername } from "../shared/routes";
+import { asHomeLocale, botRE, parseEmbedSegments, resolveHomeLocale, splitPath, validUsername } from "../shared/routes";
 
 const instagramOrigin = "https://www.instagram.com";
 const defaultCache = (caches as unknown as { default: Cache }).default;
@@ -199,11 +199,6 @@ function resolveContainerRoute(url: URL): ContainerRoute | null {
   if (path === "/_container/health") {
     return { cacheKey: null, varyBot: false, humanRedirect: null };
   }
-
-  const pathLocale = homePathLocale(path);
-  if (pathLocale) {
-    return { cacheKey: `/__home1/${pathLocale}`, varyBot: false, humanRedirect: null };
-  }
   if (path === "/favicon.ico" || path === "/default-avatar.jpg" || /^\/favicon-\d+\.png$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
@@ -286,7 +281,9 @@ function edgeCacheKey(route: ContainerRoute, request: Request, url: URL): string
     key += `${key.includes("?") ? "&" : "?"}bot=${telegram ? "telegram" : "other"}`;
   }
   if (route.varyLang) {
-    const locale = resolveHomeLocale(request.headers.get("accept-language") ?? "");
+    // ?hl= forces the locale; otherwise it comes from Accept-Language.
+    const locale = asHomeLocale((url.searchParams.get("hl") ?? "").toLowerCase())
+      ?? resolveHomeLocale(request.headers.get("accept-language") ?? "");
     key += `${key.includes("?") ? "&" : "?"}lang=${locale}`;
   }
   return key;
@@ -332,19 +329,27 @@ function queryInt(params: URLSearchParams, key: string): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+// Confirmed content gating (region/age/audience) charts as "Restricted";
+// everything else — including not-found and bad-request — counts as failed.
+const RESTRICTED_REASONS = "'GeoBlockRequired'";
+
 const STATUS_QUERY =
   "SELECT intDiv(toUInt32(timestamp), 600) * 600 AS t, " +
   "sum(_sample_interval * double1) / sum(_sample_interval) AS latency, " +
   "sumIf(_sample_interval, blob3 = 'ok') AS resolved, " +
-  "sumIf(_sample_interval, blob3 = 'fail') AS failed " +
+  `sumIf(_sample_interval, blob3 = 'fail' AND blob4 IN (${RESTRICTED_REASONS})) AS restricted, ` +
+  `sumIf(_sample_interval, blob3 = 'fail' AND blob4 NOT IN (${RESTRICTED_REASONS})) AS failed ` +
   "FROM oginstagram_requests WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY t ORDER BY t";
 
 type StatusSeries = {
   t: number[];
   latency: number[];
   resolved: number[];
+  restricted: number[];
   failed: number[];
 };
+
+type StatusRow = { t: unknown; latency: unknown; resolved: unknown; restricted: unknown; failed: unknown };
 
 async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
   const cacheKey = `${url.origin}/__status`;
@@ -355,7 +360,7 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
   if (!env.AE_ACCOUNT_ID || !env.AE_API_TOKEN) {
     return statusJSON(emptyStatusSeries(), 503);
   }
-  let rows: Array<{ t: unknown; latency: unknown; resolved: unknown; failed: unknown }> = [];
+  let rows: StatusRow[] = [];
   try {
     const upstream = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${env.AE_ACCOUNT_ID}/analytics_engine/sql`,
@@ -369,9 +374,7 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
       console.error({ message: `status query failed: upstream ${upstream.status}`, event: "status_query_failed", status: upstream.status, body: await upstream.text() });
       return statusJSON(emptyStatusSeries(), 502);
     }
-    const parsed = (await upstream.json()) as {
-      data?: Array<{ t: unknown; latency: unknown; resolved: unknown; failed: unknown }>
-    };
+    const parsed = (await upstream.json()) as { data?: StatusRow[] };
     rows = parsed.data ?? [];
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -382,6 +385,7 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
     t: rows.map(row => Number(row.t)),
     latency: rows.map(row => Math.round(Number(row.latency) * 100) / 100),
     resolved: rows.map(row => Math.round(Number(row.resolved) * 100) / 100),
+    restricted: rows.map(row => Math.round(Number(row.restricted) * 100) / 100),
     failed: rows.map(row => Math.round(Number(row.failed) * 100) / 100)
   };
   const response = statusJSON(series, 200, "public, s-maxage=60");
@@ -390,7 +394,7 @@ async function serveStatus(env: Env, ctx: ExecutionContext, url: URL): Promise<R
 }
 
 function emptyStatusSeries(): StatusSeries {
-  return { t: [], latency: [], resolved: [], failed: [] };
+  return { t: [], latency: [], resolved: [], restricted: [], failed: [] };
 }
 
 function statusJSON(series: StatusSeries, status: number, cacheControl?: string): Response {

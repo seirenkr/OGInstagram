@@ -327,10 +327,17 @@ func (a *App) oembedFallback(shortcode string, err *AppError) (Post, bool) {
 	if p, ok := parseOembedPost(shortcode, body); ok {
 		return p, true
 	}
-	if gjson.Get(body, "status").String() == "fail" {
-		t := gjson.Get(body, "title").String()
-		if msg := gjson.Get(body, "message").String(); msg != "" && t != "" {
-			err.CardReason, err.CardTitle, err.CardDesc = msg, t, gjson.Get(body, "description").String()
+	if root := gjson.Parse(body); root.Get("status").String() == "fail" {
+		msg := root.Get("message").String()
+		// Every gating kind (region, age, limited audience) fails with this
+		// same message; title/description come back localized.
+		if msg == "geoblock_required" {
+			msg = reasonGeoBlocked
+			err.Reason = reasonGeoBlocked
+			err.Status = 451
+		}
+		if t := root.Get("title").String(); msg != "" && t != "" {
+			err.CardReason, err.CardTitle, err.CardDesc = msg, t, root.Get("description").String()
 		}
 	}
 	return Post{}, false
