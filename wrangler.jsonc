@@ -18,8 +18,8 @@
     "BASE_URL": "https://oginstagram.com",
     "BRAND_NAME": "OGInstagram",
     "BRAND_COLOR": "#ff0069",
-    "SUPPORT_URL": "https://ko-fi.com/voyage1",
-    "GITHUB_URL": "https://github.com/LilasKR/OGInstagram"
+    "SUPPORT_URL": "https://ko-fi.com/afuru",
+    "GITHUB_URL": "https://github.com/AfuruX/OGInstagram"
   },
   "routes": [
     {

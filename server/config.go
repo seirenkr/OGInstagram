@@ -76,7 +76,7 @@ func configFromEnv() Config {
 	brandName := strings.TrimSpace(os.Getenv("BRAND_NAME"))
 	brandColor := strings.TrimSpace(os.Getenv("BRAND_COLOR"))
 	supportURL := strings.TrimSpace(os.Getenv("SUPPORT_URL"))
-	githubURL := envString("GITHUB_URL", "https://github.com/LilasKR/OGInstagram")
+	githubURL := envString("GITHUB_URL", "https://github.com/AfuruX/OGInstagram")
 	version := envString("OG_VERSION", "dev")
 	return Config{
 		Port:              port,

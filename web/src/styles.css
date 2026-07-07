@@ -4,11 +4,9 @@
 
 /* Your custom styles */
 :root { --font-sans: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; }
-html, body, #root { min-height: 100%; }
 body { background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: var(--font-sans); font-optical-sizing: auto; overflow-x: hidden; }
 button, a { touch-action: manipulation; }
 h1, h2, h3 { text-wrap: balance; }
-h1[id], h2[id], h3[id] { scroll-margin-top: 72px; }
 p { text-wrap: pretty; }
 .site-header { position: sticky; top: 0; z-index: 40; margin-bottom: -57px; border-bottom: 1px solid transparent; transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
 .site-header.is-top { background: transparent; }
