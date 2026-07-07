@@ -37,6 +37,14 @@
     {
       "pattern": "g.oginstagram.com",
       "custom_domain": true
+    },
+    {
+      "pattern": "www.d.oginstagram.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.g.oginstagram.com",
+      "custom_domain": true
     }
   ],
   "durable_objects": {
