@@ -184,11 +184,11 @@ type ContainerRoute = {
 };
 
 function isDirectHost(url: URL): boolean {
-  return url.hostname.startsWith("d.");
+  return url.hostname.startsWith("d.") || url.hostname.startsWith("www.d.");
 }
 
 function isGalleryHost(url: URL): boolean {
-  return url.hostname.startsWith("g.");
+  return url.hostname.startsWith("g.") || url.hostname.startsWith("www.g.");
 }
 
 function resolveContainerRoute(url: URL): ContainerRoute | null {
