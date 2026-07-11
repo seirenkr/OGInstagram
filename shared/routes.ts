@@ -1,7 +1,7 @@
 export const botRE =
   /bot|discordbot|telegrambot|facebook|twitterbot|slackbot|whatsapp|embed|got|firefox\/92|curl|wget|go-http|yahoo|generator|revoltchat|preview|link|proxy|vkshare|images|analyzer|index|crawl|spider|python|node|deno|mastodon|http\.rb|ruby|bun\/|fiddler|iframely|bluesky|matrix|cardyb|resolver|feedly|rss|reader|atom|thunderbird|axios/i;
 
-export type EmbedRoute = {
+type EmbedRoute = {
   postType: string;
   shortcode: string;
   pathIndex: number | null;
@@ -37,7 +37,7 @@ export function parseEmbedSegments(segments: string[]): EmbedRoute | null {
   return null;
 }
 
-export function normalizePostType(value: string): string {
+function normalizePostType(value: string): string {
   return value === "reel" || value === "reels" ? "reel" : "p";
 }
 
@@ -92,4 +92,12 @@ export function splitPath(path: string): string[] {
       return segment;
     }
   });
+}
+
+export function validEmbedPath(path: string): boolean {
+  if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
+    return false;
+  }
+  const segments = splitPath(path);
+  return parseEmbedSegments(segments) !== null || (segments.length === 1 && validUsername(segments[0]));
 }

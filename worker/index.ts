@@ -1,8 +1,9 @@
 import { Container } from "@cloudflare/containers";
-import { asHomeLocale, botRE, parseEmbedSegments, resolveHomeLocale, splitPath, validUsername } from "../shared/routes";
+import { asHomeLocale, botRE, parseEmbedSegments, resolveHomeLocale, splitPath, validEmbedPath, validUsername } from "../shared/routes";
 
 const instagramOrigin = "https://www.instagram.com";
 const defaultCache = (caches as unknown as { default: Cache }).default;
+const maxEmbedBodyBytes = 4096;
 
 export class OgUsContainer extends Container<Env> {
   defaultPort = 8080;
@@ -28,6 +29,12 @@ export default {
     if (url.pathname === "/_status") {
       return serveStatus(env, ctx, url);
     }
+    if (url.pathname === "/api/embed") {
+      const response = await serveEmbed(request, env, ctx, url);
+      const log = response.status >= 500 ? console.error : response.status >= 400 ? console.warn : console.info;
+      log({ event: "embed_request", method: request.method, status: response.status, ms: Date.now() - started });
+      return response;
+    }
 
     const meta: RequestMeta = { cacheHit: false };
     let response: Response;
@@ -38,13 +45,120 @@ export default {
       logRequestMetric(request, url, meta, Date.now() - started, 500, false, env.AE);
       throw err;
     }
+    // Browser subresources (our live preview's <img>) send Sec-Fetch-Site;
+    // server-side crawlers don't and keep the cheap 302. Instagram's CDN sets
+    // CORP: same-origin, which browsers enforce on the redirect target — so
+    // for browsers we follow the redirect ourselves and re-serve the bytes
+    // under our origin. Worker subrequests and body streaming are unmetered.
+    if (response.status === 302 && url.pathname.startsWith("/offload/") && request.headers.get("sec-fetch-site") === "same-origin") {
+      response = await proxyOffloadMedia(response);
+    }
     const metricStatus = meta.metricStatus ?? response.status;
     logRequestMetric(request, url, meta, Date.now() - started, metricStatus, metricStatus < 400, env.AE);
     return response;
   }
 } satisfies ExportedHandler<Env>;
 
+// Streams the offload redirect target through our origin. Only Instagram CDN
+// hosts are followed, so this can't be abused as an open proxy; anything else
+// (e.g. the default-avatar fallback on our own origin) keeps the 302.
+async function proxyOffloadMedia(redirect: Response): Promise<Response> {
+  const target = redirect.headers.get("location") ?? "";
+  let hostname = "";
+  try {
+    hostname = new URL(target).hostname;
+  } catch {
+    return redirect;
+  }
+  if (!hostname.endsWith(".cdninstagram.com") && !hostname.endsWith(".fbcdn.net")) {
+    return redirect;
+  }
+  try {
+    const media = await fetch(target, {
+      signal: AbortSignal.timeout(10000),
+      cf: { cacheEverything: true, cacheTtl: 3600 }
+    });
+    if (!media.ok) return redirect;
+    const out = new Response(media.body, { status: 200, headers: { "content-type": media.headers.get("content-type") ?? "application/octet-stream" } });
+    out.headers.set("cross-origin-resource-policy", "cross-origin");
+    out.headers.set("cache-control", "public, max-age=3600");
+    return out;
+  } catch {
+    return redirect;
+  }
+}
+
 type RequestMeta = { cacheHit: boolean; metricStatus?: number; reason?: string; metric?: string };
+
+type EmbedBody = { path: string };
+
+// Human verification is enforced at the edge, not here: a WAF custom rule
+// issues a Managed Challenge for /api/embed, and the Turnstile widget with
+// pre-clearance mints the cf_clearance cookie that satisfies it. By the time
+// this handler runs the visitor is already cleared (wrangler dev has no WAF,
+// so local requests pass straight through).
+async function serveEmbed(request: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+  if (request.method !== "POST") {
+    return embedError(405, "method not allowed", { allow: "POST" });
+  }
+  if (request.headers.get("origin") !== url.origin || request.headers.get("sec-fetch-site") !== "same-origin") {
+    return embedError(403, "forbidden");
+  }
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return embedError(415, "application/json required");
+  }
+
+  const body = await readEmbedBody(request);
+  if (!body || !validEmbedPath(body.path)) {
+    return embedError(400, "invalid Instagram path");
+  }
+
+  const ip = request.headers.get("cf-connecting-ip") ?? "local";
+  if (!(await env.EMBED_RATE_LIMITER.limit({ key: `embed:${ip}` })).success) {
+    return embedError(429, "rate limited", { "retry-after": "60" });
+  }
+
+  const target = new URL(body.path, url.origin);
+  // The UA must match botRE so the container returns embed HTML, not a 307.
+  const headers = new Headers({ "user-agent": "OGInstagramPreviewBot/1.0" });
+  const response = await handleAppRequest(new Request(target, { headers }), env, ctx, target, { cacheHit: false });
+  const safe = new Response(response.body, response);
+  safe.headers.set("cache-control", "no-store");
+  safe.headers.set("x-content-type-options", "nosniff");
+  return safe;
+}
+
+async function readEmbedBody(request: Request): Promise<EmbedBody | null> {
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxEmbedBodyBytes) {
+      await reader.cancel();
+      return null;
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  try {
+    const value = JSON.parse(text) as Partial<EmbedBody>;
+    return typeof value.path === "string" ? { path: value.path } : null;
+  } catch {
+    return null;
+  }
+}
+
+function embedError(status: number, error: string, extraHeaders: Record<string, string> = {}): Response {
+  return Response.json({ error }, {
+    status,
+    headers: { "cache-control": "no-store", "x-content-type-options": "nosniff", ...extraHeaders }
+  });
+}
 
 async function handleAppRequest(request: Request, env: Env, ctx: ExecutionContext, url: URL, meta: RequestMeta): Promise<Response> {
   const route = resolveContainerRoute(url);
@@ -66,9 +180,12 @@ async function handleAppRequest(request: Request, env: Env, ctx: ExecutionContex
     }
   }
 
-  const containerRequest = route.rewritePath
+  const routedRequest = route.rewritePath
     ? new Request(new URL(route.rewritePath, url.origin).href, request)
     : request;
+  const headers = new Headers(routedRequest.headers);
+  headers.set("x-og-public-origin", url.origin);
+  const containerRequest = new Request(routedRequest, { headers });
   let response = await containerInstance(env).fetch(containerRequest);
 
   if (response.headers.get("x-og-cache") === "hit") {
@@ -116,6 +233,7 @@ function containerEnv(env: Env): Record<string, string> {
     BRAND_COLOR: env.BRAND_COLOR ?? "",
     SUPPORT_URL: env.SUPPORT_URL ?? "",
     GITHUB_URL: env.GITHUB_URL ?? "",
+    TURNSTILE_SITE_KEY: env.TURNSTILE_SITE_KEY ?? "",
     OG_VERSION: versionCode(env)
   };
 }
@@ -194,12 +312,12 @@ function isGalleryHost(url: URL): boolean {
 function resolveContainerRoute(url: URL): ContainerRoute | null {
   const path = url.pathname;
   if (path === "/") {
-    return { cacheKey: "/__home1", varyBot: false, varyLang: true, humanRedirect: null };
+    return { cacheKey: "/__home-embed-api", varyBot: false, varyLang: true, humanRedirect: null };
   }
   if (path === "/_container/health") {
     return { cacheKey: null, varyBot: false, humanRedirect: null };
   }
-  if (path === "/favicon.ico" || path === "/default-avatar.jpg" || /^\/favicon-\d+\.png$/.test(path)) {
+  if (path === "/favicon.ico" || path === "/default-avatar.jpg" || /^\/favicon-\d+\.png$/.test(path) || /^\/PPMori-(?:Regular|Semibold)\.woff2$/.test(path)) {
     return { cacheKey: path, varyBot: false, humanRedirect: null };
   }
   if (/^\/main-[\w-]+\.(?:js|css)$/.test(path)) {

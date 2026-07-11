@@ -44,16 +44,14 @@ func TestFlagOversizedVideos(t *testing.T) {
 	}
 }
 
-func TestHedgedRace(t *testing.T) {
-	one := func(f func() (Post, *AppError)) []attempt[Post] { return []attempt[Post]{f} }
-
+func TestHedgedPair(t *testing.T) {
 	// Initial attempt answers first: the hedge never launches (no proxy budget spent).
 	hedgeCalled := false
-	p, err := hedgedRace(
-		one(func() (Post, *AppError) { return Post{Shortcode: "a"}, nil }),
-		func() []attempt[Post] {
+	p, err := hedgedPair(
+		func() (Post, *AppError) { return Post{Shortcode: "a"}, nil },
+		func() attempt[Post] {
 			hedgeCalled = true
-			return one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "x") })
+			return func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "x") }
 		},
 	)
 	if err != nil || p.Shortcode != "a" {
@@ -65,9 +63,9 @@ func TestHedgedRace(t *testing.T) {
 
 	// Initial attempt fails: the hedge launches immediately, without the hedge wait.
 	start := time.Now()
-	p, err = hedgedRace(
-		one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "embed down") }),
-		func() []attempt[Post] { return one(func() (Post, *AppError) { return Post{Shortcode: "b"}, nil }) },
+	p, err = hedgedPair(
+		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "embed down") },
+		func() attempt[Post] { return func() (Post, *AppError) { return Post{Shortcode: "b"}, nil } },
 	)
 	if err != nil || p.Shortcode != "b" {
 		t.Fatalf("hedge fallback: post=%+v err=%+v", p, err)
@@ -77,14 +75,23 @@ func TestHedgedRace(t *testing.T) {
 	}
 
 	// Both fail: the permanent error (real 404) beats the transient one.
-	_, err = hedgedRace(
-		one(func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "transient") }),
-		func() []attempt[Post] {
-			return one(func() (Post, *AppError) { return Post{}, igErr(404, reasonMediaNotFound, "gone") })
+	_, err = hedgedPair(
+		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "transient") },
+		func() attempt[Post] {
+			return func() (Post, *AppError) { return Post{}, igErr(404, reasonMediaNotFound, "gone") }
 		},
 	)
 	if err == nil || err.Reason != reasonMediaNotFound {
 		t.Fatalf("want permanent error to win, got %+v", err)
+	}
+
+	// A missing second session returns the primary error without hanging.
+	_, err = hedgedPair(
+		func() (Post, *AppError) { return Post{}, igErr(502, reasonConnection, "down") },
+		func() attempt[Post] { return nil },
+	)
+	if err == nil || err.Reason != reasonConnection {
+		t.Fatalf("want primary error without hedge, got %+v", err)
 	}
 }
 

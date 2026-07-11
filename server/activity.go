@@ -147,8 +147,8 @@ func profileDigestContent(p Profile) string {
 
 func (a *App) buildProfileActivityStatus(baseURL string, p Profile) []byte {
 	attachment := make([]any, 0, len(p.RecentMedia))
-	for _, m := range p.RecentMedia {
-		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), m.Thumbnail, m.Width, m.Height))
+	for i, m := range p.RecentMedia {
+		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), profileMediaOffloadURL(baseURL, p.Username, i), m.Width, m.Height))
 	}
 	return noteObject(profileStatusURL(baseURL, p.Username), actorURL(baseURL, p.Username),
 		profileDigestContent(p), baseURL+"/"+url.PathEscape(p.Username), "", attachment)

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -64,5 +65,35 @@ func TestUserActivityCollectionsAreOrderedCollections(t *testing.T) {
 	}
 	if items, ok := coll["orderedItems"].([]any); !ok || len(items) != 0 {
 		t.Fatalf("orderedItems = %#v, want empty array", coll["orderedItems"])
+	}
+}
+
+func TestActivityStatusLinkifiesCaptionAndCapsImages(t *testing.T) {
+	post := Post{
+		Shortcode: "CODE",
+		Username:  "alice",
+		Caption:   "hello @bob #sunset",
+		Attachments: []Attachment{
+			{Kind: "image", URL: "https://cdn.example/1.jpg"},
+			{Kind: "image", URL: "https://cdn.example/2.jpg"},
+			{Kind: "image", URL: "https://cdn.example/3.jpg"},
+			{Kind: "image", URL: "https://cdn.example/4.jpg"},
+			{Kind: "image", URL: "https://cdn.example/5.jpg"},
+		},
+	}
+	var note struct {
+		Content    string            `json:"content"`
+		Attachment []json.RawMessage `json:"attachment"`
+	}
+	if err := json.Unmarshal((&App{}).buildActivityStatus("https://oginstagram.com", post, "p", 0, false, false), &note); err != nil {
+		t.Fatal(err)
+	}
+	if len(note.Attachment) != activityMaxImages {
+		t.Fatalf("attachments = %d, want %d", len(note.Attachment), activityMaxImages)
+	}
+	for _, want := range []string{`href="https://www.instagram.com/bob"`, `q=%23sunset`} {
+		if !strings.Contains(note.Content, want) {
+			t.Fatalf("content missing %q: %s", want, note.Content)
+		}
 	}
 }

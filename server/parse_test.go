@@ -55,7 +55,8 @@ func TestParseNotFound(t *testing.T) {
 func TestNormalizeCDNHost(t *testing.T) {
 	cases := map[string]string{
 		"https://instagram.fcps4-1.fna.fbcdn.net/v/x.mp4?oh=1&oe=2": "https://scontent.cdninstagram.com/v/x.mp4?oh=1&oe=2",
-		"https://scontent-atl3-3.cdninstagram.com/v/x.mp4":          "https://scontent-atl3-3.cdninstagram.com/v/x.mp4",
+		"https://scontent-atl3-3.cdninstagram.com/v/x.mp4":          "https://scontent.cdninstagram.com/v/x.mp4",
+		"https://scontent.cdninstagram.com/v/x.jpg":                 "https://scontent.cdninstagram.com/v/x.jpg",
 		"":                      "",
 		"https://example.com/x": "https://example.com/x",
 	}

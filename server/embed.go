@@ -86,7 +86,7 @@ func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, med
 	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, card, activityHref)
 	h = append(h,
 		`<meta property="og:type" content="`+ogType+`">`,
-		`<link rel="apple-touch-icon" href="`+html.EscapeString(avatarOr(baseURL, post.ProfilePic))+`">`,
+		`<link rel="apple-touch-icon" href="`+html.EscapeString(postAvatarURL(baseURL, post))+`">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(post.Username)+`/">`,
 		`<meta name="twitter:image:width" content="`+strconv.Itoa(first.Width)+`">`,
 		`<meta name="twitter:image:height" content="`+strconv.Itoa(first.Height)+`">`,
@@ -147,7 +147,7 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool) str
 		}
 	}
 
-	h := a.commonHead(baseURL, origin, p.Username, title, description, p.ProfilePic, "summary", profileStatusURL(baseURL, p.Username))
+	h := a.commonHead(baseURL, origin, p.Username, title, description, profileAvatarURL(baseURL, p), "summary", profileStatusURL(baseURL, p.Username))
 	h = append(h,
 		`<meta property="og:type" content="profile">`,
 		`<meta property="profile:username" content="`+html.EscapeString(p.Username)+`">`,
