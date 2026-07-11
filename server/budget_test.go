@@ -19,8 +19,8 @@ func TestHourlyBudgetCountsSuccessAndResets(t *testing.T) {
 	if !p.overBudget() {
 		t.Fatal("2/2 should be over budget")
 	}
-	if got := p.pick(2, nil); got != nil {
-		t.Fatalf("pick over budget should return nil, got %d", len(got))
+	if got := p.pick(nil); got != nil {
+		t.Fatal("pick over budget should return nil")
 	}
 
 	// Rolling window: after an hour the budget resets.
