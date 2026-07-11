@@ -44,11 +44,24 @@ func shortcodeTime(shortcode string) time.Time {
 	return t
 }
 
-func avatarOr(baseURL, pic string) string {
-	if pic == "" {
+// Avatars and profile media route through /offload like post media, so the
+// served URL never carries an expiring CDN signature and stays same-origin.
+func postAvatarURL(baseURL string, post Post) string {
+	if post.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
 	}
-	return pic
+	return baseURL + "/offload/" + url.PathEscape(post.Shortcode) + "/avatar"
+}
+
+func profileAvatarURL(baseURL string, p Profile) string {
+	if p.ProfilePic == "" {
+		return baseURL + defaultAvatarPath
+	}
+	return baseURL + "/offload/@" + url.PathEscape(p.Username) + "/avatar"
+}
+
+func profileMediaOffloadURL(baseURL, username string, index int) string {
+	return baseURL + "/offload/@" + url.PathEscape(username) + "/" + strconv.Itoa(index+1)
 }
 
 func jsonBytes(v any) []byte {
@@ -70,7 +83,7 @@ func normalizeCDNHost(raw string) string {
 	if err != nil || u.Host == "" {
 		return raw
 	}
-	if strings.HasSuffix(u.Host, ".fbcdn.net") {
+	if strings.HasSuffix(u.Hostname(), ".fbcdn.net") || strings.HasSuffix(u.Hostname(), ".cdninstagram.com") {
 		u.Host = "scontent.cdninstagram.com"
 		return u.String()
 	}

@@ -55,8 +55,8 @@ func webLoggedOutSpec(shortcode string) gqlSpec {
 }
 
 func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
-	sessions := a.pool.pick(fetchRaceCount, nil)
-	if len(sessions) == 0 {
+	primary := a.pool.pick(nil)
+	if primary == nil {
 		if a.pool.overBudget() {
 			return "", ephemeralErr(503, reasonBudgetExceeded, "hourly request budget reached")
 		}
@@ -69,66 +69,57 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	racing := map[*Session]bool{}
-	attempts := func(picked []*Session) []attempt[string] {
-		out := make([]attempt[string], 0, len(picked))
-		for _, s := range picked {
-			racing[s] = true
-			out = append(out, func() (string, *AppError) { return a.attemptFetch(ctx, spec, s) })
+	return hedgedPair(func() (string, *AppError) {
+		return a.attemptFetch(ctx, spec, primary)
+	}, func() attempt[string] {
+		secondary := a.pool.pick(primary)
+		if secondary == nil {
+			return nil
 		}
-		return out
-	}
-	return hedgedRace(attempts(sessions), func() []attempt[string] {
-		return attempts(a.pool.pick(fetchHedgeCount, racing))
+		return func() (string, *AppError) { return a.attemptFetch(ctx, spec, secondary) }
 	})
 }
 
 type attempt[T any] func() (T, *AppError)
 
-// hedgedRace runs the initial attempts concurrently and launches the hedge
-// attempts once — when fetchHedgeDelay elapses or every launched attempt has
-// failed — returning the first success. On total failure it returns the most
-// permanent error seen (a real 404 beats a throttled IP's 401).
-func hedgedRace[T any](initial []attempt[T], hedge func() []attempt[T]) (T, *AppError) {
+// hedgedPair launches the second attempt after the delay or immediately when
+// the first fails. A real permanent error wins over a transient proxy failure.
+func hedgedPair[T any](primary attempt[T], hedge func() attempt[T]) (T, *AppError) {
 	type result struct {
 		value T
 		err   *AppError
 	}
-	results := make(chan result)
-	done := make(chan struct{})
-	defer close(done)
-
-	pending := 0
-	launch := func(fs []attempt[T]) {
-		pending += len(fs)
-		for _, f := range fs {
-			go func() {
-				v, err := f()
-				select {
-				case results <- result{v, err}:
-				case <-done:
-				}
-			}()
-		}
+	results := make(chan result, 2)
+	launch := func(f attempt[T]) {
+		go func() {
+			v, err := f()
+			results <- result{v, err}
+		}()
 	}
-	launch(initial)
-
-	hedged := false
-	tryHedge := func() {
-		if !hedged {
-			hedged = true
-			launch(hedge())
-		}
-	}
+	launch(primary)
 
 	timer := time.NewTimer(fetchHedgeDelay)
 	defer timer.Stop()
+	timerC := timer.C
+	pending := 1
+	hedged := false
+	launchHedge := func() {
+		if hedged {
+			return
+		}
+		hedged = true
+		timerC = nil
+		if next := hedge(); next != nil {
+			pending++
+			launch(next)
+		}
+	}
 
 	var lastErr *AppError
 	for pending > 0 {
 		select {
-		case <-timer.C:
-			tryHedge()
+		case <-timerC:
+			launchHedge()
 		case r := <-results:
 			pending--
 			if r.err == nil {
@@ -138,7 +129,7 @@ func hedgedRace[T any](initial []attempt[T], hedge func() []attempt[T]) (T, *App
 				lastErr = r.err
 			}
 			if pending == 0 {
-				tryHedge()
+				launchHedge()
 			}
 		}
 	}
@@ -272,11 +263,10 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 }
 
 func (a *App) proxyRawGet(op, target, rawURL string, headers map[string]string) (int, string, bool) {
-	sessions := a.pool.pick(1, nil)
-	if len(sessions) == 0 {
+	s := a.pool.pick(nil)
+	if s == nil {
 		return 0, "", false
 	}
-	s := sessions[0]
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()

@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"sync"
 	"time"
 )
@@ -81,7 +80,7 @@ func buildSessionClient(proxyURL string) (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
-func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
+func (p *SessionPool) pick(exclude *Session) *Session {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -92,34 +91,30 @@ func (p *SessionPool) pick(count int, exclude map[*Session]bool) []*Session {
 		return nil
 	}
 
-	var eligible []*Session
+	var picked *Session
+	bestRank := 0.0
 	for _, s := range p.sessions {
-		if exclude != nil && exclude[s] {
+		if s == exclude {
 			continue
 		}
 		s.mu.Lock()
 		s.resetBucketWindowLocked(now)
 		ok := !s.cooldownUntil.After(now) && s.used < defaultProxyHourlyLimit
+		rank := s.ewmaMs
+		if !s.hasEWMA {
+			rank = -1
+		}
 		s.mu.Unlock()
-		if ok {
-			eligible = append(eligible, s)
+		if ok && (picked == nil || rank < bestRank) {
+			picked, bestRank = s, rank
 		}
 	}
 
-	// ponytail: fastest-EWMA pick only; sessions without an EWMA rank first
-	// (-1), so new/rotated-in sessions still get explored via the hedge pick.
-	picked := eligible
-	if len(eligible) > count {
-		sort.Slice(eligible, func(i, j int) bool {
-			return ewmaRank(eligible[i]) < ewmaRank(eligible[j])
-		})
-		picked = eligible[:count]
-	}
-
-	for _, s := range picked {
-		s.mu.Lock()
-		s.used++
-		s.mu.Unlock()
+	// Sessions without an EWMA rank first, so new sessions get explored.
+	if picked != nil {
+		picked.mu.Lock()
+		picked.used++
+		picked.mu.Unlock()
 	}
 	return picked
 }
@@ -148,15 +143,6 @@ func (p *SessionPool) overBudget() bool {
 	defer p.mu.Unlock()
 	p.resetGlobalWindowLocked(time.Now())
 	return p.globalUsed >= p.cfg.GlobalHourlyLimit
-}
-
-func ewmaRank(s *Session) float64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.hasEWMA {
-		return -1
-	}
-	return s.ewmaMs
 }
 
 func (p *SessionPool) recordLatency(s *Session, d time.Duration) {

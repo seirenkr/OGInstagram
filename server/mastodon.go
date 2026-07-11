@@ -85,7 +85,7 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 	if accountID == "" {
 		accountID = username
 	}
-	avatar := avatarOr(baseURL, data.Avatar)
+	avatar := data.Avatar
 	var note any
 	if data.Note != "" {
 		note = data.Note
@@ -125,7 +125,7 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 	}
 }
 
-func profileMastodonMedia(m ProfileMedia, index int) map[string]any {
+func profileMastodonMedia(m ProfileMedia, index int, mediaURL string) map[string]any {
 	aspect := 0.0
 	if m.Height > 0 {
 		aspect = float64(m.Width) / float64(m.Height)
@@ -137,8 +137,8 @@ func profileMastodonMedia(m ProfileMedia, index int) map[string]any {
 	return map[string]any{
 		"id":          id,
 		"type":        "image",
-		"url":         m.Thumbnail,
-		"preview_url": m.Thumbnail,
+		"url":         mediaURL,
+		"preview_url": mediaURL,
 		"remote_url":  nil,
 		"meta": map[string]any{
 			"original": map[string]any{"width": m.Width, "height": m.Height, "aspect": aspect},
@@ -152,7 +152,7 @@ func profileMastodonMedia(m ProfileMedia, index int) map[string]any {
 func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 	media := make([]any, 0, len(p.RecentMedia))
 	for i, m := range p.RecentMedia {
-		media = append(media, profileMastodonMedia(m, i))
+		media = append(media, profileMastodonMedia(m, i, profileMediaOffloadURL(baseURL, p.Username, i)))
 	}
 
 	var created time.Time // zero when unknown; emitted as JSON null rather than faked
@@ -187,7 +187,7 @@ func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 			ID:             p.UserID,
 			Username:       p.Username,
 			FullName:       p.FullName,
-			Avatar:         p.ProfilePic,
+			Avatar:         profileAvatarURL(baseURL, p),
 			Note:           profileBioHTML(p),
 			LastStatusAt:   created,
 			FollowersCount: p.FollowerCount,
@@ -245,7 +245,7 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 			ID:           post.OwnerID,
 			Username:     post.Username,
 			FullName:     post.FullName,
-			Avatar:       post.ProfilePic,
+			Avatar:       postAvatarURL(baseURL, post),
 			LastStatusAt: post.CreatedAt,
 		}),
 		"media_attachments": media,
