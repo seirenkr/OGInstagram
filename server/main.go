@@ -254,7 +254,24 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 	return tagFetch(cacheable(htmlResp(200, html), edgeCacheSeconds), meta)
 }
 
+// offloadErrorResp: humans still get the 302-to-Instagram fallback on
+// transient errors, but for the media clients this route serves that is a
+// failed fetch; x-og-* report it as such (the worker strips them before
+// responding).
+func offloadErrorResp(err *AppError, fallbackURL string) resp {
+	r := redirectResp(fallbackURL, 302)
+	if !isTransient(err.Reason) {
+		r = textResp(err.Status, err.Message)
+	}
+	r.headers["x-og-status"] = strconv.Itoa(err.Status)
+	r.headers["x-og-reason"] = err.Reason
+	return r
+}
+
 func (a *App) handleOffload(req *http.Request, segments []string) resp {
+	if username, ok := strings.CutPrefix(segments[1], "@"); ok {
+		return a.handleProfileOffload(req, username, segments)
+	}
 	shortcode := segments[1]
 	index := 0
 	if len(segments) == 3 {
@@ -267,28 +284,51 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	meta := &fetchMeta{}
 	post, err := a.getPost(shortcode, meta)
 	if err != nil {
-		// Humans still get the 302-to-Instagram fallback on transient errors,
-		// but for the media clients this route serves that is a failed fetch;
-		// x-og-* report it as such (the worker strips them before responding).
-		r := redirectResp(instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/", 302)
-		if !isTransient(err.Reason) {
-			r = textResp(err.Status, err.Message)
-		}
-		r.headers["x-og-status"] = strconv.Itoa(err.Status)
-		r.headers["x-og-reason"] = err.Reason
-		return tagFetch(r, meta)
+		return tagFetch(offloadErrorResp(err, instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/"), meta)
 	}
-	att := post.Attachments[mediaIndexFor(post, index)]
-	target := att.URL
-	if thumbnail {
-		if att.Thumbnail != "" {
+	target := ""
+	if len(segments) == 3 && segments[2] == "avatar" {
+		target = post.ProfilePic
+	} else {
+		att := post.Attachments[mediaIndexFor(post, index)]
+		target = att.URL
+		if thumbnail && att.Thumbnail != "" {
 			target = att.Thumbnail
 		}
+	}
+	if target == "" {
+		target = a.publicBaseURL(req) + defaultAvatarPath
+	}
+	return tagFetch(cacheable(redirectResp(target, 302), cdnEdgeSeconds(target)), meta)
+}
+
+// handleProfileOffload serves /offload/@{username}/avatar and
+// /offload/@{username}/{n} (nth recent media), re-resolving the CDN URL on
+// every edge miss so served links never expire.
+func (a *App) handleProfileOffload(req *http.Request, username string, segments []string) resp {
+	meta := &fetchMeta{}
+	p, err := a.getProfile(username, meta)
+	if err != nil {
+		return tagFetch(offloadErrorResp(err, instagramOrigin+"/"+url.PathEscape(username)+"/"), meta)
+	}
+	target := p.ProfilePic
+	if len(segments) == 3 && segments[2] != "avatar" {
+		n, atoiErr := strconv.Atoi(segments[2])
+		if atoiErr != nil || n < 1 || n > len(p.RecentMedia) {
+			return resp{status: 404, headers: map[string]string{}}
+		}
+		target = p.RecentMedia[n-1].Thumbnail
+	}
+	if target == "" {
+		target = a.publicBaseURL(req) + defaultAvatarPath
 	}
 	return tagFetch(cacheable(redirectResp(target, 302), cdnEdgeSeconds(target)), meta)
 }
 
 func (a *App) publicBaseURL(req *http.Request) string {
+	if origin := strings.TrimSpace(req.Header.Get("X-OG-Public-Origin")); origin != "" {
+		return strings.TrimRight(origin, "/")
+	}
 	if a.cfg.BaseURL != "" {
 		return a.cfg.BaseURL
 	}

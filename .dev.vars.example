@@ -3,3 +3,6 @@ PROXY_PASSWORD=
 AE_ACCOUNT_ID=
 AE_API_TOKEN=
 BASE_URL=
+# Cloudflare test key: invisible always-passes sitekey.
+# https://developers.cloudflare.com/turnstile/troubleshooting/testing/
+TURNSTILE_SITE_KEY=1x00000000000000000000BB

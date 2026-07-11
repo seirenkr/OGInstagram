@@ -1,7 +1,7 @@
 package main
 
 import (
-	"math/rand/v2"
+	"crypto/rand"
 	"net/url"
 	"os"
 	"strconv"
@@ -27,12 +27,10 @@ const (
 	transientErrorCacheSeconds = 300
 	permanentErrorCacheSeconds = 3600
 
-	fetchRaceCount = 1
-	ewmaAlpha      = 0.3
-	fetchTimeout   = 4500 * time.Millisecond
+	ewmaAlpha    = 0.3
+	fetchTimeout = 4500 * time.Millisecond
 
 	fetchHedgeDelay = 1500 * time.Millisecond
-	fetchHedgeCount = 1
 
 	// headProbeTimeout caps the CDN HEAD size probe so a slow CDN can't hold
 	// the whole post response; on timeout the video counts as not oversized.
@@ -76,7 +74,7 @@ func configFromEnv() Config {
 	brandName := strings.TrimSpace(os.Getenv("BRAND_NAME"))
 	brandColor := strings.TrimSpace(os.Getenv("BRAND_COLOR"))
 	supportURL := strings.TrimSpace(os.Getenv("SUPPORT_URL"))
-	githubURL := envString("GITHUB_URL", "https://github.com/AfuruX/OGInstagram")
+	githubURL := envString("GITHUB_URL", "https://github.com/seirenkr/OGInstagram")
 	version := envString("OG_VERSION", "dev")
 	return Config{
 		Port:              port,
@@ -87,6 +85,7 @@ func configFromEnv() Config {
 		BrandColor:        brandColor,
 		SupportURL:        supportURL,
 		GitHubURL:         githubURL,
+		TurnstileSiteKey:  strings.TrimSpace(os.Getenv("TURNSTILE_SITE_KEY")),
 		BaseURL:           strings.TrimSpace(os.Getenv("BASE_URL")),
 		GlobalHourlyLimit: envInt("PROXY_HOURLY_LIMIT", defaultGlobalHourlyLimit),
 		AssetsDir:         assets,
@@ -108,21 +107,11 @@ func proxyURL(user, pass, sessionID string) string {
 }
 
 func newLSD() string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 23+rand.IntN(5))
-	for i := range b {
-		b[i] = alphabet[rand.IntN(len(alphabet))]
-	}
-	return string(b)
+	return rand.Text()
 }
 
 func newSessionID() string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 8)
-	for i := range b {
-		b[i] = alphabet[rand.IntN(len(alphabet))]
-	}
-	return string(b)
+	return strings.ToLower(rand.Text()[:8])
 }
 
 func envString(key, fallback string) string {

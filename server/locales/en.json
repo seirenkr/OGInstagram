@@ -27,11 +27,24 @@
     "restricted": "Restricted",
     "avg": "Avg",
     "ms": "ms",
-    "noData": "No data",
     "noDataYet": "No data yet.",
     "statsUnavailable": "Stats unavailable.",
     "skipToContent": "Skip to content",
     "timeUTC": "Time (UTC)",
     "language": "Language"
+  },
+  "hero": {
+    "line1": "Two letters: OG.",
+    "line2": "Your preview turns {rich}.",
+    "rich": "rich",
+    "channel": "#preview",
+    "placeholder": "Paste an instagram.com link",
+    "invalid": "Enter an instagram.com post, reel, or profile link.",
+    "fetchError": "Couldn't load the preview. Please try again in a moment.",
+    "submit": "Create preview",
+    "demoDesc": "Demo of an Instagram URL turning into an OGInstagram URL with a rich preview",
+    "you": "You",
+    "rateLimited": "Too many requests. Try again in a minute.",
+    "videoUnavailable": "Video not available in preview."
   }
 }

@@ -2,10 +2,20 @@ package main
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPublicBaseURLUsesRequestOrigin(t *testing.T) {
+	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
+	req := httptest.NewRequest("GET", "http://container.internal/p/CODE", nil)
+	req.Header.Set("X-OG-Public-Origin", "https://fresh-tunnel.trycloudflare.com")
+	if got := a.publicBaseURL(req); got != "https://fresh-tunnel.trycloudflare.com" {
+		t.Fatalf("publicBaseURL = %q", got)
+	}
+}
 
 func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	a := &App{cfg: Config{BrandName: "OGInstagram", BrandColor: "#ff0069"}}
@@ -223,7 +233,7 @@ func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
 	if acct["followers_count"] != float64(7) || acct["following_count"] != float64(3) || acct["statuses_count"] != float64(11) {
 		t.Errorf("account counts wrong: %#v", acct)
 	}
-	if acct["note"] == nil || acct["avatar"] != "https://cdn/avatar.jpg" {
+	if acct["note"] == nil || acct["avatar"] != "https://oginstagram.com/offload/@user/avatar" {
 		t.Errorf("known profile fields missing: %#v", acct)
 	}
 }

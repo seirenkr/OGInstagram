@@ -14,3 +14,4 @@ npm-debug.log*
 .agents/
 skills-lock.json
 .reference/
+web/public/PPMori-*.woff2

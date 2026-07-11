@@ -27,11 +27,24 @@
     "restricted": "制限あり",
     "avg": "平均",
     "ms": "ms",
-    "noData": "データなし",
     "noDataYet": "まだデータがありません。",
     "statsUnavailable": "統計を利用できません。",
     "skipToContent": "コンテンツへ移動",
     "timeUTC": "時刻 (UTC)",
     "language": "言語"
+  },
+  "hero": {
+    "line1": "OGの2文字で、",
+    "line2": "プレビューは{rich}に。",
+    "rich": "豊か",
+    "channel": "#プレビュー",
+    "placeholder": "instagram.com のリンクを貼り付けてみてください",
+    "invalid": "instagram.com の投稿・リール・プロフィールのリンクを入力してください。",
+    "fetchError": "プレビューを読み込めませんでした。しばらくしてからもう一度お試しください。",
+    "submit": "プレビューを作成",
+    "demoDesc": "Instagram URLがOGInstagram URLに変わり、リッチプレビューが表示されるデモ",
+    "you": "自分",
+    "rateLimited": "リクエストが多すぎます。1分後にもう一度お試しください。",
+    "videoUnavailable": "プレビューでは動画を再生できません。"
   }
 }

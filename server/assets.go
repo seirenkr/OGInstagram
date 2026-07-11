@@ -1,6 +1,7 @@
 package main
 
 import (
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,15 +21,12 @@ type Assets struct {
 }
 
 func contentTypeFor(name string) string {
-	switch filepath.Ext(name) {
-	case ".js":
-		return "application/javascript; charset=utf-8"
-	case ".css":
-		return "text/css; charset=utf-8"
-	case ".png":
-		return "image/png"
-	case ".jpg":
-		return "image/jpeg"
+	ext := filepath.Ext(name)
+	switch ext {
+	case ".woff2":
+		return "font/woff2"
+	case ".js", ".css", ".png", ".jpg":
+		return mime.TypeByExtension(ext)
 	default:
 		return ""
 	}

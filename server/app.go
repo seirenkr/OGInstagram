@@ -55,16 +55,16 @@ func (a *App) getPost(shortcode string, meta *fetchMeta) (Post, *AppError) {
 func (a *App) fetchPost(shortcode string) (Post, *AppError) {
 	// Proxy-free embed fetch first; the proxied GraphQL fetch joins as the
 	// hedge once the embed fails or hasn't answered within fetchHedgeDelay.
-	post, err := hedgedRace(
-		[]attempt[Post]{func() (Post, *AppError) { return a.fetchPostEmbed(shortcode) }},
-		func() []attempt[Post] {
-			return []attempt[Post]{func() (Post, *AppError) {
+	post, err := hedgedPair(
+		func() (Post, *AppError) { return a.fetchPostEmbed(shortcode) },
+		func() attempt[Post] {
+			return func() (Post, *AppError) {
 				body, err := a.raceFetch(webLoggedOutSpec(shortcode))
 				if err != nil {
 					return Post{}, err
 				}
 				return parseInstagramPost(body)
-			}}
+			}
 		},
 	)
 	if err != nil {

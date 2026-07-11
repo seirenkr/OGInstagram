@@ -2,14 +2,46 @@
 @import "@cloudflare/kumo/styles/tailwind";
 @import "tailwindcss";
 
+/* PP Mori covers Latin/digits/symbols; anything it lacks (Hangul, kana)
+   falls through to Pretendard per glyph. */
+@font-face { font-family: "PP Mori"; src: url("/PPMori-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "PP Mori"; src: url("/PPMori-Semibold.woff2") format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
+
+@theme {
+  --animate-hero-float: hero-float 7s ease-in-out infinite;
+  --animate-rich-sweep: rich-sweep 1.9s cubic-bezier(0.33, 1, 0.68, 1) 0.35s both;
+  --animate-composer-ready: composer-ready 1.1s ease-out 2;
+  @keyframes hero-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+  /* Ends exactly at the resting gradient (size 100%, position 0). */
+  @keyframes rich-sweep { from { background-size: 240% 100%; background-position: 95% 0; } to { background-size: 100% 100%; background-position: 0% 0; } }
+  @keyframes composer-ready { from { box-shadow: 0 0 0 0 rgb(255 0 105 / 0.3); } to { box-shadow: 0 0 0 12px rgb(255 0 105 / 0); } }
+}
+
 /* Your custom styles */
-:root { --font-sans: "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; }
+:root { --font-sans: "PP Mori", "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; --ig-orange: #ff7a00; --ig-pink: #ff0069; --ig-lavender: #7638fa; }
 body { background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: var(--font-sans); font-optical-sizing: auto; overflow-x: hidden; }
+/* Only two weights ship (Regular 400 / Semibold 600); pin every heavier or
+   in-between utility to them so PP Mori and Pretendard always align. */
+strong, b, .font-medium, .font-bold { font-weight: 600; }
+/* Korean uses spaces between words; keep-all wraps at word boundaries only.
+   Not set for ja/zh (no spaces — keep-all would prevent wrapping entirely). */
+:lang(ko) { word-break: keep-all; }
 button, a { touch-action: manipulation; }
 h1, h2, h3 { text-wrap: balance; }
 p { text-wrap: pretty; }
-.site-header { position: sticky; top: 0; z-index: 40; margin-bottom: -57px; border-bottom: 1px solid transparent; transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
-.site-header.is-top { background: transparent; }
-.site-header.is-scrolled { border-color: var(--color-kumo-hairline); background: color-mix(in srgb, var(--color-kumo-base) 78%, transparent); box-shadow: 0 1px 12px color-mix(in srgb, var(--color-kumo-shadow-drop) 45%, transparent); -webkit-backdrop-filter: blur(16px) saturate(140%); backdrop-filter: blur(16px) saturate(140%); }
-.hero::before { content: ""; position: absolute; z-index: 0; inset: 0 calc(50% - 50vw); pointer-events: none; background: radial-gradient(circle at 60% 18%, color-mix(in srgb, #ff7a00 16%, transparent), transparent 38%), radial-gradient(circle at 78% 30%, color-mix(in srgb, #ff0069 22%, transparent), transparent 46%), radial-gradient(circle at 92% 58%, color-mix(in srgb, #d300c5 18%, transparent), transparent 42%); -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%); mask-image: linear-gradient(to bottom, #000 0%, #000 58%, transparent 100%); }
-@media (prefers-reduced-motion: reduce) { .site-header { transition: none; } }
+
+/* Mesh-gradient hero wash: the five Instagram brand colors as large, soft,
+   overlapping radial layers. Pure gradients (no SVG filter) — CSS filter on a
+   large pseudo-element clips at its bounds in iOS WebKit and leaves a hard
+   seam; the mask fades the wash into the page instead. */
+.hero-wash::before {
+  content: ""; position: absolute; inset: 0 calc(50% - 50vw); z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(58% 64% at 82% 12%, rgb(255 0 105 / 0.15), transparent 72%),
+    radial-gradient(50% 68% at 99% 58%, rgb(118 56 250 / 0.13), transparent 72%),
+    radial-gradient(46% 50% at 56% 0%, rgb(255 122 0 / 0.11), transparent 70%),
+    radial-gradient(64% 56% at 6% 94%, rgb(255 214 0 / 0.14), transparent 72%),
+    radial-gradient(48% 48% at 44% 104%, rgb(211 0 197 / 0.09), transparent 70%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+}

@@ -27,11 +27,24 @@
     "restricted": "Restreintes",
     "avg": "Moyenne",
     "ms": "ms",
-    "noData": "Aucune donnée",
     "noDataYet": "Pas encore de données.",
     "statsUnavailable": "Statistiques indisponibles.",
     "skipToContent": "Aller au contenu",
     "timeUTC": "Heure (UTC)",
     "language": "Langue"
+  },
+  "hero": {
+    "line1": "Deux lettres : OG.",
+    "line2": "Votre aperçu devient {rich}.",
+    "rich": "riche",
+    "channel": "#aperçu",
+    "placeholder": "Collez un lien instagram.com",
+    "invalid": "Saisissez un lien de publication, reel ou profil instagram.com.",
+    "fetchError": "Impossible de charger l'aperçu. Réessayez dans un instant.",
+    "submit": "Créer l'aperçu",
+    "demoDesc": "Démo d'une URL Instagram transformée en URL OGInstagram avec un aperçu riche",
+    "you": "Moi",
+    "rateLimited": "Trop de requêtes. Réessayez dans une minute.",
+    "videoUnavailable": "Vidéo non disponible dans l'aperçu."
   }
 }
