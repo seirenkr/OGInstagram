@@ -27,11 +27,24 @@
     "restricted": "受限",
     "avg": "平均",
     "ms": "ms",
-    "noData": "无数据",
     "noDataYet": "暂无数据。",
     "statsUnavailable": "统计数据不可用。",
     "skipToContent": "跳至内容",
     "timeUTC": "时间 (UTC)",
     "language": "语言"
+  },
+  "hero": {
+    "line1": "只需 OG 两个字母，",
+    "line2": "预览变得{rich}。",
+    "rich": "丰富",
+    "channel": "#预览",
+    "placeholder": "粘贴一个 instagram.com 链接试试",
+    "invalid": "请输入 instagram.com 的帖子、Reels 或主页链接。",
+    "fetchError": "预览加载失败，请稍后再试。",
+    "submit": "生成预览",
+    "demoDesc": "Instagram 网址变为 OGInstagram 网址并展示丰富预览的演示",
+    "you": "我",
+    "rateLimited": "请求过多，请一分钟后再试。",
+    "videoUnavailable": "预览中无法播放视频。"
   }
 }

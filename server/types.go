@@ -34,6 +34,7 @@ type Config struct {
 	BrandColor        string
 	SupportURL        string
 	GitHubURL         string
+	TurnstileSiteKey  string
 	BaseURL           string
 	GlobalHourlyLimit int
 	AssetsDir         string

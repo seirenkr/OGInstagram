@@ -27,11 +27,24 @@
     "restricted": "제한됨",
     "avg": "평균",
     "ms": "ms",
-    "noData": "데이터 없음",
     "noDataYet": "아직 데이터가 없습니다.",
     "statsUnavailable": "통계를 사용할 수 없습니다.",
     "skipToContent": "본문으로 건너뛰기",
     "timeUTC": "시간 (UTC)",
     "language": "언어"
+  },
+  "hero": {
+    "line1": "OG 두 글자로,",
+    "line2": "미리보기를 {rich}.",
+    "rich": "풍부하게",
+    "channel": "#미리보기",
+    "placeholder": "instagram.com 링크를 붙여넣어 보세요",
+    "invalid": "instagram.com의 게시물·릴스·프로필 링크를 입력해 주세요.",
+    "fetchError": "미리보기를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+    "submit": "미리보기 만들기",
+    "demoDesc": "Instagram URL이 OGInstagram URL로 바뀌고 리치 미리보기가 나타나는 데모",
+    "you": "나",
+    "rateLimited": "요청이 너무 많아요. 1분 뒤에 다시 시도해 주세요.",
+    "videoUnavailable": "미리보기에서는 동영상을 재생할 수 없습니다."
   }
 }

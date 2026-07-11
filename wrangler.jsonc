@@ -18,8 +18,8 @@
     "BASE_URL": "https://oginstagram.com",
     "BRAND_NAME": "OGInstagram",
     "BRAND_COLOR": "#ff0069",
-    "SUPPORT_URL": "https://ko-fi.com/afuru",
-    "GITHUB_URL": "https://github.com/AfuruX/OGInstagram"
+    "SUPPORT_URL": "https://ko-fi.com/seirenkr",
+    "GITHUB_URL": "https://github.com/seirenkr/OGInstagram"
   },
   "routes": [
     {
@@ -72,6 +72,16 @@
     {
       "binding": "AE",
       "dataset": "oginstagram_requests"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "EMBED_RATE_LIMITER",
+      "namespace_id": "742901",
+      "simple": {
+        "limit": 8,
+        "period": 60
+      }
     }
   ],
   "migrations": [
