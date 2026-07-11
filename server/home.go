@@ -13,7 +13,6 @@ type homeJS struct {
 	Restricted       string `json:"restricted"`
 	Avg              string `json:"avg"`
 	Ms               string `json:"ms"`
-	NoData           string `json:"noData"`
 	NoDataYet        string `json:"noDataYet"`
 	StatsUnavailable string `json:"statsUnavailable"`
 	SkipToContent    string `json:"skipToContent"`
@@ -22,37 +21,54 @@ type homeJS struct {
 }
 
 type homeStrings struct {
-	Lang         string `json:"lang"`
-	Tagline      string `json:"tagline"`
-	SupportCta   string `json:"supportCta"`
-	DarkMode     string `json:"darkMode"`
-	LightMode    string `json:"lightMode"`
-	UsageH2      string `json:"usageH2"`
-	NormalView   string `json:"normalView"`
-	NormalDesc   string `json:"normalDesc"`
-	GalleryView  string `json:"galleryView"`
-	GalleryDesc  string `json:"galleryDesc"`
-	DirectView   string `json:"directView"`
-	DirectDesc   string `json:"directDesc"`
-	SupportedH2  string `json:"supportedH2"`
-	SupportNote  string `json:"supportNote"`
-	Posts        string `json:"posts"`
-	UserProfile  string `json:"userProfile"`
-	Reels        string `json:"reels"`
-	StatusH2     string `json:"statusH2"`
-	StatusSub    string `json:"statusSub"`
-	Requests     string `json:"requests"`
-	ResponseTime string `json:"responseTime"`
-	Disclaimer   string `json:"disclaimer"`
-	JS           homeJS `json:"js"`
+	Lang         string   `json:"lang"`
+	Tagline      string   `json:"tagline"`
+	SupportCta   string   `json:"supportCta"`
+	DarkMode     string   `json:"darkMode"`
+	LightMode    string   `json:"lightMode"`
+	UsageH2      string   `json:"usageH2"`
+	NormalView   string   `json:"normalView"`
+	NormalDesc   string   `json:"normalDesc"`
+	GalleryView  string   `json:"galleryView"`
+	GalleryDesc  string   `json:"galleryDesc"`
+	DirectView   string   `json:"directView"`
+	DirectDesc   string   `json:"directDesc"`
+	SupportedH2  string   `json:"supportedH2"`
+	SupportNote  string   `json:"supportNote"`
+	Posts        string   `json:"posts"`
+	UserProfile  string   `json:"userProfile"`
+	Reels        string   `json:"reels"`
+	StatusH2     string   `json:"statusH2"`
+	StatusSub    string   `json:"statusSub"`
+	Requests     string   `json:"requests"`
+	ResponseTime string   `json:"responseTime"`
+	Disclaimer   string   `json:"disclaimer"`
+	Hero         homeHero `json:"hero"`
+	JS           homeJS   `json:"js"`
+}
+
+type homeHero struct {
+	Line1            string `json:"line1"`
+	Line2            string `json:"line2"`
+	Rich             string `json:"rich"`
+	Channel          string `json:"channel"`
+	Placeholder      string `json:"placeholder"`
+	Invalid          string `json:"invalid"`
+	FetchError       string `json:"fetchError"`
+	RateLimited      string `json:"rateLimited"`
+	Submit           string `json:"submit"`
+	DemoDesc         string `json:"demoDesc"`
+	You              string `json:"you"`
+	VideoUnavailable string `json:"videoUnavailable"`
 }
 
 type homeAppData struct {
-	Brand      string `json:"brand"`
-	Version    string `json:"version"`
-	Host       string `json:"host"`
-	SupportURL string `json:"supportURL"`
-	GitHubURL  string `json:"githubURL"`
+	Brand            string `json:"brand"`
+	Version          string `json:"version"`
+	Host             string `json:"host"`
+	SupportURL       string `json:"supportURL"`
+	GitHubURL        string `json:"githubURL"`
+	TurnstileSiteKey string `json:"turnstileSiteKey"`
 	homeStrings
 }
 
@@ -89,7 +105,7 @@ func (a *App) buildHomeHTML(host, acceptLanguage, hl string) string {
 	t := homeStringsByLocale[locale]
 	appJSON, _ := json.Marshal(homeAppData{
 		Brand: a.cfg.BrandName, Version: a.cfg.Version, Host: host,
-		SupportURL: a.cfg.SupportURL, GitHubURL: a.cfg.GitHubURL,
+		SupportURL: a.cfg.SupportURL, GitHubURL: a.cfg.GitHubURL, TurnstileSiteKey: a.cfg.TurnstileSiteKey,
 		homeStrings: t,
 	})
 

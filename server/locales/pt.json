@@ -27,11 +27,24 @@
     "restricted": "Restritas",
     "avg": "Média",
     "ms": "ms",
-    "noData": "Sem dados",
     "noDataYet": "Ainda não há dados.",
     "statsUnavailable": "Estatísticas indisponíveis.",
     "skipToContent": "Pular para o conteúdo",
     "timeUTC": "Hora (UTC)",
     "language": "Idioma"
+  },
+  "hero": {
+    "line1": "Duas letras: OG.",
+    "line2": "Sua prévia fica {rich}.",
+    "rich": "rica",
+    "channel": "#prévia",
+    "placeholder": "Cole um link do instagram.com",
+    "invalid": "Insira um link de publicação, reel ou perfil do instagram.com.",
+    "fetchError": "Não foi possível carregar a prévia. Tente novamente em instantes.",
+    "submit": "Criar prévia",
+    "demoDesc": "Demonstração de uma URL do Instagram virando uma URL do OGInstagram com prévia rica",
+    "you": "Você",
+    "rateLimited": "Muitas solicitações. Tente novamente em um minuto.",
+    "videoUnavailable": "Vídeo não disponível na pré-visualização."
   }
 }

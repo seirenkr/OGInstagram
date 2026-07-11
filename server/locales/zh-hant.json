@@ -27,11 +27,24 @@
     "restricted": "受限",
     "avg": "平均",
     "ms": "ms",
-    "noData": "無資料",
     "noDataYet": "尚無資料。",
     "statsUnavailable": "無法取得統計資料。",
     "skipToContent": "跳至內容",
     "timeUTC": "時間 (UTC)",
     "language": "語言"
+  },
+  "hero": {
+    "line1": "只要 OG 兩個字母，",
+    "line2": "預覽變得{rich}。",
+    "rich": "豐富",
+    "channel": "#預覽",
+    "placeholder": "貼上一個 instagram.com 連結試試",
+    "invalid": "請輸入 instagram.com 的貼文、Reels 或個人檔案連結。",
+    "fetchError": "無法載入預覽，請稍後再試。",
+    "submit": "建立預覽",
+    "demoDesc": "Instagram 網址變成 OGInstagram 網址並顯示豐富預覽的示範",
+    "you": "我",
+    "rateLimited": "請求過多，請一分鐘後再試。",
+    "videoUnavailable": "預覽中無法播放影片。"
   }
 }

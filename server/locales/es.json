@@ -27,11 +27,24 @@
     "restricted": "Restringidas",
     "avg": "Promedio",
     "ms": "ms",
-    "noData": "Sin datos",
     "noDataYet": "Aún no hay datos.",
     "statsUnavailable": "Estadísticas no disponibles.",
     "skipToContent": "Saltar al contenido",
     "timeUTC": "Hora (UTC)",
     "language": "Idioma"
+  },
+  "hero": {
+    "line1": "Dos letras: OG.",
+    "line2": "Tu vista previa se vuelve {rich}.",
+    "rich": "rica",
+    "channel": "#vista-previa",
+    "placeholder": "Pega un enlace de instagram.com",
+    "invalid": "Introduce un enlace de publicación, reel o perfil de instagram.com.",
+    "fetchError": "No se pudo cargar la vista previa. Inténtalo de nuevo en un momento.",
+    "submit": "Crear vista previa",
+    "demoDesc": "Demostración de una URL de Instagram convirtiéndose en una URL de OGInstagram con vista previa enriquecida",
+    "you": "Tú",
+    "rateLimited": "Demasiadas solicitudes. Inténtalo de nuevo en un minuto.",
+    "videoUnavailable": "El video no está disponible en la vista previa."
   }
 }
