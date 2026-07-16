@@ -172,7 +172,17 @@ export class OgUsContainer extends Container<Env> {
   }
 }
 
-OgUsContainer.outboundByHost = { "cache.do": handleModelCache, "budget.do": handleProxyBudget };
+// ponytail: single intercepted host — in prod only the first registered host
+// gets outbound interception, so cache/budget multiplex on one host by path.
+OgUsContainer.outboundByHost = { "og.do": handleContainerApi };
+
+async function handleContainerApi(request: Request, env: Env, ctx: OutboundHandlerContext): Promise<Response> {
+  switch (new URL(request.url).pathname) {
+    case "/cache": return handleModelCache(request, env, ctx);
+    case "/budget": return handleProxyBudget(request, env, ctx);
+    default: return new Response(null, { status: 404 });
+  }
+}
 
 async function handleModelCache(request: Request, env: Env, ctx: OutboundHandlerContext): Promise<Response> {
   const key = new URL(request.url).searchParams.get("key") ?? "";
@@ -528,8 +538,8 @@ function containerEnv(env: Env): Record<string, string> {
     PROXY_USERNAME: env.PROXY_USERNAME ?? "",
     PROXY_PASSWORD: env.PROXY_PASSWORD ?? "",
     BASE_URL: env.BASE_URL ?? "",
-    MODEL_CACHE_URL: "http://cache.do",
-    BUDGET_URL: "http://budget.do",
+    MODEL_CACHE_URL: "http://og.do/cache",
+    BUDGET_URL: "http://og.do/budget",
     OG_VERSION: versionCode(env)
   };
 }
