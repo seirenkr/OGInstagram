@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	schemeLinkRE = regexp.MustCompile(`(?i)\b(?:https?|ftps?|file)://[^\s<>]+|\bmailto:[^\s<>]+`)
+	schemeLinkRE = regexp.MustCompile(`(?i)\bhttps?://[^\s<>]+|\bmailto:[^\s<>]+`)
 
 	emailRE = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}\b`)
 
@@ -69,6 +69,9 @@ func detectLinks(text string) []linkSpan {
 	}
 	for _, m := range domainRE.FindAllStringIndex(text, -1) {
 		s, e := m[0], trimURLEnd(text, m[0], m[1])
+		if s >= 3 && text[s-3:s] == "://" {
+			continue
+		}
 		if !hasKnownTLD(text[s:e]) {
 			continue
 		}

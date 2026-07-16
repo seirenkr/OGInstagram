@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"html"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -30,7 +30,7 @@ func webLoggedOutSpec(shortcode string) gqlSpec {
 		"shortcode": shortcode,
 		"__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": false,
 	})
-	lsd := newLSD()
+	lsd := rand.Text()
 	form := url.Values{}
 	form.Set("variables", string(variables))
 	form.Set("doc_id", instagramWebLoggedOutDocID)
@@ -43,8 +43,7 @@ func webLoggedOutSpec(shortcode string) gqlSpec {
 		url:    instagramOrigin + "/graphql/query",
 		body:   form.Encode(),
 		headers: map[string]string{
-			// A modern-browser UA makes IG return an HTML login shell instead of
-			// JSON here; a minimal UA gets the anonymous JSON payload.
+
 			"User-Agent":         "Mozilla/5.0",
 			"Accept":             "*/*",
 			"Content-Type":       "application/x-www-form-urlencoded",
@@ -54,10 +53,16 @@ func webLoggedOutSpec(shortcode string) gqlSpec {
 	}
 }
 
-func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
-	primary := a.pool.pick(nil)
+func (a *App) raceFetch(ctx context.Context, spec gqlSpec) (string, *AppError) {
+	if ctx.Err() != nil {
+		return "", igErr(499, "", "cancelled")
+	}
+	primary, pickReason := a.pool.pick(ctx, nil)
 	if primary == nil {
-		if a.pool.overBudget() {
+		if pickReason == reasonBudgetBackend {
+			return "", ephemeralErr(503, reasonBudgetBackend, "hourly request budget is temporarily unavailable")
+		}
+		if pickReason == reasonBudgetExceeded {
 			return "", ephemeralErr(503, reasonBudgetExceeded, "hourly request budget reached")
 		}
 		if len(a.pool.sessions) == 0 {
@@ -66,33 +71,30 @@ func (a *App) raceFetch(spec gqlSpec) (string, *AppError) {
 		return "", ephemeralErr(503, reasonConnection, "all Instagram proxy sessions are rate limited or cooling down")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	return hedgedPair(func() (string, *AppError) {
+	return hedgedPair(ctx, func(ctx context.Context) (string, *AppError) {
 		return a.attemptFetch(ctx, spec, primary)
-	}, func() attempt[string] {
-		secondary := a.pool.pick(primary)
+	}, func() attempt {
+		secondary, _ := a.pool.pick(ctx, primary)
 		if secondary == nil {
 			return nil
 		}
-		return func() (string, *AppError) { return a.attemptFetch(ctx, spec, secondary) }
+		return func(ctx context.Context) (string, *AppError) { return a.attemptFetch(ctx, spec, secondary) }
 	})
 }
 
-type attempt[T any] func() (T, *AppError)
+type attempt func(context.Context) (string, *AppError)
 
-// hedgedPair launches the second attempt after the delay or immediately when
-// the first fails. A real permanent error wins over a transient proxy failure.
-func hedgedPair[T any](primary attempt[T], hedge func() attempt[T]) (T, *AppError) {
+func hedgedPair(parent context.Context, primary attempt, hedge func() attempt) (string, *AppError) {
 	type result struct {
-		value T
+		value string
 		err   *AppError
 	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	results := make(chan result, 2)
-	launch := func(f attempt[T]) {
+	launch := func(f attempt) {
 		go func() {
-			v, err := f()
+			v, err := f(ctx)
 			results <- result{v, err}
 		}()
 	}
@@ -104,7 +106,7 @@ func hedgedPair[T any](primary attempt[T], hedge func() attempt[T]) (T, *AppErro
 	pending := 1
 	hedged := false
 	launchHedge := func() {
-		if hedged {
+		if hedged || ctx.Err() != nil {
 			return
 		}
 		hedged = true
@@ -118,6 +120,8 @@ func hedgedPair[T any](primary attempt[T], hedge func() attempt[T]) (T, *AppErro
 	var lastErr *AppError
 	for pending > 0 {
 		select {
+		case <-ctx.Done():
+			return "", igErr(499, "", "cancelled")
 		case <-timerC:
 			launchHedge()
 		case r := <-results:
@@ -133,35 +137,34 @@ func hedgedPair[T any](primary attempt[T], hedge func() attempt[T]) (T, *AppErro
 			}
 		}
 	}
-	var zero T
 	if lastErr == nil {
 		lastErr = igErr(502, reasonClientError, "Instagram fetch failed")
 	}
-	return zero, lastErr
+	return "", lastErr
 }
 
-// logOutbound writes one access-log style line per outbound request, e.g.
-// "POST https://www.instagram.com/graphql/query 200 812ms", so the Workers
-// Logs list is scannable without expanding entries; details stay as fields.
-func logOutbound(op, target, session, method, rawURL string, started time.Time, status, bytes int, ferr *AppError) {
+func logOutbound(ctx context.Context, op, target, session, method, rawURL string, started time.Time, status, bytes int, ferr *AppError) {
 	endpoint := rawURL
 	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
 		endpoint = endpoint[:i]
 	}
+	parsedEndpoint, _ := url.Parse(endpoint)
+	host, path := parsedEndpoint.Hostname(), parsedEndpoint.Path
 	ms := time.Since(started).Milliseconds()
 	msg := method + " " + endpoint + " " + strconv.Itoa(status) + " " + strconv.FormatInt(ms, 10) + "ms"
 	if ferr == nil {
-		slog.Info(msg, "op", op, "target", target, "status", status, "session", session, "ms", ms, "bytes", bytes)
+		logger(ctx).InfoContext(ctx, msg, "event", "outbound_request", "op", op, "target", target,
+			"method", method, "host", host, "path", path, "status", status, "session", session, "ms", ms, "bytes", bytes)
 		return
 	}
-	if ferr.Status == 499 { // cancelled race loser; not a real outcome
+	if ferr.Status == 499 {
 		return
 	}
 	if ferr.Reason != "" {
 		msg += " reason=" + ferr.Reason
 	}
-	slog.Warn(msg, "op", op, "target", target, "status", status,
-		"reason", ferr.Reason, "session", session, "ms", ms, "detail", ferr.Message)
+	logger(ctx).WarnContext(ctx, msg, "event", "outbound_request", "op", op, "target", target, "status", status,
+		"method", method, "host", host, "path", path, "reason", ferr.Reason, "session", session, "ms", ms, "detail", ferr.Message)
 }
 
 func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body string, ferr *AppError) {
@@ -174,7 +177,7 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 		if ferr != nil {
 			status = ferr.Status
 		}
-		logOutbound(spec.name, spec.target, s.name, spec.method, spec.url, started, status, len(body), ferr)
+		logOutbound(ctx, spec.name, spec.target, s.name, spec.method, spec.url, started, status, len(body), ferr)
 	}()
 
 	var bodyReader io.Reader
@@ -189,29 +192,31 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 		req.Header.Set(k, v)
 	}
 
-	failed := false
-	failOnce := func(reason string) {
-		if !failed {
-			failed = true
-			a.pool.fail(s, reason)
-		}
-	}
-
 	resp, err := s.getClient().Do(req)
 	if err != nil {
 
 		if ctx.Err() != nil {
 			return "", igErr(499, "", "cancelled")
 		}
-		failOnce(reasonConnection)
+		a.pool.fail(ctx, s, reasonConnection)
 		return "", igErr(502, reasonConnection, err.Error())
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if ctx.Err() != nil {
+		return "", igErr(499, "", "cancelled")
+	}
+	if readErr != nil {
+		a.pool.fail(ctx, s, reasonConnection)
+		return "", igErr(502, reasonConnection, readErr.Error())
+	}
 	bodyText := string(raw)
 
 	if resp.StatusCode >= 400 {
-		msg := instagramMessage(bodyText)
+		msg := ""
+		if gjson.Valid(bodyText) {
+			msg = strings.TrimSpace(gjson.Get(bodyText, "message").String())
+		}
 		if msg == "" {
 			msg = http.StatusText(resp.StatusCode)
 		}
@@ -230,26 +235,23 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 		}
 
 		if shouldRotate(reason) {
-			failOnce(reason)
+			a.pool.fail(ctx, s, reason)
 		}
 		return "", igErr(resp.StatusCode, reason, msg)
 	}
 
 	if strings.HasPrefix(bodyText, "<!DOCTYPE html") || strings.Contains(bodyText, "require_login") {
-		failOnce(reasonLoginRequired)
+		a.pool.fail(ctx, s, reasonLoginRequired)
 		return "", igErr(401, reasonLoginRequired, "Instagram requires login to view this content")
 	}
 
 	if !gjson.Valid(bodyText) {
-		failOnce(reasonJSONDecode)
+		a.pool.fail(ctx, s, reasonJSONDecode)
 		return "", igErr(502, reasonJSONDecode, "Instagram returned an unreadable response")
 	}
 
 	parsed := gjson.Parse(bodyText)
 	if parsed.Get("status").String() == "fail" {
-		if shouldRotate(reasonGraphql) {
-			failOnce(reasonGraphql)
-		}
 		msg := strings.TrimSpace(parsed.Get("message").String())
 		if msg == "" {
 			msg = "Instagram request failed"
@@ -258,17 +260,16 @@ func (a *App) attemptFetch(ctx context.Context, spec gqlSpec, s *Session) (body 
 	}
 
 	a.pool.recordLatency(s, time.Since(started))
-	a.pool.countRequest()
 	return bodyText, nil
 }
 
-func (a *App) proxyRawGet(op, target, rawURL string, headers map[string]string) (int, string, bool) {
-	s := a.pool.pick(nil)
+func (a *App) proxyRawGet(parent context.Context, op, target, rawURL string, headers map[string]string) (int, string, bool) {
+	s, _ := a.pool.pick(parent, nil)
 	if s == nil {
 		return 0, "", false
 	}
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	ctx, cancel := context.WithTimeout(parent, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -279,20 +280,20 @@ func (a *App) proxyRawGet(op, target, rawURL string, headers map[string]string) 
 	}
 	resp, err := s.getClient().Do(req)
 	if err != nil {
-		logOutbound(op, target, s.name, http.MethodGet, rawURL, started, 502, 0, igErr(502, reasonConnection, err.Error()))
+		if parent.Err() != nil {
+			return 0, "", false
+		}
+		logOutbound(ctx, op, target, s.name, http.MethodGet, rawURL, started, 502, 0, igErr(502, reasonConnection, err.Error()))
 		return 0, "", false
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	logOutbound(op, target, s.name, http.MethodGet, rawURL, started, resp.StatusCode, len(raw), nil)
-	return resp.StatusCode, string(raw), true
-}
-
-func instagramMessage(body string) string {
-	if !gjson.Valid(body) {
-		return ""
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if readErr != nil {
+		logOutbound(ctx, op, target, s.name, http.MethodGet, rawURL, started, 502, len(raw), igErr(502, reasonConnection, readErr.Error()))
+		return 0, "", false
 	}
-	return strings.TrimSpace(gjson.Get(body, "message").String())
+	logOutbound(ctx, op, target, s.name, http.MethodGet, rawURL, started, resp.StatusCode, len(raw), nil)
+	return resp.StatusCode, string(raw), true
 }
 
 func (c Config) oembedURL(shortcode string) string {
@@ -301,44 +302,38 @@ func (c Config) oembedURL(shortcode string) string {
 	return instagramOrigin + "/api/v1/oembed/?" + q.Encode()
 }
 
-// oembedFallback queries the public oembed endpoint after both primary
-// fetches have failed; some posts still resolve there. A success payload
-// becomes a thumbnail-only Post. A fail payload carries Instagram's own
-// error text, attached to err for the error card.
-func (a *App) oembedFallback(shortcode string, err *AppError) (Post, bool) {
-	status, body, ok := a.proxyRawGet("oembed", shortcode, a.cfg.oembedURL(shortcode), map[string]string{
+func (a *App) oembedFallback(ctx context.Context, shortcode string, err *AppError) (Post, bool) {
+	status, body, ok := a.proxyRawGet(ctx, "oembed", shortcode, a.cfg.oembedURL(shortcode), map[string]string{
 		"User-Agent":  instagramAppUA,
 		"Accept":      "*/*",
 		"X-IG-App-ID": instagramAppID,
 	})
-	if !ok || status == 404 || !gjson.Valid(body) {
+	if !ok || !gjson.Valid(body) {
 		return Post{}, false
 	}
-	if p, ok := parseOembedPost(shortcode, body); ok {
-		return p, true
+	if status >= 200 && status < 300 {
+		if p, ok := parseOembedPost(shortcode, body); ok {
+			return p, true
+		}
 	}
-	if root := gjson.Parse(body); root.Get("status").String() == "fail" {
+	root := gjson.Parse(body)
+	if root.Get("status").String() == "fail" {
 		msg := root.Get("message").String()
-		// Every gating kind (region, age, limited audience) fails with this
-		// same message; title/description come back localized.
+
 		if msg == "geoblock_required" {
 			msg = reasonGeoBlocked
 			err.Reason = reasonGeoBlocked
 			err.Status = 451
 		}
-		if t := root.Get("title").String(); msg != "" && t != "" {
-			err.CardReason, err.CardTitle, err.CardDesc = msg, t, root.Get("description").String()
+		if title := root.Get("title").String(); msg != "" && title != "" {
+			err.CardReason, err.CardTitle, err.CardDesc = msg, title, root.Get("description").String()
 		}
 	}
 	return Post{}, false
 }
 
-// oembedSharedByRE pulls the display name out of the embed blockquote footer:
-// "A post shared by {name} (@{handle})".
 var oembedSharedByRE = regexp.MustCompile(`A post shared by (.*?) \(@`)
 
-// parseOembedPost builds a thumbnail-only Post from an oembed success
-// payload: no video URL, profile pic, or stats are available there.
 func parseOembedPost(shortcode, body string) (Post, bool) {
 	root := gjson.Parse(body)
 	username := root.Get("author_name").String()
@@ -355,7 +350,7 @@ func parseOembedPost(shortcode, body string) (Post, bool) {
 		Caption:   root.Get("title").String(),
 		Attachments: []Attachment{{
 			ID:        id,
-			Kind:      "image", // oembed carries no video URL; reels degrade to a thumbnail card
+			Kind:      "image",
 			URL:       thumb,
 			Thumbnail: thumb,
 			Width:     uintOf(root, "thumbnail_width"),

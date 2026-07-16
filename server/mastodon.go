@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"html"
 	"net/url"
 	"strconv"
@@ -29,37 +30,70 @@ func mastodonPolicy(currentUser string) map[string]any {
 	}
 }
 
-func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
-	w, h := att.Width, att.Height
+func mastodonStatusJSON(id, uri, statusURL, content string, createdAt time.Time, account map[string]any, media []any) []byte {
+	return jsonBytes(map[string]any{
+		"id":                     id,
+		"uri":                    uri,
+		"url":                    statusURL,
+		"created_at":             mastodonTime(createdAt),
+		"edited_at":              nil,
+		"in_reply_to_id":         nil,
+		"in_reply_to_account_id": nil,
+		"reblog":                 nil,
+		"poll":                   nil,
+		"card":                   nil,
+		"language":               nil,
+		"content":                content,
+		"visibility":             "public",
+		"sensitive":              false,
+		"spoiler_text":           "",
+		"replies_count":          0,
+		"reblogs_count":          0,
+		"favourites_count":       0,
+		"quotes_count":           0,
+		"text":                   nil,
+		"quote":                  nil,
+		"quote_approval":         mastodonPolicy("denied"),
+		"tagged_collections":     []any{},
+		"account":                account,
+		"media_attachments":      media,
+		"mentions":               []any{},
+		"tags":                   []any{},
+		"emojis":                 []any{},
+	})
+}
+
+func mastodonMediaObject(id, kind, mediaURL, previewURL string, width, height int) map[string]any {
 	aspect := 0.0
-	if h > 0 {
-		aspect = float64(w) / float64(h)
+	if height > 0 {
+		aspect = float64(width) / float64(height)
 	}
-	meta := map[string]any{
-		"original": map[string]any{"width": w, "height": h, "aspect": aspect},
-		"small":    map[string]any{"width": w, "height": h, "aspect": aspect},
+	return map[string]any{
+		"id":          id,
+		"type":        kind,
+		"url":         mediaURL,
+		"preview_url": previewURL,
+		"remote_url":  nil,
+		"meta": map[string]any{
+			"original": map[string]any{"width": width, "height": height, "aspect": aspect},
+			"small":    map[string]any{"width": width, "height": height, "aspect": aspect},
+		},
+		"description": nil,
+		"blurhash":    nil,
 	}
+}
 
-	kind := att.Kind
-
-	previewURL := offloadURL(baseURL, shortcode, index, kind == "video")
-
+func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
 	id := att.ID
 	if id == "" {
 		if pk := shortcodePK(shortcode); pk != nil {
 			id = pk.String()
 		}
 	}
-	return map[string]any{
-		"id":          id,
-		"type":        kind,
-		"url":         offloadURL(baseURL, shortcode, index, false),
-		"preview_url": previewURL,
-		"remote_url":  nil,
-		"meta":        meta,
-		"description": nil,
-		"blurhash":    nil,
-	}
+	return mastodonMediaObject(id, att.Kind,
+		offloadURL(baseURL, shortcode, index, false),
+		offloadURL(baseURL, shortcode, index, att.Kind == "video"),
+		att.Width, att.Height)
 }
 
 type mastodonAccountData struct {
@@ -126,27 +160,29 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 }
 
 func profileMastodonMedia(m ProfileMedia, index int, mediaURL string) map[string]any {
-	aspect := 0.0
-	if m.Height > 0 {
-		aspect = float64(m.Width) / float64(m.Height)
-	}
 	id := m.ID
 	if id == "" {
 		id = strconv.Itoa(index)
 	}
-	return map[string]any{
-		"id":          id,
-		"type":        "image",
-		"url":         mediaURL,
-		"preview_url": mediaURL,
-		"remote_url":  nil,
-		"meta": map[string]any{
-			"original": map[string]any{"width": m.Width, "height": m.Height, "aspect": aspect},
-			"small":    map[string]any{"width": m.Width, "height": m.Height, "aspect": aspect},
-		},
-		"description": nil,
-		"blurhash":    nil,
-	}
+	return mastodonMediaObject(id, "image", mediaURL, mediaURL, m.Width, m.Height)
+}
+
+func (a *App) buildStoryMastodonStatus(baseURL string, story Story, gallery bool) []byte {
+	account := a.mastodonAccount(baseURL, mastodonAccountData{
+		Username:     story.Username,
+		FullName:     story.FullName,
+		Avatar:       storyAvatarURL(baseURL, story),
+		LastStatusAt: story.CreatedAt,
+	})
+	return mastodonStatusJSON(
+		storyStatusSnowcode(story.Username, story.ID, gallery),
+		storyStatusURL(baseURL, story.Username, story.ID, gallery),
+		storyOriginURL(story.Username, story.ID),
+		statusContent("", story.Caption, gallery), story.CreatedAt, account,
+		[]any{mastodonMediaObject(cmp.Or(story.Media.ID, story.ID), story.Media.Kind,
+			storyOffloadURL(baseURL, story.Username, story.ID, false),
+			storyOffloadURL(baseURL, story.Username, story.ID, story.Media.Kind == "video"),
+			story.Media.Width, story.Media.Height)})
 }
 
 func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
@@ -155,51 +191,26 @@ func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 		media = append(media, profileMastodonMedia(m, i, profileMediaOffloadURL(baseURL, p.Username, i)))
 	}
 
-	var created time.Time // zero when unknown; emitted as JSON null rather than faked
+	var created time.Time
 	if len(p.RecentMedia) > 0 && !p.RecentMedia[0].TakenAt.IsZero() {
 		created = p.RecentMedia[0].TakenAt
 	}
-	status := map[string]any{
-		"id":                     profileSnowcode(p.Username),
-		"uri":                    profileStatusURL(baseURL, p.Username),
-		"url":                    baseURL + "/" + url.PathEscape(p.Username),
-		"created_at":             mastodonTime(created),
-		"edited_at":              nil,
-		"in_reply_to_id":         nil,
-		"in_reply_to_account_id": nil,
-		"reblog":                 nil,
-		"poll":                   nil,
-		"card":                   nil,
-		"language":               nil,
-		"content":                profileDigestContent(p),
-		"visibility":             "public",
-		"sensitive":              false,
-		"spoiler_text":           "",
-		"replies_count":          0,
-		"reblogs_count":          0,
-		"favourites_count":       0,
-		"quotes_count":           0,
-		"text":                   nil,
-		"quote":                  nil,
-		"quote_approval":         mastodonPolicy("denied"),
-		"tagged_collections":     []any{},
-		"account": a.mastodonAccount(baseURL, mastodonAccountData{
-			ID:             p.UserID,
-			Username:       p.Username,
-			FullName:       p.FullName,
-			Avatar:         profileAvatarURL(baseURL, p),
-			Note:           profileBioHTML(p),
-			LastStatusAt:   created,
-			FollowersCount: p.FollowerCount,
-			FollowingCount: p.FollowingCount,
-			StatusesCount:  p.MediaCount,
-		}),
-		"media_attachments": media,
-		"mentions":          []any{},
-		"tags":              []any{},
-		"emojis":            []any{},
-	}
-	return jsonBytes(status)
+	account := a.mastodonAccount(baseURL, mastodonAccountData{
+		ID:             p.UserID,
+		Username:       p.Username,
+		FullName:       p.FullName,
+		Avatar:         profileAvatarURL(baseURL, p),
+		Note:           profileBioHTML(p),
+		LastStatusAt:   created,
+		FollowersCount: p.FollowerCount,
+		FollowingCount: p.FollowingCount,
+		StatusesCount:  p.MediaCount,
+	})
+	return mastodonStatusJSON(
+		profileSnowcode(p.Username),
+		profileStatusURL(baseURL, p.Username),
+		baseURL+"/"+url.PathEscape(p.Username),
+		profileDigestContent(p), created, account, media)
 }
 
 func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
@@ -209,49 +220,17 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 		media = append(media, mastodonMedia(baseURL, post.Shortcode, it.att, it.index))
 	}
 
-	content := ""
-	if !gallery {
-		content = "<p><b>" + html.EscapeString(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
-		if caption := normalizeCaption(post.Caption); caption != "" {
-			content += "<p>" + captionHTML(caption) + "</p>"
-		}
-	}
-
-	status := map[string]any{
-		"id":                     statusSnowcode(postType, post.Shortcode, mediaIndex, specified, gallery),
-		"uri":                    statusURL(baseURL, post.Username, postType, post.Shortcode, mediaIndex, specified, false),
-		"url":                    baseURL + "/" + normalizePostType(postType) + "/" + url.PathEscape(post.Shortcode),
-		"created_at":             mastodonTime(post.CreatedAt),
-		"edited_at":              nil,
-		"in_reply_to_id":         nil,
-		"in_reply_to_account_id": nil,
-		"reblog":                 nil,
-		"poll":                   nil,
-		"card":                   nil,
-		"language":               nil,
-		"content":                content,
-		"visibility":             "public",
-		"sensitive":              false,
-		"spoiler_text":           "",
-		"replies_count":          0,
-		"reblogs_count":          0,
-		"favourites_count":       0,
-		"quotes_count":           0,
-		"text":                   nil,
-		"quote":                  nil,
-		"quote_approval":         mastodonPolicy("denied"),
-		"tagged_collections":     []any{},
-		"account": a.mastodonAccount(baseURL, mastodonAccountData{
-			ID:           post.OwnerID,
-			Username:     post.Username,
-			FullName:     post.FullName,
-			Avatar:       postAvatarURL(baseURL, post),
-			LastStatusAt: post.CreatedAt,
-		}),
-		"media_attachments": media,
-		"mentions":          []any{},
-		"tags":              []any{},
-		"emojis":            []any{},
-	}
-	return jsonBytes(status)
+	account := a.mastodonAccount(baseURL, mastodonAccountData{
+		ID:           post.OwnerID,
+		Username:     post.Username,
+		FullName:     post.FullName,
+		Avatar:       postAvatarURL(baseURL, post),
+		LastStatusAt: post.CreatedAt,
+	})
+	return mastodonStatusJSON(
+		statusSnowcode(postType, post.Shortcode, mediaIndex, specified, gallery),
+		statusURL(baseURL, post.Username, postType, post.Shortcode, mediaIndex, specified, false),
+		baseURL+"/"+normalizePostType(postType)+"/"+url.PathEscape(post.Shortcode),
+		statusContent("<p><b>"+html.EscapeString(withIndicator(selection.indicator, post.StatsLine))+"</b></p>", post.Caption, gallery),
+		post.CreatedAt, account, media)
 }

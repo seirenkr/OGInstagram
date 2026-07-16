@@ -1,5 +1,5 @@
 export const botRE =
-  /bot|discordbot|telegrambot|facebook|twitterbot|slackbot|whatsapp|embed|got|firefox\/92|curl|wget|go-http|yahoo|generator|revoltchat|preview|link|proxy|vkshare|images|analyzer|index|crawl|spider|python|node|deno|mastodon|http\.rb|ruby|bun\/|fiddler|iframely|bluesky|matrix|cardyb|resolver|feedly|rss|reader|atom|thunderbird|axios/i;
+  /bot|facebook|whatsapp|embed|got|firefox\/92|curl|wget|go-http|yahoo|generator|revoltchat|preview|link|proxy|vkshare|images|analyzer|index|crawl|spider|python|node|deno|mastodon|http\.rb|ruby|bun\/|fiddler|iframely|bluesky|matrix|cardyb|resolver|feedly|rss|reader|atom|thunderbird|axios/i;
 
 type EmbedRoute = {
   postType: string;
@@ -17,6 +17,13 @@ const usernameRE = /^[A-Za-z0-9._]{1,30}$/;
 
 export function validUsername(value: string): boolean {
   return usernameRE.test(value);
+}
+
+export function parseStoriesSegments(segments: string[]): { username: string; storyID: string } | null {
+  if (segments.length === 3 && segments[0] === "stories" && validUsername(segments[1]) && /^[0-9]{1,32}$/.test(segments[2])) {
+    return { username: segments[1], storyID: segments[2] };
+  }
+  return null;
 }
 
 export function parseEmbedSegments(segments: string[]): EmbedRoute | null {
@@ -49,8 +56,25 @@ function optionalPathIndex(segments: string[], index: number): number | null | u
   if (segments.length <= index) {
     return null;
   }
-  const value = Number.parseInt(segments[index], 10);
-  return Number.isFinite(value) ? value : undefined;
+  return parseCanonicalDecimal(segments[index]) ?? undefined;
+}
+
+export function parseCanonicalDecimal(value: string): number | null {
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function mediaSelection(params: URLSearchParams, pathIndex: number | null): number | null {
+  if (pathIndex !== null) return Math.max(0, pathIndex - 1);
+  for (const [key, oneBased] of [["img_index", true], ["index", false], ["order", false]] as const) {
+    if (!params.has(key)) continue;
+    const parsed = parseCanonicalDecimal(params.get(key) ?? "") ?? 0;
+    return oneBased ? Math.max(0, parsed - 1) : Math.max(0, parsed);
+  }
+  return null;
 }
 
 type HomeLocale = "en" | "ja" | "ko" | "zh-hant" | "zh-hans" | "es" | "pt" | "fr";
@@ -58,8 +82,20 @@ type HomeLocale = "en" | "ja" | "ko" | "zh-hant" | "zh-hans" | "es" | "pt" | "fr
 const HOME_LOCALES: readonly string[] = ["en", "es", "fr", "ja", "ko", "pt", "zh-hans", "zh-hant"];
 
 export function resolveHomeLocale(acceptLanguage: string): HomeLocale {
-  for (const part of acceptLanguage.split(",")) {
-    const matched = matchLocale(part.split(";")[0].trim().toLowerCase());
+  const ranges = acceptLanguage.split(",").map((part, order) => {
+    const [rawTag, ...parameters] = part.trim().split(";");
+    let quality = 1;
+    for (const parameter of parameters) {
+      const match = /^\s*q\s*=\s*(0(?:\.\d{0,3})?|1(?:\.0{0,3})?)\s*$/i.exec(parameter);
+      if (match) quality = Number(match[1]);
+      else if (/^\s*q\s*=/i.test(parameter)) quality = 0;
+    }
+    return { tag: rawTag.toLowerCase(), quality, order };
+  }).filter(({ tag, quality }) => tag && tag !== "*" && quality > 0)
+    .sort((a, b) => b.quality - a.quality || a.order - b.order);
+
+  for (const { tag } of ranges) {
+    const matched = matchLocale(tag);
     if (matched) {
       return matched;
     }
@@ -67,8 +103,6 @@ export function resolveHomeLocale(acceptLanguage: string): HomeLocale {
   return "en";
 }
 
-// Chinese needs the script: an explicit Hant script or a TW/HK/MO region picks
-// Traditional; any other zh falls back to Simplified.
 function matchLocale(tag: string): HomeLocale | null {
   if (tag === "zh" || tag.startsWith("zh-")) {
     return tag.includes("hant") || tag.endsWith("-tw") || tag.endsWith("-hk") || tag.endsWith("-mo") ? "zh-hant" : "zh-hans";
@@ -99,5 +133,7 @@ export function validEmbedPath(path: string): boolean {
     return false;
   }
   const segments = splitPath(path);
-  return parseEmbedSegments(segments) !== null || (segments.length === 1 && validUsername(segments[0]));
+  return parseEmbedSegments(segments) !== null
+    || parseStoriesSegments(segments) !== null
+    || (segments.length === 1 && validUsername(segments[0]));
 }

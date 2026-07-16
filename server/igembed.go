@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"html"
@@ -15,23 +16,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Instagram's public embed pages (/p/<code>/embed/captioned/ and /<user>/embed/)
-// render the data server-side when the request does NOT look like a modern
-// browser. They are served without a proxy, so we hit them via a.direct.
-//
-//   - Post:    /embed/captioned first, GraphQL (proxied) on failure.
-//   - Profile: GraphQL (proxied) first, /embed/ on failure.
-//
-// Both pages carry the payload in a single JSON-encoded "contextJSON" string:
-//   ...,"contextJSON":"{\"context\":{...},\"gql_data\":{\"shortcode_media\":{...}}}",...
-// Decoding that one string yields plain JSON we read with gjson - no JS lexer,
-// no HTML parser.
-
-// directGet fetches url with no proxy and a non-browser UA (so IG server-renders
-// the embed). It never touches the session pool, so it costs no proxy budget.
-func (a *App) directGet(op, target, url string) (body string, ferr *AppError) {
+func (a *App) directGet(parent context.Context, op, target, url string) (body string, ferr *AppError) {
 	started := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	ctx, cancel := context.WithTimeout(parent, fetchTimeout)
 	defer cancel()
 
 	defer func() {
@@ -39,7 +26,7 @@ func (a *App) directGet(op, target, url string) (body string, ferr *AppError) {
 		if ferr != nil {
 			status = ferr.Status
 		}
-		logOutbound(op, target, "direct", http.MethodGet, url, started, status, len(body), ferr)
+		logOutbound(ctx, op, target, "direct", http.MethodGet, url, started, status, len(body), ferr)
 	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -49,17 +36,25 @@ func (a *App) directGet(op, target, url string) (body string, ferr *AppError) {
 	req.Header.Set("User-Agent", embedUA)
 	resp, err := a.direct.Do(req)
 	if err != nil {
+		if parent.Err() != nil {
+			return "", igErr(499, "", "cancelled")
+		}
 		return "", igErr(502, reasonConnection, err.Error())
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if parent.Err() != nil {
+		return "", igErr(499, "", "cancelled")
+	}
+	if readErr != nil {
+		return "", igErr(502, reasonConnection, readErr.Error())
+	}
 	if resp.StatusCode != 200 {
 		return "", igErr(resp.StatusCode, reasonClientError, http.StatusText(resp.StatusCode))
 	}
 	return string(raw), nil
 }
 
-// embedContextJSON pulls the inner JSON out of the escaped "contextJSON" string.
 func embedContextJSON(html string) (string, *AppError) {
 	const key = `"contextJSON":`
 	i := strings.Index(html, key)
@@ -73,8 +68,8 @@ func embedContextJSON(html string) (string, *AppError) {
 	return inner, nil
 }
 
-func (a *App) fetchPostEmbed(shortcode string) (Post, *AppError) {
-	html, err := a.directGet("post", shortcode, instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
+func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
+	html, err := a.directGet(ctx, "post", shortcode, instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
 	if err != nil {
 		return Post{}, err
 	}
@@ -84,7 +79,7 @@ func (a *App) fetchPostEmbed(shortcode string) (Post, *AppError) {
 func parseEmbedPost(page string) (Post, *AppError) {
 	inner, err := embedContextJSON(page)
 	if err != nil {
-		return parseEmbedSimple(page) // contextJSON null → DOM-rendered simple variant
+		return parseEmbedSimple(page)
 	}
 	sm := gjson.Get(inner, "gql_data.shortcode_media")
 	if !present(sm) {
@@ -100,7 +95,7 @@ var (
 	simplePermalinkRE = regexp.MustCompile(`data-permalink="[^"]*?/p/([A-Za-z0-9_-]+)`)
 	simpleUsernameRE  = regexp.MustCompile(`class="UsernameText">([^<]*)<`)
 	simpleAvatarRE    = regexp.MustCompile(`(?s)class="Avatar[^"]*"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
-	// Collab posts stack two avatars; the owner's carries SecondCollabAvatar.
+
 	simpleCollabAvatarRE = regexp.MustCompile(`(?s)class="[^"]*SecondCollabAvatar"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
 	simpleImageTagRE     = regexp.MustCompile(`(?s)<img class="EmbeddedMediaImage"[^>]*>`)
 	simpleSrcRE          = regexp.MustCompile(`\bsrc="([^"]*)"`)
@@ -114,8 +109,6 @@ var (
 	simpleTagRE          = regexp.MustCompile(`<[^>]+>`)
 )
 
-// parseEmbedSimple parses the PolarisEmbedSimple DOM (contextJSON null): single
-// image only; video/carousel/missing error out so the caller falls back to GraphQL.
 func parseEmbedSimple(page string) (Post, *AppError) {
 	mediaType := firstGroup(simpleMediaTypeRE, page)
 	if mediaType == "" {
@@ -158,7 +151,7 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 		Username:   username,
 		OwnerID:    firstGroup(simpleOwnerIDRE, page),
 		FullName:   "",
-		ProfilePic: normalizeCDNHost(html.UnescapeString(firstNonEmpty(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page)))),
+		ProfilePic: normalizeCDNHost(html.UnescapeString(cmp.Or(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page)))),
 		Caption:    simpleCaption(page),
 		StatsLine: "❤️ " + fmtCount(parseCount(firstGroup(simpleLikesRE, page))) +
 			"  \U0001f4ac " + fmtCount(parseCount(firstGroup(simpleCommentsRE, page))),
@@ -178,8 +171,6 @@ func parseCount(s string) int {
 	return n
 }
 
-// bestSrcset returns the widest srcset entry's URL and width (0 when the
-// entries carry no width descriptor).
 func bestSrcset(srcset string) (string, int) {
 	best, bestW := "", -1
 	for _, part := range strings.Split(srcset, ",") {
@@ -216,9 +207,6 @@ func simpleCaption(page string) string {
 	return normalizeCaption(html.UnescapeString(body))
 }
 
-// parseGraphMedia reads the old-style GraphQL "shortcode_media" node the embed
-// exposes. A video node without a real video_url means the embed blocked it
-// (WatchOnInstagram); we return an error so the caller falls back to GraphQL.
 func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 	owner := sm.Get("owner")
 	username := owner.Get("username").String()
@@ -261,20 +249,16 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		StatsLine: "❤️ " + fmtCount(uintOf(sm, "edge_liked_by.count")) +
 			"  \U0001f4ac " + fmtCount(uintOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
-		// CreatedAt left zero: embed carries no timestamp. fetchPost fills it
-		// from the shortcode snowflake; consumers null-handle a remaining zero.
 	}, nil
 }
 
-// graphAttachment returns (attachment, ok, blocked). blocked is true only for a
-// video whose video_url the embed withheld.
 func graphAttachment(n gjson.Result) (Attachment, bool, bool) {
 	img := normalizeCDNHost(bestGraphImageURL(n))
 	if img == "" {
 		return Attachment{}, false, false
 	}
 	w, h := uintOf(n, "dimensions.width"), uintOf(n, "dimensions.height")
-	id := firstNonEmpty(n.Get("id").String(), n.Get("pk").String())
+	id := cmp.Or(n.Get("id").String(), n.Get("pk").String())
 	if n.Get("is_video").Bool() {
 		u := n.Get("video_url").String()
 		if u == "" {
@@ -292,8 +276,8 @@ func bestGraphImageURL(n gjson.Result) string {
 	return bestCandidateURL(n.Get("display_resources"))
 }
 
-func (a *App) fetchProfileEmbed(username string) (Profile, *AppError) {
-	html, err := a.directGet("profile", username, instagramOrigin+"/"+url.PathEscape(username)+"/embed/")
+func (a *App) fetchProfileEmbed(ctx context.Context, username string) (Profile, *AppError) {
+	html, err := a.directGet(ctx, "profile", username, instagramOrigin+"/"+url.PathEscape(username)+"/embed/")
 	if err != nil {
 		return Profile{}, err
 	}
@@ -317,14 +301,14 @@ func parseEmbedProfile(html string) (Profile, *AppError) {
 		ProfilePic:    normalizeCDNHost(ctx.Get("profile_pic_url").String()),
 		FollowerCount: uintOf(ctx, "followers_count"),
 		MediaCount:    uintOf(ctx, "posts_count"),
-		IsPrivate:     ctx.Get("is_private").Bool(), // ponytail: absent for public; GraphQL path is authoritative for private
+		IsPrivate:     ctx.Get("is_private").Bool(),
 	}
 	ctx.Get("graphql_media").ForEach(func(_, m gjson.Result) bool {
 		sm := m.Get("shortcode_media")
 		thumb := normalizeCDNHost(bestGraphImageURL(sm))
 		if thumb != "" {
 			p.RecentMedia = append(p.RecentMedia, ProfileMedia{
-				ID:        firstNonEmpty(sm.Get("id").String(), sm.Get("shortcode").String()),
+				ID:        cmp.Or(sm.Get("id").String(), sm.Get("shortcode").String()),
 				Thumbnail: thumb,
 				Width:     uintOf(sm, "dimensions.width"),
 				Height:    uintOf(sm, "dimensions.height"),

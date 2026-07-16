@@ -2,13 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
 func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram", Port: 8080}}
+	a := &App{cfg: Config{Port: 8080}}
 	req := httptest.NewRequest("GET", "https://oginstagram.com/users/instagram", nil)
 	res := a.handleUserAccount(req, "instagram")
 	if res.status != 200 {
@@ -31,40 +32,52 @@ func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
 	if actor["outbox"] != "https://oginstagram.com/users/instagram/outbox" {
 		t.Fatalf("actor outbox = %v", actor["outbox"])
 	}
-	if actor["followers"] != "https://oginstagram.com/users/instagram/followers" {
-		t.Fatalf("actor followers = %v", actor["followers"])
-	}
-	if actor["following"] != "https://oginstagram.com/users/instagram/following" {
-		t.Fatalf("actor following = %v", actor["following"])
-	}
 	if _, ok := actor["icon"]; ok {
 		t.Fatalf("fallback actor should not include fetched profile icon: %#v", actor["icon"])
 	}
 }
 
-func TestUserActivityCollectionsAreOrderedCollections(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram", Port: 8080}}
-	req := httptest.NewRequest("GET", "https://oginstagram.com/users/instagram/outbox", nil)
-	res := a.handleUserCollection(req, "instagram", "outbox")
-	if res.status != 200 {
-		t.Fatalf("status = %d, want 200", res.status)
+func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
+	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
+	for _, name := range []string{"inbox", "outbox"} {
+		req := httptest.NewRequest(http.MethodGet, "https://oginstagram.com/users/instagram/"+name, nil)
+		res := a.handleActivityCollection(req, "instagram", name)
+		var collection struct {
+			Type         string `json:"type"`
+			TotalItems   int    `json:"totalItems"`
+			OrderedItems []any  `json:"orderedItems"`
+		}
+		if res.status != http.StatusOK || json.Unmarshal(res.body, &collection) != nil || collection.Type != "OrderedCollection" || collection.TotalItems != 0 || len(collection.OrderedItems) != 0 {
+			t.Fatalf("%s collection = status %d, body %s", name, res.status, res.body)
+		}
+		post := httptest.NewRequest(http.MethodPost, req.URL.String(), nil)
+		if got := a.handleActivityCollection(post, "instagram", name); got.status != http.StatusMethodNotAllowed || got.headers["Allow"] != "GET" {
+			t.Fatalf("POST %s = %#v", name, got)
+		}
 	}
+}
 
-	var coll map[string]any
-	if err := json.Unmarshal(res.body, &coll); err != nil {
-		t.Fatal(err)
+func TestWebFingerReturnsActorAndFiltersRelations(t *testing.T) {
+	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
+	req := httptest.NewRequest(http.MethodGet, "https://oginstagram.com/.well-known/webfinger?resource=acct%3Ainstagram%40oginstagram.com", nil)
+	res := a.handleWebFinger(req)
+	var body struct {
+		Subject string `json:"subject"`
+		Links   []struct {
+			Rel  string `json:"rel"`
+			Type string `json:"type"`
+			Href string `json:"href"`
+		} `json:"links"`
 	}
-	if coll["@context"] != asContext || coll["type"] != "OrderedCollection" {
-		t.Fatalf("collection shape wrong: %#v", coll)
+	if res.status != http.StatusOK || res.headers["Content-Type"] != "application/jrd+json" || json.Unmarshal(res.body, &body) != nil {
+		t.Fatalf("webfinger = status %d, headers %#v, body %s", res.status, res.headers, res.body)
 	}
-	if coll["id"] != "https://oginstagram.com/users/instagram/outbox" {
-		t.Fatalf("collection id = %v", coll["id"])
+	if body.Subject != "acct:instagram@oginstagram.com" || len(body.Links) != 1 || body.Links[0].Href != "https://oginstagram.com/users/instagram" {
+		t.Fatalf("webfinger body = %#v", body)
 	}
-	if coll["totalItems"] != float64(0) {
-		t.Fatalf("totalItems = %#v, want 0", coll["totalItems"])
-	}
-	if items, ok := coll["orderedItems"].([]any); !ok || len(items) != 0 {
-		t.Fatalf("orderedItems = %#v, want empty array", coll["orderedItems"])
+	filtered := httptest.NewRequest(http.MethodGet, req.URL.String()+"&rel=unknown", nil)
+	if got := a.handleWebFinger(filtered); !strings.Contains(string(got.body), `"links":[]`) {
+		t.Fatalf("filtered webfinger body = %s", got.body)
 	}
 }
 

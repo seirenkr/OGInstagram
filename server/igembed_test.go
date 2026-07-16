@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// wrapEmbed encodes inner JSON exactly the way IG embeds it: as an escaped
-// "contextJSON" string inside the page's JS bootstrap array.
 func wrapEmbed(inner string) string {
 	b, _ := json.Marshal(inner)
 	return `<script>requireLazy(["a"],function(){__d("PolarisEmbedSimple","init",[],[{"isRichEmbed":true,"contextJSON":` + string(b) + `,"tail":1}])})</script>`
@@ -41,7 +39,7 @@ func TestParseEmbedPost(t *testing.T) {
 }
 
 func TestParseEmbedPostVideoBlocked(t *testing.T) {
-	// Single video node with no video_url must fail so the caller uses GraphQL.
+
 	inner := `{"gql_data":{"shortcode_media":{"shortcode":"V","is_video":true,` +
 		`"owner":{"id":"1","username":"u"},"display_url":"https://cdn/t.jpg","dimensions":{"width":1,"height":1}}}}`
 	if _, err := parseEmbedPost(wrapEmbed(inner)); err == nil {
@@ -87,8 +85,6 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	}
 }
 
-// Collab posts stack two avatars; the collaborator's plain CollabAvatar comes
-// first, the owner's carries SecondCollabAvatar. Expect a2, not a1.
 func TestParseEmbedSimpleCollabAvatar(t *testing.T) {
 	page := `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
 		`<div class="Embed" data-media-type="GraphImage" data-media-id="1" data-owner-id="2" data-permalink="https://www.instagram.com/p/COLLAB/?x">` +

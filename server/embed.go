@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"html"
 	"strconv"
 	"strings"
@@ -8,23 +9,32 @@ import (
 
 func isTelegramBot(ua string) bool { return strings.Contains(strings.ToLower(ua), "telegrambot") }
 
-// displayTitle must keep the "Name (@handle)" shape: Discord uses a matching
-// og:title verbatim, but rebuilds mismatches as "name (@acct@domain)".
+func videoOGTags(mediaHref string, att Attachment) []string {
+	w, h := videoDisplaySize(att)
+	tags := []string{
+		`<meta property="og:video" content="` + html.EscapeString(mediaHref) + `">`,
+		`<meta property="og:video:secure_url" content="` + html.EscapeString(mediaHref) + `">`,
+		`<meta property="og:video:type" content="video/mp4">`,
+	}
+	return append(tags, dimensionTags("og:video", w, h)...)
+}
+
+func dimensionTags(prefix string, w, h int) []string {
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	return []string{
+		`<meta property="` + prefix + `:width" content="` + strconv.Itoa(w) + `">`,
+		`<meta property="` + prefix + `:height" content="` + strconv.Itoa(h) + `">`,
+	}
+}
+
+// Keep the "Name (@handle)" shape even when the name falls back to the handle.
 func displayTitle(name, username string) string {
 	if name == "" {
 		name = username
 	}
 	return name + " (@" + username + ")"
-}
-
-func (a *App) faviconLinks(baseURL string) []string {
-	return []string{
-		`<link href="` + baseURL + `/favicon-64.png" rel="icon" sizes="64x64" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-48.png" rel="icon" sizes="48x48" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-32.png" rel="icon" sizes="32x32" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-24.png" rel="icon" sizes="24x24" type="image/png">`,
-		`<link href="` + baseURL + `/favicon-16.png" rel="icon" sizes="16x16" type="image/png">`,
-	}
 }
 
 func (a *App) commonHead(baseURL, originURL, username, title, description, image, card, activityHref string) []string {
@@ -33,11 +43,10 @@ func (a *App) commonHead(baseURL, originURL, username, title, description, image
 		`<link rel="canonical" href="` + html.EscapeString(originURL) + `">`,
 		`<meta property="og:url" content="` + html.EscapeString(originURL) + `">`,
 		`<meta property="og:locale" content="en_US">`,
-		`<meta property="og:site_name" content="` + html.EscapeString(a.cfg.BrandName) + `">`,
+		`<meta property="og:site_name" content="` + html.EscapeString(brandName) + `">`,
 		`<meta property="og:title" content="` + html.EscapeString(title) + `">`,
 		`<meta name="twitter:title" content="` + html.EscapeString(title) + `">`,
-		`<meta name="twitter:creator" content="@` + html.EscapeString(username) + `">`,
-		`<meta name="theme-color" content="` + html.EscapeString(a.cfg.BrandColor) + `">`,
+		`<meta name="theme-color" content="` + html.EscapeString(brandColor) + `">`,
 		`<meta name="twitter:card" content="` + card + `">`,
 		`<meta property="og:image" content="` + html.EscapeString(image) + `">`,
 		`<meta property="og:image:secure_url" content="` + html.EscapeString(image) + `">`,
@@ -45,15 +54,18 @@ func (a *App) commonHead(baseURL, originURL, username, title, description, image
 		`<meta name="description" content="` + html.EscapeString(description) + `">`,
 		`<meta property="og:description" content="` + html.EscapeString(description) + `">`,
 		`<meta name="twitter:description" content="` + html.EscapeString(description) + `">`,
+		`<link href="` + html.EscapeString(baseURL) + `/favicon-64.png" rel="icon" sizes="64x64" type="image/png">`,
 	}
-	h = append(h, a.faviconLinks(baseURL)...)
+	if username != "" {
+		h = append(h, `<meta name="twitter:creator" content="@`+html.EscapeString(username)+`">`)
+	}
 	if activityHref != "" {
 		h = append(h, `<link href="`+html.EscapeString(activityHref)+`" rel="alternate" type="application/activity+json">`)
 	}
 	return h
 }
 
-func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, mediaIndex int, specified, gallery bool) string {
+func (a *App) buildEmbedHTML(ctx context.Context, baseURL, ua string, post Post, postType string, mediaIndex int, specified, gallery bool) string {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 	first := post.Attachments[selectedIndex]
 	originURL := instagramPostURL(postType, post.Shortcode, selectedIndex, specified)
@@ -73,26 +85,29 @@ func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, med
 
 	mediaHref := offloadURL(baseURL, post.Shortcode, selectedIndex, false)
 	thumbnailHref := offloadURL(baseURL, post.Shortcode, selectedIndex, true)
-	exposeVideo := first.Kind == "video" && !first.OversizedInline
-
-	// og:type stays "article" even for video; og:type=video.other makes Discord hide the caption.
-	card, ogType := "summary_large_image", "article"
+	exposeVideo := first.Kind == "video"
+	if exposeVideo && first.URL != "" {
+		exposeVideo = a.cachedContentLength(ctx, post.Shortcode, first.URL) <= maxInlineVideoBytes
+	}
 
 	activityHref := ""
 	if useActivity {
 		activityHref = statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	}
 
-	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, card, activityHref)
+	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, "summary_large_image", activityHref)
 	h = append(h,
-		`<meta property="og:type" content="`+ogType+`">`,
+		`<meta property="og:type" content="article">`,
 		`<link rel="apple-touch-icon" href="`+html.EscapeString(postAvatarURL(baseURL, post))+`">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(post.Username)+`/">`,
-		`<meta name="twitter:image:width" content="`+strconv.Itoa(first.Width)+`">`,
-		`<meta name="twitter:image:height" content="`+strconv.Itoa(first.Height)+`">`,
-		`<meta property="og:image:width" content="`+strconv.Itoa(first.Width)+`">`,
-		`<meta property="og:image:height" content="`+strconv.Itoa(first.Height)+`">`,
 	)
+	if first.Width > 0 && first.Height > 0 {
+		h = append(h,
+			`<meta name="twitter:image:width" content="`+strconv.Itoa(first.Width)+`">`,
+			`<meta name="twitter:image:height" content="`+strconv.Itoa(first.Height)+`">`,
+		)
+	}
+	h = append(h, dimensionTags("og:image", first.Width, first.Height)...)
 	if published := isoTime(post.CreatedAt); published != "" {
 		h = append(h, `<meta property="article:published_time" content="`+html.EscapeString(published)+`">`)
 	}
@@ -106,17 +121,14 @@ func (a *App) buildEmbedHTML(baseURL, ua string, post Post, postType string, med
 		h = append(h, `<meta http-equiv="refresh" content="0;url=`+html.EscapeString(originURL)+`">`)
 	}
 	if exposeVideo {
-		vidW, vidH := videoDisplaySize(first)
-		h = append(h,
-			`<meta property="og:video" content="`+html.EscapeString(mediaHref)+`">`,
-			`<meta property="og:video:secure_url" content="`+html.EscapeString(mediaHref)+`">`,
-			`<meta property="og:video:type" content="video/mp4">`,
-			`<meta property="og:video:width" content="`+strconv.Itoa(vidW)+`">`,
-			`<meta property="og:video:height" content="`+strconv.Itoa(vidH)+`">`,
-		)
+		h = append(h, videoOGTags(mediaHref, first)...)
 	}
 
-	return compactHTML(`<!DOCTYPE html>` + embedBanner + `<html lang="en"><head>` + strings.Join(h, "") + `</head><body></body></html>`)
+	return embedDocument(h)
+}
+
+func embedDocument(head []string) string {
+	return `<!DOCTYPE html><html lang="en"><head>` + embedBanner + strings.Join(head, "") + `</head><body></body></html>`
 }
 
 const embedBanner = `<!--
@@ -152,7 +164,7 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool) str
 		`<meta property="og:type" content="profile">`,
 		`<meta property="profile:username" content="`+html.EscapeString(p.Username)+`">`,
 	)
-	return compactHTML(`<!DOCTYPE html>` + embedBanner + `<html lang="en"><head>` + strings.Join(h, "") + `</head><body></body></html>`)
+	return embedDocument(h)
 }
 
 func postErrorCard(reason, supportURL string) (title, desc string) {
@@ -165,7 +177,6 @@ func postErrorCard(reason, supportURL string) (title, desc string) {
 	return "Post unavailable", "This post isn't available - it may be deleted, set to private, or the link is incorrect."
 }
 
-// budgetCard is the hourly-limit card; it invites a donation to help raise the cap.
 func budgetCard(supportURL string) (title, desc string) {
 	desc = budgetDescription
 	if supportURL != "" {
@@ -175,22 +186,7 @@ func budgetCard(supportURL string) (title, desc string) {
 }
 
 func (a *App) buildStatusEmbedHTML(baseURL, originURL, title, description string) string {
-	h := []string{
-		`<meta charset="utf-8">`,
-		`<link rel="canonical" href="` + html.EscapeString(originURL) + `">`,
-		`<meta property="og:url" content="` + html.EscapeString(originURL) + `">`,
-		`<meta property="og:type" content="article">`,
-		`<meta property="og:site_name" content="` + html.EscapeString(a.cfg.BrandName) + `">`,
-		`<meta property="og:title" content="` + html.EscapeString(title) + `">`,
-		`<meta name="twitter:title" content="` + html.EscapeString(title) + `">`,
-		`<meta property="og:image" content="` + html.EscapeString(baseURL+"/favicon-192.png") + `">`,
-		`<meta name="twitter:image" content="` + html.EscapeString(baseURL+"/favicon-192.png") + `">`,
-		`<meta name="description" content="` + html.EscapeString(description) + `">`,
-		`<meta property="og:description" content="` + html.EscapeString(description) + `">`,
-		`<meta name="twitter:description" content="` + html.EscapeString(description) + `">`,
-		`<meta name="twitter:card" content="summary">`,
-		`<meta name="theme-color" content="` + html.EscapeString(a.cfg.BrandColor) + `">`,
-	}
-	h = append(h, a.faviconLinks(baseURL)...)
-	return compactHTML(`<!DOCTYPE html>` + embedBanner + `<html lang="en"><head>` + strings.Join(h, "") + `</head><body></body></html>`)
+	h := a.commonHead(baseURL, originURL, "", title, description, baseURL+"/favicon-192.png", "summary", "")
+	h = append(h, `<meta property="og:type" content="article">`)
+	return embedDocument(h)
 }

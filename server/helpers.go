@@ -1,37 +1,25 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
 func shortcodePK(shortcode string) *big.Int {
-	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-	n := new(big.Int)
-	base := big.NewInt(64)
-	for _, ch := range shortcode {
-		idx := strings.IndexRune(enc, ch)
-		if idx < 0 {
-			return nil
-		}
-		n.Mul(n, base)
-		n.Add(n, big.NewInt(int64(idx)))
+	raw, err := base64.RawURLEncoding.DecodeString(strings.Repeat("A", (4-len(shortcode)%4)%4) + shortcode)
+	if err != nil {
+		return nil
 	}
-	return n
+	return new(big.Int).SetBytes(raw)
 }
 
-// igEpochMs is the Instagram snowflake epoch, 2011-08-24T21:07:01.721Z.
 const igEpochMs = 1314220021721
 
-// shortcodeTime decodes the creation time embedded in a post shortcode: the
-// media PK is a snowflake whose upper bits are milliseconds since the IG
-// epoch. Zero time when the code doesn't decode to a plausible snowflake
-// (invalid chars, empty, or the 24-char private-post codes).
 func shortcodeTime(shortcode string) time.Time {
 	pk := shortcodePK(shortcode)
 	if pk == nil || pk.Sign() == 0 || !pk.IsInt64() {
@@ -44,8 +32,6 @@ func shortcodeTime(shortcode string) time.Time {
 	return t
 }
 
-// Avatars and profile media route through /offload like post media, so the
-// served URL never carries an expiring CDN signature and stays same-origin.
 func postAvatarURL(baseURL string, post Post) string {
 	if post.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
@@ -67,12 +53,6 @@ func profileMediaOffloadURL(baseURL, username string, index int) string {
 func jsonBytes(v any) []byte {
 	b, _ := json.Marshal(v)
 	return append(b, '\n')
-}
-
-var compactRE = regexp.MustCompile(`>\s+<`)
-
-func compactHTML(v string) string {
-	return compactRE.ReplaceAllString(strings.TrimSpace(v), "><")
 }
 
 func normalizeCDNHost(raw string) string {
@@ -113,20 +93,6 @@ func fmtCount(value int) string {
 	return b.String()
 }
 
-func truncateChars(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	r := []rune(text)
-	if len(r) <= limit {
-		return text
-	}
-	if limit <= 3 {
-		return strings.Repeat(".", limit)
-	}
-	return strings.TrimRight(string(r[:limit-3]), " \t\n") + "..."
-}
-
 func truncateFlat(text string, limit int) string {
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
@@ -134,7 +100,13 @@ func truncateFlat(text string, limit int) string {
 			lines = append(lines, t)
 		}
 	}
-	return truncateChars(strings.Join(lines, " "), limit)
+	flat := strings.Join(lines, " ")
+	// ponytail: assumes limit > 3; the sole caller passes 420.
+	r := []rune(flat)
+	if len(r) <= limit {
+		return flat
+	}
+	return strings.TrimRight(string(r[:limit-3]), " \t\n") + "..."
 }
 
 func normalizeCaption(text string) string {
@@ -175,7 +147,6 @@ const (
 	cdnTTLMargin   = 30 * time.Minute
 )
 
-// cdnExpiry reads the "oe" query param (hex Unix expiry) from an Instagram CDN URL.
 func cdnExpiry(rawURL string) (time.Time, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -188,9 +159,6 @@ func cdnExpiry(rawURL string) (time.Time, bool) {
 	return time.Unix(n, 0), true
 }
 
-// cacheTTLFromURLs caches until the earliest CDN URL expiry (minus a margin), so
-// a cached post never hands out a dead media URL. Falls back to cdnFallbackTTL
-// when no URL carries an oe expiry.
 func cacheTTLFromURLs(urls ...string) time.Duration {
 	var earliest time.Time
 	for _, u := range urls {
@@ -207,8 +175,6 @@ func cacheTTLFromURLs(urls ...string) time.Duration {
 	return time.Minute
 }
 
-// cdnEdgeSeconds converts the same oe-based TTL into an edge s-maxage, so a
-// cached response embedding raw CDN URLs never outlives the media it points at.
 func cdnEdgeSeconds(urls ...string) int {
 	return int(cacheTTLFromURLs(urls...) / time.Second)
 }
