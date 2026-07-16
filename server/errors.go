@@ -13,44 +13,29 @@ const (
 	reasonNotFound       = "ClientNotFoundError"
 	reasonMediaNotFound  = "MediaNotFound"
 	reasonBudgetExceeded = "HourlyBudgetExceeded"
+	reasonBudgetBackend  = "HourlyBudgetBackendError"
 
-	// Content-side gating (region/age/audience) reported by the oembed fail
-	// payload's "geoblock_required" message; the post exists but Instagram
-	// refuses to serve it, so retrying or rotating IPs won't help.
 	reasonGeoBlocked = "GeoBlockRequired"
 )
 
-type reasonInfo struct {
-	rotateIP  bool
-	transient bool
-}
-
-var reasonRegistry = map[string]reasonInfo{
-	reasonConnection:     {rotateIP: true, transient: true},
-	reasonJSONDecode:     {rotateIP: true, transient: true},
-	reasonLoginRequired:  {rotateIP: true, transient: true},
-	reasonUnauthorized:   {rotateIP: true, transient: true},
-	reasonForbidden:      {rotateIP: true, transient: true},
-	reasonThrottled:      {rotateIP: true, transient: true},
-	reasonClientError:    {rotateIP: true, transient: true},
-	reasonGraphql:        {rotateIP: false, transient: true},
-	reasonBadRequest:     {rotateIP: false, transient: false},
-	reasonNotFound:       {rotateIP: false, transient: false},
-	reasonMediaNotFound:  {rotateIP: false, transient: false},
-	reasonBudgetExceeded: {rotateIP: false, transient: true},
-
-	reasonGeoBlocked: {rotateIP: false, transient: false},
-}
-
-func reasonOf(reason string) reasonInfo {
-	if r, ok := reasonRegistry[reason]; ok {
-		return r
+func shouldRotate(reason string) bool {
+	switch reason {
+	case reasonConnection, reasonJSONDecode, reasonLoginRequired, reasonUnauthorized,
+		reasonForbidden, reasonThrottled, reasonClientError:
+		return true
+	default:
+		return false
 	}
-	return reasonInfo{rotateIP: false, transient: true}
 }
 
-func shouldRotate(reason string) bool { return reasonOf(reason).rotateIP }
-func isTransient(reason string) bool  { return reasonOf(reason).transient }
+func isTransient(reason string) bool {
+	switch reason {
+	case reasonBadRequest, reasonNotFound, reasonMediaNotFound, reasonGeoBlocked:
+		return false
+	default:
+		return true
+	}
+}
 
 func errorCacheSeconds(reason string) int {
 	if isTransient(reason) {

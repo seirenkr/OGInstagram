@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -11,31 +12,38 @@ import (
 func TestPublicBaseURLUsesRequestOrigin(t *testing.T) {
 	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
 	req := httptest.NewRequest("GET", "http://container.internal/p/CODE", nil)
-	req.Header.Set("X-OG-Public-Origin", "https://fresh-tunnel.trycloudflare.com")
+	req.Header.Set("OG-Public-Origin", "https://fresh-tunnel.trycloudflare.com")
 	if got := a.publicBaseURL(req); got != "https://fresh-tunnel.trycloudflare.com" {
 		t.Fatalf("publicBaseURL = %q", got)
 	}
 }
 
 func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram", BrandColor: "#ff0069"}}
+	a := &App{cfg: Config{}}
 	post := Post{
-		Shortcode: "CODE",
-		Username:  "user",
-		FullName:  "User",
-		Caption:   "caption",
-		StatsLine: "stats",
+		Shortcode:  "CODE",
+		Username:   "user",
+		FullName:   "User",
+		ProfilePic: "https://cdn.example/avatar.jpg",
+		Caption:    "caption",
+		StatsLine:  "stats",
 		Attachments: []Attachment{{
 			Kind: "image", Width: 1080, Height: 1080,
 		}},
 	}
 
-	normal := a.buildEmbedHTML("https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
+	normal := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
 	if !strings.Contains(normal, "property=\"og:description\" content=\"stats\n\ncaption\"") {
 		t.Fatalf("normal embed description missing: %s", normal)
 	}
+	if !strings.Contains(normal, `href="https://oginstagram.com/favicon-64.png" rel="icon" sizes="64x64" type="image/png"`) {
+		t.Error("service favicon missing from embed")
+	}
+	if !strings.Contains(normal, `rel="apple-touch-icon" href="https://oginstagram.com/offload/CODE/avatar"`) {
+		t.Error("author avatar must remain separate from the service favicon")
+	}
 
-	gallery := a.buildEmbedHTML("https://oginstagram.com", "Discordbot", post, "p", 0, false, true)
+	gallery := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, true)
 	for _, tag := range []string{
 		`name="description" content=""`,
 		`property="og:description" content=""`,
@@ -87,8 +95,39 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	}
 }
 
+func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
+	a := &App{cfg: Config{}}
+	story := Story{
+		ID: "12345", Username: "user", FullName: "User", Caption: "story caption",
+		Media: Attachment{Kind: "image", Width: 1080, Height: 1920},
+	}
+	baseURL := "https://g.oginstagram.com"
+	wantStatus := storyStatusURL(baseURL, story.Username, story.ID, true)
+	html := a.buildStoryEmbedHTML(baseURL, "Discordbot", storyOriginURL(story.Username, story.ID), story,
+		baseURL+"/media", baseURL+"/thumb", wantStatus, true)
+	if !strings.Contains(html, `property="og:description" content=""`) || strings.Contains(html, "story caption") {
+		t.Fatalf("gallery story exposed caption: %s", html)
+	}
+	if !strings.Contains(html, `href="`+wantStatus+`"`) {
+		t.Fatalf("gallery story activity link missing: %s", html)
+	}
+
+	for name, body := range map[string][]byte{
+		"activity": a.buildStoryActivityStatus(baseURL, story, true),
+		"mastodon": a.buildStoryMastodonStatus(baseURL, story, true),
+	} {
+		var status map[string]any
+		if err := json.Unmarshal(body, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status["content"] != "" {
+			t.Errorf("%s gallery content = %q, want empty", name, status["content"])
+		}
+	}
+}
+
 func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	a := &App{cfg: Config{}}
 	post := Post{
 		Shortcode: "CODE", Username: "user", FullName: "User", StatsLine: "stats",
 		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080}},
@@ -133,7 +172,7 @@ func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
 }
 
 func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	a := &App{cfg: Config{}}
 	post := Post{
 		Shortcode: "CODE",
 		Username:  "user",
@@ -199,7 +238,7 @@ func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
 }
 
 func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram"}}
+	a := &App{cfg: Config{}}
 	taken := time.Date(2026, 4, 23, 10, 1, 13, 0, time.UTC)
 	p := Profile{
 		Username:       "user",
@@ -276,6 +315,8 @@ func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
 		{"hashtag attached to word not linked", "abc#def", "abc#def"},
 		{"angle brackets escaped", "a <b> #x", `a &lt;b&gt; <a href="https://www.instagram.com/explore/search/keyword/?q=%23x">#x</a>`},
 		{"scheme url", "see https://example.com/x", `see <a href="https://example.com/x">https://example.com/x</a>`},
+		{"file scheme is text", "open file://example.com/x", `open file://example.com/x`},
+		{"ftp scheme is text", "open ftp://example.com/x", `open ftp://example.com/x`},
 		{"url trailing dot trimmed", "go https://example.com.", `go <a href="https://example.com">https://example.com</a>.`},
 		{"www prepended scheme", "at www.example.com now", `at <a href="https://www.example.com">www.example.com</a> now`},
 		{"fuzzy domain with path", "watch youtube.com/abc here", `watch <a href="https://youtube.com/abc">youtube.com/abc</a> here`},
@@ -289,12 +330,12 @@ func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
 }
 
 func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
-	a := &App{cfg: Config{BrandName: "OGInstagram", BrandColor: "#ff0069"}}
+	a := &App{cfg: Config{}}
 	post := Post{
 		Shortcode: "CODE", Username: "user", FullName: "User",
 		Attachments: []Attachment{{Kind: "video", Width: 2160, Height: 3840}},
 	}
-	html := a.buildEmbedHTML("https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
+	html := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
 	for _, tag := range []string{
 		`property="og:video:width" content="1080"`,
 		`property="og:video:height" content="1920"`,

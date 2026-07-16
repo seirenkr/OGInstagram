@@ -1,41 +1,36 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
-	"time"
 )
 
-func TestHourlyBudgetCountsSuccessAndResets(t *testing.T) {
-	p := &SessionPool{cfg: Config{GlobalHourlyLimit: 2}}
+func TestDurableBudgetResultClassification(t *testing.T) {
+	status := http.StatusNoContent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
 
-	if p.overBudget() {
-		t.Fatal("fresh pool should not be over budget")
+	p := &SessionPool{
+		cfg:      Config{BudgetURL: srv.URL},
+		budget:   srv.Client(),
+		sessions: []*Session{{}},
 	}
-	p.countRequest() // 1 success
-	if p.overBudget() {
-		t.Fatal("1/2 should not be over budget")
+	if session, reason := p.pick(context.Background(), nil); session == nil || reason != "" {
+		t.Fatalf("allowed reservation = (%v, %q)", session, reason)
 	}
-	p.countRequest() // 2 success -> at cap
-	if !p.overBudget() {
-		t.Fatal("2/2 should be over budget")
+	status = http.StatusTooManyRequests
+	if session, reason := p.pick(context.Background(), nil); session != nil || reason != reasonBudgetExceeded {
+		t.Fatalf("exhausted reservation = (%v, %q)", session, reason)
 	}
-	if got := p.pick(nil); got != nil {
-		t.Fatal("pick over budget should return nil")
-	}
-
-	// Rolling window: after an hour the budget resets.
-	p.globalWindowStart = time.Now().Add(-time.Hour - time.Minute)
-	if p.overBudget() {
-		t.Fatal("budget should reset after the hour window")
-	}
-}
-
-func TestHourlyBudgetUnlimitedWhenZero(t *testing.T) {
-	p := &SessionPool{cfg: Config{GlobalHourlyLimit: 0}}
-	for i := 0; i < 100; i++ {
-		p.countRequest()
-	}
-	if p.overBudget() {
-		t.Fatal("limit 0 means unlimited")
+	status = http.StatusServiceUnavailable
+	if session, reason := p.pick(context.Background(), nil); session != nil || reason != reasonBudgetBackend {
+		t.Fatalf("backend failure = (%v, %q)", session, reason)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -10,7 +11,6 @@ func parseInstagramPost(body string) (Post, *AppError) {
 	root := gjson.Parse(body)
 	data := root.Get("data")
 
-	// PolarisPostRootQuery (doc_id) returns a v1-shaped item under this key.
 	if it := data.Get("xdt_api__v1__media__shortcode__web_info.items.0"); present(it) {
 		return parseV1(it)
 	}
@@ -58,7 +58,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	return Post{
 		Shortcode:   shortcode,
 		Username:    username,
-		OwnerID:     firstNonEmpty(user.Get("pk").String(), user.Get("id").String()),
+		OwnerID:     cmp.Or(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
 		ProfilePic:  normalizeCDNHost(user.Get("profile_pic_url").String()),
 		Caption:     caption,
@@ -75,7 +75,7 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 	}
 	w, h := mediaWidth(item), mediaHeight(item)
 	thumbnail = normalizeCDNHost(thumbnail)
-	id := firstNonEmpty(item.Get("pk").String(), item.Get("id").String())
+	id := cmp.Or(item.Get("pk").String(), item.Get("id").String())
 	if uintOf(item, "media_type") == 2 {
 		u := bestVideoURL(item)
 		if u == "" {
@@ -210,5 +210,5 @@ func unixTime(seconds int64) time.Time {
 	if seconds > 0 {
 		return time.Unix(seconds, 0).UTC()
 	}
-	return time.Time{} // unknown; consumers null-handle
+	return time.Time{}
 }

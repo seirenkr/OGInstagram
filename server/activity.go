@@ -2,7 +2,6 @@ package main
 
 import (
 	"html"
-	"net/http"
 	"net/url"
 	"strings"
 )
@@ -12,30 +11,14 @@ const (
 	asPublic  = "https://www.w3.org/ns/activitystreams#Public"
 )
 
-func personObject(baseURL, username, name, profileURLStr, avatar string) map[string]any {
-	if name == "" {
-		name = username
-	}
-	actor := actorURL(baseURL, username)
-	if profileURLStr == "" {
-		profileURLStr = actor
-	}
-	p := map[string]any{
-		"@context":          asContext,
-		"id":                actor,
-		"type":              "Person",
-		"preferredUsername": username,
-		"name":              name,
-		"url":               profileURLStr,
-		"inbox":             actor + "/inbox",
-		"outbox":            actor + "/outbox",
-		"followers":         actor + "/followers",
-		"following":         actor + "/following",
-	}
-	if avatar != "" {
-		p["icon"] = map[string]any{"type": "Image", "url": avatar}
-	}
-	return p
+func emptyOrderedCollection(id string) []byte {
+	return jsonBytes(map[string]any{
+		"@context":     asContext,
+		"id":           id,
+		"type":         "OrderedCollection",
+		"totalItems":   0,
+		"orderedItems": []any{},
+	})
 }
 
 func noteObject(id string, attributedTo any, content, url, published string, attachment []any) []byte {
@@ -82,6 +65,16 @@ func statusURL(baseURL, username, postType, shortcode string, mediaIndex int, sp
 		statusSnowcode(postType, shortcode, mediaIndex, specified, gallery)
 }
 
+func statusContent(prefix, caption string, gallery bool) string {
+	if gallery {
+		return ""
+	}
+	if caption = normalizeCaption(caption); caption != "" {
+		prefix += "<p>" + captionHTML(caption) + "</p>"
+	}
+	return prefix
+}
+
 func (a *App) buildActivityStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 
@@ -89,28 +82,22 @@ func (a *App) buildActivityStatus(baseURL string, post Post, postType string, me
 	id := statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	selection := selectActivityAttachments(post, mediaIndex, specified)
 
-	content := ""
-	if !gallery {
-		content = "<p><b>" + html.EscapeString(withIndicator(selection.indicator, post.StatsLine)) + "</b></p>"
-		if caption := normalizeCaption(post.Caption); caption != "" {
-			content += "<p>" + captionHTML(caption) + "</p>"
-		}
-	}
+	content := statusContent("<p><b>"+html.EscapeString(withIndicator(selection.indicator, post.StatsLine))+"</b></p>", post.Caption, gallery)
 
 	attachment := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
-		attachment = append(attachment, activityAttachment(baseURL, post.Shortcode, it.att, it.index))
+		attachment = append(attachment, activityAttachment(offloadURL(baseURL, post.Shortcode, it.index, false), it.att))
 	}
 
 	return noteObject(id, actorURL(baseURL, post.Username), content, postURL, isoTime(post.CreatedAt), attachment)
 }
 
-func activityAttachment(baseURL, shortcode string, att Attachment, index int) map[string]any {
+func activityAttachment(mediaURL string, att Attachment) map[string]any {
 	width, height := videoDisplaySize(att)
 	if att.Kind == "video" {
-		return mediaObject("video/mp4", offloadURL(baseURL, shortcode, index, false), width, height)
+		return mediaObject("video/mp4", mediaURL, width, height)
 	}
-	return mediaObject(imageMediaType(att.URL), offloadURL(baseURL, shortcode, index, false), width, height)
+	return mediaObject(imageMediaType(att.URL), mediaURL, width, height)
 }
 
 func imageMediaType(rawURL string) string {
@@ -134,6 +121,17 @@ func profileStatusURL(baseURL, username string) string {
 	return actorURL(baseURL, username) + "/statuses/" + profileSnowcode(username)
 }
 
+func storyStatusURL(baseURL, username, id string, gallery bool) string {
+	return actorURL(baseURL, username) + "/statuses/" + storyStatusSnowcode(username, id, gallery)
+}
+
+func (a *App) buildStoryActivityStatus(baseURL string, story Story, gallery bool) []byte {
+	media := activityAttachment(storyOffloadURL(baseURL, story.Username, story.ID, false), story.Media)
+
+	return noteObject(storyStatusURL(baseURL, story.Username, story.ID, gallery), actorURL(baseURL, story.Username),
+		statusContent("", story.Caption, gallery), storyOriginURL(story.Username, story.ID), isoTime(story.CreatedAt), []any{media})
+}
+
 func profileDigestContent(p Profile) string {
 	content := "<p><b>" + html.EscapeString(profileStatsLine(p)) + "</b></p>"
 	if bio := profileBioHTML(p); bio != "" {
@@ -154,32 +152,19 @@ func (a *App) buildProfileActivityStatus(baseURL string, p Profile) []byte {
 		profileDigestContent(p), baseURL+"/"+url.PathEscape(p.Username), "", attachment)
 }
 
+// username is already validated by the router (validUsername).
 func (a *App) buildFallbackAccount(baseURL, username string) []byte {
-	safe := strings.TrimSpace(username)
-	if safe == "" {
-		safe = a.cfg.BrandName
-	}
-	return jsonBytes(personObject(baseURL, safe, safe, actorURL(baseURL, safe), ""))
-}
-
-func (a *App) handleUserCollection(req *http.Request, username, name string) resp {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		r := textResp(405, "Method Not Allowed")
-		r.headers["Allow"] = "GET, HEAD"
-		return r
-	}
-
-	switch name {
-	case "inbox", "outbox", "followers", "following":
-		body := jsonBytes(map[string]any{
-			"@context":     asContext,
-			"id":           actorURL(a.publicBaseURL(req), username) + "/" + name,
-			"type":         "OrderedCollection",
-			"totalItems":   0,
-			"orderedItems": []any{},
-		})
-		return cacheable(activityJSONResp(200, body), edgeCacheSeconds)
-	default:
-		return resp{status: 404, headers: map[string]string{}}
-	}
+	actor := actorURL(baseURL, username)
+	return jsonBytes(map[string]any{
+		"@context":          asContext,
+		"id":                actor,
+		"type":              "Person",
+		"preferredUsername": username,
+		"name":              username,
+		"url":               actor,
+		"inbox":             actor + "/inbox",
+		"outbox":            actor + "/outbox",
+		"followers":         actor + "/followers",
+		"following":         actor + "/following",
+	})
 }

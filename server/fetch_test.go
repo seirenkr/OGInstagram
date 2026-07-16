@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestShortcodeTime(t *testing.T) {
-	// world_record_egg, posted 2019-01-04: snowflake decode is ms-exact.
+
 	want := time.Date(2019, 1, 4, 17, 5, 45, 106e6, time.UTC)
 	if got := shortcodeTime("BsOGulcndj-"); !got.Equal(want) {
 		t.Errorf("shortcodeTime(BsOGulcndj-) = %v, want %v", got, want)
@@ -23,75 +24,222 @@ func TestShortcodeTime(t *testing.T) {
 	}
 }
 
-func TestFlagOversizedVideos(t *testing.T) {
+func TestBuildEmbedHTMLProbesOnlySelectedVideo(t *testing.T) {
+	requests := make(chan string, 2)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
 		if strings.Contains(r.URL.Path, "big") {
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(maxInlineVideoBytes)+1, 10))
+		} else {
+			w.Header().Set("Content-Length", "1")
 		}
 	}))
 	defer ts.Close()
-	a := &App{direct: ts.Client()}
+	a := &App{
+		cfg:        Config{},
+		direct:     ts.Client(),
+		videoSizes: newCache[int64](3, make(chan struct{}, 1)),
+	}
 	post := Post{Shortcode: "X", Attachments: []Attachment{
 		{Kind: "image", URL: ts.URL + "/img.jpg"},
+		{Kind: "video", URL: ts.URL + "/small.mp4"},
 		{Kind: "video", URL: ts.URL + "/big.mp4"},
 	}}
-	a.flagOversizedVideos(&post)
-	if !post.Attachments[1].OversizedInline {
-		t.Error("oversized video should be flagged")
+	a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, true, false)
+	select {
+	case path := <-requests:
+		t.Fatalf("selected image triggered HEAD %s", path)
+	default:
 	}
-	if post.Attachments[0].OversizedInline {
-		t.Error("image must not be size-flagged")
+	if html := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 1, true, false); !strings.Contains(html, `property="og:video"`) {
+		t.Error("small selected video should expose og:video")
+	}
+	if path := <-requests; path != "/small.mp4" {
+		t.Fatalf("probed %q, want selected small video", path)
+	}
+	a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 1, true, false)
+	select {
+	case path := <-requests:
+		t.Fatalf("cached selected video triggered another HEAD %s", path)
+	default:
+	}
+	if html := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 2, true, false); strings.Contains(html, `property="og:video"`) {
+		t.Error("oversized selected video should not expose og:video")
+	}
+	if path := <-requests; path != "/big.mp4" {
+		t.Fatalf("probed %q, want selected big video", path)
 	}
 }
 
 func TestHedgedPair(t *testing.T) {
-	// Initial attempt answers first: the hedge never launches (no proxy budget spent).
+
 	hedgeCalled := false
-	p, err := hedgedPair(
-		func() (Post, *AppError) { return Post{Shortcode: "a"}, nil },
-		func() attempt[Post] {
+	p, err := hedgedPair(context.Background(),
+		func(context.Context) (string, *AppError) { return "a", nil },
+		func() attempt {
 			hedgeCalled = true
-			return func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "x") }
+			return func(context.Context) (string, *AppError) { return "", igErr(502, reasonGraphql, "x") }
 		},
 	)
-	if err != nil || p.Shortcode != "a" {
-		t.Fatalf("initial win: post=%+v err=%+v", p, err)
+	if err != nil || p != "a" {
+		t.Fatalf("initial win: body=%q err=%+v", p, err)
 	}
 	if hedgeCalled {
 		t.Error("hedge should not launch when the initial attempt answers first")
 	}
 
-	// Initial attempt fails: the hedge launches immediately, without the hedge wait.
 	start := time.Now()
-	p, err = hedgedPair(
-		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "embed down") },
-		func() attempt[Post] { return func() (Post, *AppError) { return Post{Shortcode: "b"}, nil } },
+	p, err = hedgedPair(context.Background(),
+		func(context.Context) (string, *AppError) { return "", igErr(502, reasonGraphql, "embed down") },
+		func() attempt {
+			return func(context.Context) (string, *AppError) { return "b", nil }
+		},
 	)
-	if err != nil || p.Shortcode != "b" {
-		t.Fatalf("hedge fallback: post=%+v err=%+v", p, err)
+	if err != nil || p != "b" {
+		t.Fatalf("hedge fallback: body=%q err=%+v", p, err)
 	}
 	if time.Since(start) > fetchHedgeDelay/2 {
 		t.Error("hedge should launch on initial failure, not after the hedge delay")
 	}
 
-	// Both fail: the permanent error (real 404) beats the transient one.
-	_, err = hedgedPair(
-		func() (Post, *AppError) { return Post{}, igErr(502, reasonGraphql, "transient") },
-		func() attempt[Post] {
-			return func() (Post, *AppError) { return Post{}, igErr(404, reasonMediaNotFound, "gone") }
+	_, err = hedgedPair(context.Background(),
+		func(context.Context) (string, *AppError) { return "", igErr(502, reasonGraphql, "transient") },
+		func() attempt {
+			return func(context.Context) (string, *AppError) { return "", igErr(404, reasonMediaNotFound, "gone") }
 		},
 	)
 	if err == nil || err.Reason != reasonMediaNotFound {
 		t.Fatalf("want permanent error to win, got %+v", err)
 	}
 
-	// A missing second session returns the primary error without hanging.
-	_, err = hedgedPair(
-		func() (Post, *AppError) { return Post{}, igErr(502, reasonConnection, "down") },
-		func() attempt[Post] { return nil },
+	_, err = hedgedPair(context.Background(),
+		func(context.Context) (string, *AppError) { return "", igErr(502, reasonConnection, "down") },
+		func() attempt { return nil },
 	)
 	if err == nil || err.Reason != reasonConnection {
 		t.Fatalf("want primary error without hedge, got %+v", err)
+	}
+}
+
+func TestHedgedPairCancelsLoser(t *testing.T) {
+	loserStarted := make(chan struct{})
+	loserCancelled := make(chan struct{})
+	p, err := hedgedPair(context.Background(),
+		func(context.Context) (string, *AppError) {
+			<-loserStarted
+			return "winner", nil
+		},
+		func() attempt {
+			return func(ctx context.Context) (string, *AppError) {
+				close(loserStarted)
+				<-ctx.Done()
+				close(loserCancelled)
+				return "", igErr(499, "", "cancelled")
+			}
+		},
+	)
+	if err != nil || p != "winner" {
+		t.Fatalf("winner: body=%q err=%+v", p, err)
+	}
+	select {
+	case <-loserCancelled:
+	case <-time.After(time.Second):
+		t.Fatal("race loser was not cancelled")
+	}
+}
+
+func TestConcurrentPostFallbacksPrefersThirdParty(t *testing.T) {
+	backupStarted := make(chan struct{})
+	post, ok := concurrentPostFallbacks(context.Background(),
+		func(context.Context) (Post, bool) {
+			<-backupStarted
+			return Post{Shortcode: "preferred"}, true
+		},
+		func(context.Context) (Post, bool) {
+			close(backupStarted)
+			return Post{Shortcode: "backup"}, true
+		},
+	)
+	if !ok || post.Shortcode != "preferred" {
+		t.Fatalf("post=%+v ok=%v, want preferred", post, ok)
+	}
+
+	post, ok = concurrentPostFallbacks(context.Background(),
+		func(context.Context) (Post, bool) { return Post{}, false },
+		func(context.Context) (Post, bool) { return Post{Shortcode: "backup"}, true },
+	)
+	if !ok || post.Shortcode != "backup" {
+		t.Fatalf("post=%+v ok=%v, want backup", post, ok)
+	}
+}
+
+func TestDirectGetHonorsParentCancellation(t *testing.T) {
+	started := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	a := &App{direct: ts.Client()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *AppError, 1)
+	go func() {
+		_, err := a.directGet(ctx, "post", "X", ts.URL)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || err.Status != 499 {
+			t.Fatalf("cancelled direct request error = %+v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct request ignored parent cancellation")
+	}
+}
+
+func TestAttemptFetchTreatsCancelledBodyAsRaceLoser(t *testing.T) {
+	started := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	a := &App{pool: &SessionPool{}}
+	s := &Session{name: "test", client: ts.Client()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *AppError, 1)
+	go func() {
+		_, err := a.attemptFetch(ctx, gqlSpec{name: "post", target: "X", method: http.MethodGet, url: ts.URL}, s)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || err.Status != 499 {
+			t.Fatalf("cancelled proxy body error = %+v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy body read ignored parent cancellation")
+	}
+}
+
+func TestRaceFetchDoesNotReserveAfterCancellation(t *testing.T) {
+	p := &SessionPool{sessions: []*Session{{}}}
+	a := &App{pool: p}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := a.raceFetch(ctx, gqlSpec{})
+	if err == nil || err.Status != 499 {
+		t.Fatalf("cancelled race error = %+v", err)
 	}
 }
 
@@ -127,29 +275,8 @@ func TestParseOembedPost(t *testing.T) {
 		t.Errorf("thumbnail-only attachment expected: %+v", att)
 	}
 
-	// A fail payload must not parse into a post.
 	if _, ok := parseOembedPost("x", `{"status":"fail","title":"게시물을 사용할 수 없음","message":"삭제되었을 수 있습니다."}`); ok {
 		t.Error("fail payload should not parse")
-	}
-}
-
-func TestNewLSDFormat(t *testing.T) {
-	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
-		s := newLSD()
-		if len(s) < 23 || len(s) > 27 {
-			t.Fatalf("lsd length %d out of range [23,27]: %q", len(s), s)
-		}
-		for _, c := range s {
-			ok := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-			if !ok {
-				t.Fatalf("lsd has non-alphanumeric char %q in %q", c, s)
-			}
-		}
-		seen[s] = true
-	}
-	if len(seen) < 90 {
-		t.Errorf("lsd not random enough: %d unique of 100", len(seen))
 	}
 }
 
@@ -173,7 +300,7 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if spec.headers["X-FB-Friendly-Name"] != "PolarisPostRootQuery" {
 		t.Errorf("friendly name = %q", spec.headers["X-FB-Friendly-Name"])
 	}
-	// A modern-browser UA gets an HTML login shell; the minimal UA is required.
+
 	if spec.headers["User-Agent"] != "Mozilla/5.0" {
 		t.Errorf("user-agent = %q, want minimal Mozilla/5.0", spec.headers["User-Agent"])
 	}

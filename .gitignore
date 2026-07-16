@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+/worker-configuration.d.ts
 server/oginstagram
 server/server
 web/dist/
@@ -15,3 +16,10 @@ npm-debug.log*
 skills-lock.json
 .reference/
 web/public/PPMori-*.woff2
+
+server/external_helper.go
+server/external_helper_test.go
+tools/external-helper-signer.mjs
+
+# local Cloudflare API credentials
+cf-global-api-key*

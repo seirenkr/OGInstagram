@@ -9,8 +9,6 @@ type Attachment struct {
 	Thumbnail string
 	Width     int
 	Height    int
-
-	OversizedInline bool
 }
 
 type Post struct {
@@ -25,19 +23,24 @@ type Post struct {
 	CreatedAt   time.Time
 }
 
+type Story struct {
+	ID         string
+	Username   string
+	FullName   string
+	ProfilePic string
+	Caption    string
+	Media      Attachment
+	CreatedAt  time.Time
+}
+
 type Config struct {
-	Port              int
-	Version           string
-	ProxyUser         string
-	ProxyPass         string
-	BrandName         string
-	BrandColor        string
-	SupportURL        string
-	GitHubURL         string
-	TurnstileSiteKey  string
-	BaseURL           string
-	GlobalHourlyLimit int
-	AssetsDir         string
+	Port          int
+	Version       string
+	ProxyUser     string
+	ProxyPass     string
+	BaseURL       string
+	ModelCacheURL string
+	BudgetURL     string
 }
 
 type AppError struct {
@@ -47,8 +50,6 @@ type AppError struct {
 
 	Ephemeral bool
 
-	// Error-card overrides from the oembed fallback: Instagram's own error
-	// text, shown instead of the generic per-reason card.
 	CardReason, CardTitle, CardDesc string
 }
 

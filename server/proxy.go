@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -27,13 +28,11 @@ type SessionPool struct {
 	sessions []*Session
 	cfg      Config
 	mu       sync.Mutex
-
-	globalWindowStart time.Time
-	globalUsed        int
+	budget   *http.Client
 }
 
 func newSessionPool(cfg Config) *SessionPool {
-	pool := &SessionPool{cfg: cfg}
+	pool := &SessionPool{cfg: cfg, budget: &http.Client{Timeout: time.Second}}
 	now := time.Now()
 	add := func(s *Session) {
 		client, err := buildSessionClient(s.proxyURL)
@@ -73,6 +72,7 @@ func buildSessionClient(proxyURL string) (*http.Client, error) {
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          8,
 		MaxIdleConnsPerHost:   4,
+		MaxConnsPerHost:       maxConcurrentFetches,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   fetchTimeout,
 		ExpectContinueTimeout: time.Second,
@@ -80,16 +80,10 @@ func buildSessionClient(proxyURL string) (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
-func (p *SessionPool) pick(exclude *Session) *Session {
+func (p *SessionPool) pick(ctx context.Context, exclude *Session) (*Session, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-
-	// Global hourly cap, counted on successful (data-downloaded) requests only.
-	p.resetGlobalWindowLocked(now)
-	if p.cfg.GlobalHourlyLimit > 0 && p.globalUsed >= p.cfg.GlobalHourlyLimit {
-		return nil
-	}
 
 	var picked *Session
 	bestRank := 0.0
@@ -110,39 +104,38 @@ func (p *SessionPool) pick(exclude *Session) *Session {
 		}
 	}
 
-	// Sessions without an EWMA rank first, so new sessions get explored.
 	if picked != nil {
+		if reason := p.reserveBudget(ctx); reason != "" {
+			return nil, reason
+		}
 		picked.mu.Lock()
 		picked.used++
 		picked.mu.Unlock()
 	}
-	return picked
+	return picked, ""
 }
 
-func (p *SessionPool) resetGlobalWindowLocked(now time.Time) {
-	if p.globalWindowStart.IsZero() || now.Sub(p.globalWindowStart) >= time.Hour {
-		p.globalWindowStart = now
-		p.globalUsed = 0
+func (p *SessionPool) reserveBudget(ctx context.Context) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.BudgetURL, nil)
+	if err != nil {
+		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "request", "error", err.Error())
+		return reasonBudgetBackend
 	}
-}
-
-// countRequest records one successful (data-downloaded) proxy request against
-// the hourly budget. Race losers cancelled mid-flight are not counted.
-func (p *SessionPool) countRequest() {
-	p.mu.Lock()
-	p.resetGlobalWindowLocked(time.Now())
-	p.globalUsed++
-	p.mu.Unlock()
-}
-
-func (p *SessionPool) overBudget() bool {
-	if p.cfg.GlobalHourlyLimit <= 0 {
-		return false
+	resp, err := p.budget.Do(req)
+	if err != nil {
+		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "connection", "error", err.Error())
+		return reasonBudgetBackend
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.resetGlobalWindowLocked(time.Now())
-	return p.globalUsed >= p.cfg.GlobalHourlyLimit
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return ""
+	case http.StatusTooManyRequests:
+		return reasonBudgetExceeded
+	default:
+		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "status", "status", resp.StatusCode)
+		return reasonBudgetBackend
+	}
 }
 
 func (p *SessionPool) recordLatency(s *Session, d time.Duration) {
@@ -164,7 +157,7 @@ func (s *Session) getClient() *http.Client {
 	return c
 }
 
-func (p *SessionPool) fail(s *Session, reason string) {
+func (p *SessionPool) fail(ctx context.Context, s *Session, reason string) {
 	p.rotate(s)
 	until := time.Now().Add(rotateCooldown)
 	s.mu.Lock()
@@ -172,7 +165,7 @@ func (p *SessionPool) fail(s *Session, reason string) {
 		s.cooldownUntil = until
 	}
 	s.mu.Unlock()
-	slog.Info("rotated proxy session", "session", s.name, "reason", reason)
+	logger(ctx).InfoContext(ctx, "rotated proxy session", "session", s.name, "reason", reason)
 }
 
 func (p *SessionPool) rotate(s *Session) {
