@@ -1,0 +1,19 @@
+[
+  { "query": "", "pathIndex": null, "selected": null },
+  { "query": "img_index=2", "pathIndex": null, "selected": 1 },
+  { "query": "img_index=2junk", "pathIndex": null, "selected": 0 },
+  { "query": "img_index=01", "pathIndex": null, "selected": 0 },
+  { "query": "img_index=%2B2", "pathIndex": null, "selected": 0 },
+  { "query": "img_index=-2", "pathIndex": null, "selected": 0 },
+  { "query": "img_index=0", "pathIndex": null, "selected": 0 },
+  { "query": "img_index=9007199254740992", "pathIndex": null, "selected": 0 },
+  { "query": "index=2", "pathIndex": null, "selected": 2 },
+  { "query": "order=2", "pathIndex": null, "selected": 2 },
+  { "query": "img_index=51", "pathIndex": null, "selected": 49 },
+  { "query": "index=50", "pathIndex": null, "selected": 49 },
+  { "query": "order=999", "pathIndex": null, "selected": 49 },
+  { "query": "img_index=2&index=8", "pathIndex": null, "selected": 1 },
+  { "query": "img_index=2", "pathIndex": 3, "selected": 2 },
+  { "query": "", "pathIndex": 51, "selected": 49 },
+  { "query": "", "pathIndex": 0, "selected": 0 }
+]

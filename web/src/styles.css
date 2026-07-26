@@ -2,38 +2,18 @@
 @import "@cloudflare/kumo/styles/tailwind";
 @import "tailwindcss";
 
-/* PP Mori covers Latin/digits/symbols; anything it lacks (Hangul, kana)
-   falls through to Pretendard per glyph. */
 @font-face { font-family: "PP Mori"; src: url("/PPMori-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
 @font-face { font-family: "PP Mori"; src: url("/PPMori-Semibold.woff2") format("woff2"); font-weight: 600; font-style: normal; font-display: swap; }
 
-@theme {
-  --animate-hero-float: hero-float 7s ease-in-out infinite;
-  --animate-rich-sweep: rich-sweep 1.9s cubic-bezier(0.33, 1, 0.68, 1) 0.35s both;
-  --animate-composer-ready: composer-ready 1.1s ease-out 2;
-  @keyframes hero-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
-  /* Ends exactly at the resting gradient (size 100%, position 0). */
-  @keyframes rich-sweep { from { background-size: 240% 100%; background-position: 95% 0; } to { background-size: 100% 100%; background-position: 0% 0; } }
-  @keyframes composer-ready { from { box-shadow: 0 0 0 0 rgb(255 0 105 / 0.3); } to { box-shadow: 0 0 0 12px rgb(255 0 105 / 0); } }
-}
-
-/* Your custom styles */
-:root { --font-sans: "PP Mori", "Pretendard JP Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; --ig-orange: #ff7a00; --ig-pink: #ff0069; --ig-lavender: #7638fa; }
-body { background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: var(--font-sans); font-optical-sizing: auto; overflow-x: hidden; }
-/* Only two weights ship (Regular 400 / Semibold 600); pin every heavier or
-   in-between utility to them so PP Mori and Pretendard always align. */
+:root { --font-sans: "PP Mori", "Pretendard Variable", "Pretendard JP Variable", Pretendard, "Pretendard JP", -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Hiragino Sans", "Apple SD Gothic Neo", Meiryo, "Noto Sans JP", "Noto Sans KR", "Malgun Gothic", Osaka, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif; --text-color-kumo-brand: #ff0069; --color-kumo-brand: #ff0069; --ig-orange: #ff7a00; --ig-pink: #ff0069; --ig-lavender: #7638fa; }
+:lang(ja), :lang(zh-Hans), :lang(zh-Hant) { --font-sans: "PP Mori", "Pretendard JP Variable", "Pretendard Variable", "Pretendard JP", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; }
+body { background: var(--color-kumo-base); color: var(--color-kumo-default); font-family: var(--font-sans); overflow-x: hidden; }
 strong, b, .font-medium, .font-bold { font-weight: 600; }
-/* Korean uses spaces between words; keep-all wraps at word boundaries only.
-   Not set for ja/zh (no spaces — keep-all would prevent wrapping entirely). */
 :lang(ko) { word-break: keep-all; }
 button, a { touch-action: manipulation; }
 h1, h2, h3 { text-wrap: balance; }
 p { text-wrap: pretty; }
 
-/* Mesh-gradient hero wash: the five Instagram brand colors as large, soft,
-   overlapping radial layers. Pure gradients (no SVG filter) — CSS filter on a
-   large pseudo-element clips at its bounds in iOS WebKit and leaves a hard
-   seam; the mask fades the wash into the page instead. */
 .hero-wash::before {
   content: ""; position: absolute; inset: 0 calc(50% - 50vw); z-index: -1; pointer-events: none;
   background:
@@ -44,4 +24,133 @@ p { text-wrap: pretty; }
     radial-gradient(48% 48% at 44% 104%, rgb(211 0 197 / 0.09), transparent 70%);
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
   mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+}
+
+.header-surface {
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.header-surface-visible { opacity: 1; }
+.brand-link { transition: color 120ms; }
+.brand-link:hover { color: var(--color-kumo-brand); }
+
+.preview-url-source {
+  transition: opacity 400ms cubic-bezier(0.16, 1, 0.3, 1), transform 400ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.preview-url-target {
+  opacity: 0;
+  transform: translateY(7px);
+  transition: opacity 450ms cubic-bezier(0.16, 1, 0.3, 1), transform 450ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.preview-url-hidden {
+  opacity: 0;
+  transform: translateY(-7px);
+}
+.preview-url-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.typewriter-text { clip-path: inset(0 100% 0 0); }
+.typewriter-caret-blink { animation: typewriter-caret-blink 1s steps(1, end) infinite; }
+
+.composer-pulse { isolation: isolate; }
+.composer-pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  box-shadow: 0 0 0 12px rgb(255 0 105 / 0.3);
+  opacity: 0;
+  pointer-events: none;
+}
+
+::view-transition-group(root) {
+  animation-duration: 200ms;
+  animation-timing-function: ease-out;
+}
+
+@keyframes typewriter-caret-blink {
+  0%, 49.9%, 100% { opacity: 1; }
+  50%, 99.9% { opacity: 0; }
+}
+
+@keyframes hero-line-in {
+  from { transform: translateY(112%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes hero-item-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes hero-preview-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes hero-rich-in {
+  from { background-position: 95% 0; background-size: 240% 100%; }
+  to { background-position: 0 0; background-size: 100% 100%; }
+}
+
+@keyframes composer-pulse {
+  from { opacity: 0.3; transform: scale(0.93, 0.625); }
+  to { opacity: 0; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hero-line {
+    animation: hero-line-in 650ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .hero-line-first { animation-delay: 50ms; }
+  .hero-line-second { animation-delay: 150ms; }
+  .hero-item {
+    animation: hero-item-in 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .hero-copy { animation-delay: 140ms; }
+  .hero-actions { animation-delay: 230ms; }
+  .hero-preview {
+    animation: hero-preview-in 600ms cubic-bezier(0.16, 1, 0.3, 1) 250ms both;
+  }
+  .reveal {
+    opacity: 0;
+    transform: translateY(24px);
+    transition: opacity 600ms cubic-bezier(0.16, 1, 0.3, 1), transform 600ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .reveal-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .motion-lift {
+    transition: transform 150ms ease-out;
+  }
+  .motion-lift:hover { transform: translateY(-3px); }
+  .preview-window-dot { transition: transform 150ms; }
+  .preview-titlebar:hover .preview-window-dot { transform: scale(1.2); }
+  .preview-titlebar:hover .preview-window-dot:nth-child(2) { transition-delay: 45ms; }
+  .preview-titlebar:hover .preview-window-dot:nth-child(3) { transition-delay: 90ms; }
+}
+
+@media (min-width: 40rem) and (prefers-reduced-motion: no-preference) {
+  .hero-rich-motion {
+    animation: hero-rich-in 1.9s cubic-bezier(0.33, 1, 0.68, 1) 350ms both;
+  }
+  .composer-pulse::after {
+    animation: composer-pulse 1.1s ease-out 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header-surface,
+  .preview-url-source,
+  .preview-url-target {
+    transition: none;
+  }
+  ::view-transition-group(root) { animation-duration: 0.01ms; }
 }

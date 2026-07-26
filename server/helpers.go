@@ -1,37 +1,25 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
 func shortcodePK(shortcode string) *big.Int {
-	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-	n := new(big.Int)
-	base := big.NewInt(64)
-	for _, ch := range shortcode {
-		idx := strings.IndexRune(enc, ch)
-		if idx < 0 {
-			return nil
-		}
-		n.Mul(n, base)
-		n.Add(n, big.NewInt(int64(idx)))
+	raw, err := base64.RawURLEncoding.DecodeString(strings.Repeat("A", (4-len(shortcode)%4)%4) + shortcode)
+	if err != nil {
+		return nil
 	}
-	return n
+	return new(big.Int).SetBytes(raw)
 }
 
-// igEpochMs is the Instagram snowflake epoch, 2011-08-24T21:07:01.721Z.
 const igEpochMs = 1314220021721
 
-// shortcodeTime decodes the creation time embedded in a post shortcode: the
-// media PK is a snowflake whose upper bits are milliseconds since the IG
-// epoch. Zero time when the code doesn't decode to a plausible snowflake
-// (invalid chars, empty, or the 24-char private-post codes).
 func shortcodeTime(shortcode string) time.Time {
 	pk := shortcodePK(shortcode)
 	if pk == nil || pk.Sign() == 0 || !pk.IsInt64() {
@@ -44,35 +32,29 @@ func shortcodeTime(shortcode string) time.Time {
 	return t
 }
 
-// Avatars and profile media route through /offload like post media, so the
-// served URL never carries an expiring CDN signature and stays same-origin.
-func postAvatarURL(baseURL string, post Post) string {
+func (a *App) postAvatarURL(baseURL string, post Post) string {
 	if post.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
 	}
-	return baseURL + "/offload/" + url.PathEscape(post.Shortcode) + "/avatar"
+	return a.offloadSigner.url(baseURL, "/offload/"+url.PathEscape(post.Shortcode)+"/avatar", false)
 }
 
-func profileAvatarURL(baseURL string, p Profile) string {
+func (a *App) profileAvatarURL(baseURL string, p Profile) string {
 	if p.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
 	}
-	return baseURL + "/offload/@" + url.PathEscape(p.Username) + "/avatar"
+	path := "/offload/@" + url.PathEscape(strings.ToLower(p.Username)) + "/avatar"
+	return a.offloadSigner.url(baseURL, path, false)
 }
 
-func profileMediaOffloadURL(baseURL, username string, index int) string {
-	return baseURL + "/offload/@" + url.PathEscape(username) + "/" + strconv.Itoa(index+1)
+func (a *App) profileMediaOffloadURL(baseURL, username string, index int) string {
+	path := "/offload/@" + url.PathEscape(strings.ToLower(username)) + "/" + strconv.Itoa(index+1)
+	return a.offloadSigner.url(baseURL, path, false)
 }
 
 func jsonBytes(v any) []byte {
 	b, _ := json.Marshal(v)
 	return append(b, '\n')
-}
-
-var compactRE = regexp.MustCompile(`>\s+<`)
-
-func compactHTML(v string) string {
-	return compactRE.ReplaceAllString(strings.TrimSpace(v), "><")
 }
 
 func normalizeCDNHost(raw string) string {
@@ -95,36 +77,10 @@ func fmtCount(value int) string {
 		value = 0
 	}
 	s := strconv.Itoa(value)
-	n := len(s)
-	if n <= 3 {
-		return s
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
 	}
-	var b strings.Builder
-	pre := n % 3
-	if pre > 0 {
-		b.WriteString(s[:pre])
-	}
-	for i := pre; i < n; i += 3 {
-		if b.Len() > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(s[i : i+3])
-	}
-	return b.String()
-}
-
-func truncateChars(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	r := []rune(text)
-	if len(r) <= limit {
-		return text
-	}
-	if limit <= 3 {
-		return strings.Repeat(".", limit)
-	}
-	return strings.TrimRight(string(r[:limit-3]), " \t\n") + "..."
+	return s
 }
 
 func truncateFlat(text string, limit int) string {
@@ -134,7 +90,13 @@ func truncateFlat(text string, limit int) string {
 			lines = append(lines, t)
 		}
 	}
-	return truncateChars(strings.Join(lines, " "), limit)
+	flat := strings.Join(lines, " ")
+
+	r := []rune(flat)
+	if len(r) <= limit {
+		return flat
+	}
+	return strings.TrimRight(string(r[:limit-3]), " \t\n") + "..."
 }
 
 func normalizeCaption(text string) string {
@@ -175,7 +137,6 @@ const (
 	cdnTTLMargin   = 30 * time.Minute
 )
 
-// cdnExpiry reads the "oe" query param (hex Unix expiry) from an Instagram CDN URL.
 func cdnExpiry(rawURL string) (time.Time, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -188,27 +149,25 @@ func cdnExpiry(rawURL string) (time.Time, bool) {
 	return time.Unix(n, 0), true
 }
 
-// cacheTTLFromURLs caches until the earliest CDN URL expiry (minus a margin), so
-// a cached post never hands out a dead media URL. Falls back to cdnFallbackTTL
-// when no URL carries an oe expiry.
 func cacheTTLFromURLs(urls ...string) time.Duration {
-	var earliest time.Time
+	ttl := cdnFallbackTTL
 	for _, u := range urls {
-		if t, ok := cdnExpiry(u); ok && (earliest.IsZero() || t.Before(earliest)) {
-			earliest = t
+		if u == "" {
+			continue
+		}
+		if expiry, ok := cdnExpiry(u); ok {
+			candidate := time.Until(expiry) - cdnTTLMargin
+			if candidate < time.Minute {
+				candidate = time.Minute
+			}
+			if candidate < ttl {
+				ttl = candidate
+			}
 		}
 	}
-	if earliest.IsZero() {
-		return cdnFallbackTTL
-	}
-	if ttl := time.Until(earliest) - cdnTTLMargin; ttl > time.Minute {
-		return ttl
-	}
-	return time.Minute
+	return ttl
 }
 
-// cdnEdgeSeconds converts the same oe-based TTL into an edge s-maxage, so a
-// cached response embedding raw CDN URLs never outlives the media it points at.
 func cdnEdgeSeconds(urls ...string) int {
 	return int(cacheTTLFromURLs(urls...) / time.Second)
 }
@@ -235,12 +194,9 @@ func instagramPostURL(postType, shortcode string, mediaIndex int, specified bool
 	return target
 }
 
-func offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
-	suffix := ""
-	if thumbnail {
-		suffix = "?thumbnail=1"
-	}
-	return baseURL + "/offload/" + url.PathEscape(shortcode) + "/" + strconv.Itoa(index+1) + suffix
+func (a *App) offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
+	path := "/offload/" + url.PathEscape(shortcode) + "/" + strconv.Itoa(index+1)
+	return a.offloadSigner.url(baseURL, path, thumbnail)
 }
 
 func videoDisplaySize(att Attachment) (int, int) {

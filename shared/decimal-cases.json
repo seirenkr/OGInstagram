@@ -1,0 +1,15 @@
+[
+  { "raw": "0", "value": 0 },
+  { "raw": "1", "value": 1 },
+  { "raw": "42", "value": 42 },
+  { "raw": "9007199254740991", "value": 9007199254740991 },
+  { "raw": "", "value": null },
+  { "raw": "+1", "value": null },
+  { "raw": "-1", "value": null },
+  { "raw": "1.5", "value": null },
+  { "raw": "1oops", "value": null },
+  { "raw": "01", "value": null },
+  { "raw": "00", "value": null },
+  { "raw": " 1", "value": null },
+  { "raw": "9007199254740992", "value": null }
+]
