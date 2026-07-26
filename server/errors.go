@@ -1,60 +1,108 @@
 package main
 
-const (
-	reasonConnection     = "ClientConnectionError"
-	reasonJSONDecode     = "ClientJSONDecodeError"
-	reasonLoginRequired  = "ClientLoginRequired"
-	reasonUnauthorized   = "ClientUnauthorizedError"
-	reasonForbidden      = "ClientForbiddenError"
-	reasonThrottled      = "ClientThrottledError"
-	reasonClientError    = "ClientError"
-	reasonGraphql        = "ClientGraphqlError"
-	reasonBadRequest     = "ClientBadRequestError"
-	reasonNotFound       = "ClientNotFoundError"
-	reasonMediaNotFound  = "MediaNotFound"
-	reasonBudgetExceeded = "HourlyBudgetExceeded"
-
-	// Content-side gating (region/age/audience) reported by the oembed fail
-	// payload's "geoblock_required" message; the post exists but Instagram
-	// refuses to serve it, so retrying or rotating IPs won't help.
-	reasonGeoBlocked = "GeoBlockRequired"
+import (
+	"context"
+	"net/http"
 )
 
-type reasonInfo struct {
-	rotateIP  bool
-	transient bool
-}
+const (
+	errorCodeConnection    = "connection_error"
+	errorCodeJSONDecode    = "json_decode_error"
+	errorCodeLoginRequired = "login_required"
+	errorCodeUnauthorized  = "unauthorized"
+	errorCodeForbidden     = "forbidden"
+	errorCodeRateLimited   = "rate_limited"
+	errorCodeUpstream      = "upstream_error"
+	errorCodeGraphQL       = "graphql_error"
+	errorCodeBadRequest    = "bad_request"
+	errorCodeNotFound      = "not_found"
+	errorCodeMediaNotFound = "media_not_found"
 
-var reasonRegistry = map[string]reasonInfo{
-	reasonConnection:     {rotateIP: true, transient: true},
-	reasonJSONDecode:     {rotateIP: true, transient: true},
-	reasonLoginRequired:  {rotateIP: true, transient: true},
-	reasonUnauthorized:   {rotateIP: true, transient: true},
-	reasonForbidden:      {rotateIP: true, transient: true},
-	reasonThrottled:      {rotateIP: true, transient: true},
-	reasonClientError:    {rotateIP: true, transient: true},
-	reasonGraphql:        {rotateIP: false, transient: true},
-	reasonBadRequest:     {rotateIP: false, transient: false},
-	reasonNotFound:       {rotateIP: false, transient: false},
-	reasonMediaNotFound:  {rotateIP: false, transient: false},
-	reasonBudgetExceeded: {rotateIP: false, transient: true},
+	errorCodeBudgetExhausted = "budget_exhausted"
+	errorCodeBudgetBackend   = "budget_backend_error"
+	errorCodeGeoBlocked      = "geo_block_required"
+)
 
-	reasonGeoBlocked: {rotateIP: false, transient: false},
-}
-
-func reasonOf(reason string) reasonInfo {
-	if r, ok := reasonRegistry[reason]; ok {
-		return r
+func shouldRotate(code string) bool {
+	switch code {
+	case errorCodeConnection, errorCodeJSONDecode, errorCodeLoginRequired, errorCodeUnauthorized,
+		errorCodeForbidden, errorCodeRateLimited, errorCodeUpstream:
+		return true
+	default:
+		return false
 	}
-	return reasonInfo{rotateIP: false, transient: true}
 }
 
-func shouldRotate(reason string) bool { return reasonOf(reason).rotateIP }
-func isTransient(reason string) bool  { return reasonOf(reason).transient }
+func isTransient(code string) bool {
+	switch code {
+	case errorCodeBadRequest, errorCodeNotFound, errorCodeMediaNotFound, errorCodeGeoBlocked:
+		return false
+	default:
+		return true
+	}
+}
 
-func errorCacheSeconds(reason string) int {
-	if isTransient(reason) {
+func errorCacheSeconds(code string) int {
+	if isTransient(code) {
 		return transientErrorCacheSeconds
 	}
 	return permanentErrorCacheSeconds
+}
+
+type AppError struct {
+	Status        int
+	PublicMessage string
+	Code          string
+	Cause         error `json:"-"`
+
+	Ephemeral bool
+
+	CardCode, CardTitle, CardDesc string
+}
+
+func igErr(status int, code, publicMessage string) *AppError {
+	return &AppError{Status: status, PublicMessage: publicMessage, Code: code}
+}
+func ephemeralErr(status int, code, publicMessage string) *AppError {
+	return &AppError{Status: status, PublicMessage: publicMessage, Code: code, Ephemeral: true}
+}
+func causedErr(status int, code, publicMessage string, cause error) *AppError {
+	return &AppError{Status: status, PublicMessage: publicMessage, Code: code, Cause: cause}
+}
+func (e *AppError) logMessage() string {
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return e.PublicMessage
+}
+func (e *AppError) errorType() string {
+	if e.Code != "" {
+		return e.Code
+	}
+	return "internal_error"
+}
+func errorCard(kind, errorCode string) (title, desc string) {
+	if isTransient(errorCode) {
+		return "Temporarily unavailable", "Couldn't load this " + kind + " right now. Please try again in a moment."
+	}
+	switch kind {
+	case "profile":
+		return "Account unavailable", "This account isn't available - it may not exist, be deactivated, or the username is incorrect."
+	case "story":
+		return "Story unavailable", "This story isn't available - stories expire after 24 hours, and it may also be from a private account or the link may be incorrect."
+	}
+	return "Post unavailable", "This post isn't available - it may be deleted, set to private, or the link is incorrect."
+}
+
+func contextAppError(ctx context.Context) *AppError {
+	if ctx.Err() == context.DeadlineExceeded {
+		return ephemeralErr(http.StatusGatewayTimeout, errorCodeConnection, "upstream deadline exceeded")
+	}
+	return ephemeralErr(499, "", "cancelled")
+}
+func preferredError(current, candidate *AppError) *AppError {
+	if current == nil || (isTransient(current.Code) && candidate != nil && !isTransient(candidate.Code)) {
+		return candidate
+	}
+	return current
 }
