@@ -4,8 +4,12 @@
 .agents
 node_modules
 web/dist
-npm-debug.log
 .env
 .env.*
-server/server
+.dev.vars
+cf-global-api-key*
+harvest
 server/oginstagram
+server/external_helper_private.go
+server/external_helper_private_test.go
+server/reharvest.go

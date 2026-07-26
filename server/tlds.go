@@ -1,4 +1,3 @@
-// Code generated from the linkifyjs IANA TLD list. DO NOT EDIT.
 package main
 
 import "strings"
