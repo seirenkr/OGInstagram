@@ -1,0 +1,35 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "oginstagram-test",
+  "main": "index.ts",
+  "compatibility_date": "2026-06-10",
+  "cache": {
+    "enabled": true,
+    "cross_version_cache": true
+  },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "Embed": { "type": "worker", "cache": { "enabled": true } }
+  },
+  "vars": {
+    "ADMIN_PURGE_TOKEN": "test-admin-purge-token",
+    "OFFLOAD_SIGNING_KEYS": "{\"active\":\"test-v1\",\"keys\":{\"test-v1\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}}",
+    "TURNSTILE_SECRET_KEY": "1x0000000000000000000000000000000AA"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_KV",
+      "id": "cache-test"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "EMBED_RATE_LIMITER",
+      "namespace_id": "742901",
+      "simple": {
+        "limit": 100,
+        "period": 60
+      }
+    }
+  ]
+}

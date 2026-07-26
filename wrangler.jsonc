@@ -2,24 +2,60 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "oginstagram",
   "main": "worker/index.ts",
+  "build": {
+    "command": "pnpm run build"
+  },
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/home/*"]
+  },
+  "cache": {
+    "enabled": true,
+    // Cache API (caches.default) was never version-scoped, so deploys never
+    // reset it; keep that behavior under Workers Caching instead of starting
+    // every deploy from a cold cache.
+    "cross_version_cache": true
+  },
+  "exports": {
+    "default": { "type": "worker", "cache": { "enabled": false } },
+    "Embed": { "type": "worker", "cache": { "enabled": true } },
+    "ContainerProxy": { "type": "worker", "cache": { "enabled": false } }
+  },
   "compatibility_date": "2026-06-10",
-  "compatibility_flags": ["nodejs_compat"],
+  "dev": {
+    "host": "localhost:8787",
+    "port": 8787
+  },
   "workers_dev": false,
-  // Preview URLs are never generated for Workers that implement a Durable
-  // Object, so disable them explicitly to silence the deploy warning.
   "preview_urls": false,
   "observability": {
-    "enabled": true
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
   },
   "version_metadata": {
     "binding": "CF_VERSION_METADATA"
   },
   "vars": {
-    "BASE_URL": "https://oginstagram.com",
-    "BRAND_NAME": "OGInstagram",
-    "BRAND_COLOR": "#ff0069",
-    "SUPPORT_URL": "https://ko-fi.com/seirenkr",
-    "GITHUB_URL": "https://github.com/seirenkr/OGInstagram"
+    "BASE_URL": "https://oginstagram.com"
+  },
+  "secrets": {
+    "required": [
+      "PROXY_USERNAME",
+      "PROXY_PASSWORD",
+      "OFFLOAD_SIGNING_KEYS",
+      "AE_ACCOUNT_ID",
+      "AE_API_TOKEN",
+      "TURNSTILE_SITE_KEY",
+      "TURNSTILE_SECRET_KEY",
+      "ADMIN_PURGE_TOKEN"
+    ]
   },
   "routes": [
     {
@@ -52,6 +88,10 @@
       {
         "name": "OG_CONTAINER",
         "class_name": "OgUsContainer"
+      },
+      {
+        "name": "PROXY_BUDGET",
+        "class_name": "ProxyBudget"
       }
     ]
   },
@@ -64,8 +104,14 @@
       "constraints": {
         "regions": ["ENAM"]
       },
-      "max_instances": 3,
+      "max_instances": 1,
       "instance_type": "lite"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "CACHE_KV",
+      "id": "117df44d24924647b124d049e4f7b02f"
     }
   ],
   "analytics_engine_datasets": [
@@ -88,6 +134,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["OgUsContainer"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ProxyBudget"]
     }
   ]
 }
