@@ -2,25 +2,37 @@ package main
 
 import (
 	"encoding/json"
+	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
 
-// A snowcode is an all-digits id encoding the whole post identity, because Discord re-requests /api/v1/statuses/{id} without the query string.
-type snowPost struct {
+const (
+	maxSnowcodeDigits     = 256
+	maxSnowcodeMediaIndex = 100
+)
+
+type snowcodePost struct {
 	Username   string
 	Shortcode  string
 	PostType   string
 	MediaIndex int
 	Specified  bool
 	Gallery    bool
+	Story      bool
 }
 
 func profileSnowcode(username string) string {
-	if encoded, ok := encodeSnowcodePayload(`"u":"` + username + `"`); ok {
-		return encoded
+	return encodeSnowcodePayload(`"u":"` + username + `"`)
+}
+
+func storyStatusSnowcode(username, id string, gallery bool) string {
+	payload := `"su":"` + username + `","si":"` + id + `"`
+	if gallery {
+		payload += `,"g":1`
 	}
-	return username
+	return encodeSnowcodePayload(payload)
 }
 
 func statusSnowcode(postType, shortcode string, mediaIndex int, specified, gallery bool) string {
@@ -38,74 +50,67 @@ func statusSnowcode(postType, shortcode string, mediaIndex int, specified, galle
 	if gallery {
 		payload += `,"g":1`
 	}
-	if encoded, ok := encodeSnowcodePayload(payload); ok {
-		return encoded
-	}
-	return shortcode
+	return encodeSnowcodePayload(payload)
 }
 
-func parseStatusSnowcode(code string) snowPost {
+func parseStatusSnowcode(code string) snowcodePost {
 	if data, ok := decodeSnowcode(code); ok {
+		if id, isStr := data["si"].(string); isStr && id != "" {
+			su, _ := data["su"].(string)
+			g, _ := data["g"].(float64)
+			if validUsername(su) && validStoryID(id) {
+				return snowcodePost{Username: su, Shortcode: id, Story: true, Gallery: g == 1}
+			}
+			return snowcodePost{}
+		}
 		if u, isStr := data["u"].(string); isStr && u != "" {
-			return snowPost{Username: u}
+			if validUsername(u) {
+				return snowcodePost{Username: u}
+			}
+			return snowcodePost{}
 		}
 		if i, isStr := data["i"].(string); isStr && i != "" {
-			p := snowPost{Shortcode: i, PostType: "p"}
+			if !validShortcode(i) {
+				return snowcodePost{}
+			}
+			p := snowcodePost{Shortcode: i, PostType: "p"}
 			if pt, isStr := data["p"].(string); isStr {
+				if !isPostRouteType(pt) {
+					return snowcodePost{}
+				}
 				p.PostType = normalizePostType(pt)
 			}
 			if n, isNum := data["n"].(float64); isNum {
-				idx := int(n) - 1
-				if idx < 0 {
-					idx = 0
+				if math.Trunc(n) != n || n < 1 || n > maxSnowcodeMediaIndex {
+					return snowcodePost{}
 				}
+				idx := int(n) - 1
 				p.MediaIndex = idx
 				p.Specified = true
 			}
-			if g, isNum := data["g"].(float64); isNum && g == 1 {
-				p.Gallery = true
-			}
+			g, _ := data["g"].(float64)
+			p.Gallery = g == 1
 			return p
 		}
 	}
-	return snowPost{Shortcode: code, PostType: "p", MediaIndex: 0}
+	return snowcodePost{Shortcode: code, PostType: "p"}
 }
 
-func encodeSnowcodePayload(payload string) (string, bool) {
-	var b strings.Builder
-	b.Grow(len(payload) * 2)
-	for _, ch := range payload {
-		idx := strings.IndexRune(snowcodeChars, ch)
-		if idx < 0 {
-			return "", false
-		}
-		b.WriteByte('0' + byte(idx/10))
-		b.WriteByte('0' + byte(idx%10))
-	}
-	return b.String(), true
+func encodeSnowcodePayload(payload string) string {
+	return new(big.Int).SetBytes([]byte(payload)).String()
 }
 
 func decodeSnowcode(code string) (map[string]any, bool) {
-	var digits strings.Builder
-	for _, ch := range code {
-		if ch >= '0' && ch <= '9' {
-			digits.WriteRune(ch)
-		}
-	}
-	raw := digits.String()
-	if raw == "" || len(raw)%2 != 0 || len(raw) != len(code) {
+	if len(code) > maxSnowcodeDigits || (len(code) > 1 && code[0] == '0') ||
+		strings.Trim(code, "0123456789") != "" {
 		return nil, false
 	}
-	var payload strings.Builder
-	for i := 0; i < len(raw); i += 2 {
-		idx, err := strconv.Atoi(raw[i : i+2])
-		if err != nil || idx < 0 || idx >= len(snowcodeChars) {
-			return nil, false
-		}
-		payload.WriteByte(snowcodeChars[idx])
+	n, ok := new(big.Int).SetString(code, 10)
+	if !ok {
+		return nil, false
 	}
 	var out map[string]any
-	if err := json.Unmarshal([]byte("{"+payload.String()+"}"), &out); err != nil {
+	if json.Unmarshal(append(append([]byte{'{'}, n.Bytes()...), '}'), &out) != nil {
 		return nil, false
 	}
 	return out, true

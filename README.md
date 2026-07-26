@@ -8,9 +8,9 @@ Replace `instagram.com` with `oginstagram.com`.
 
 | View | URL | Embeds |
 |------|-----|--------|
-| Normal | `oginstagram.com` | The creator's profile, caption, stats, and media |
-| Gallery | `g.oginstagram.com` | The creator's profile and media only |
-| Direct | `d.oginstagram.com` | Only the direct media URL |
+| Normal | `oginstagram.com`, `www.oginstagram.com` | The creator's profile, caption, stats, and media |
+| Gallery | `g.oginstagram.com`, `www.g.oginstagram.com` | The creator's profile and media only |
+| Direct | `d.oginstagram.com`, `www.d.oginstagram.com` | Only the direct media URL |
 
 Append `?img_index=N` (or `/N` after the shortcode) to pick a carousel item.
 
@@ -21,6 +21,7 @@ Append `?img_index=N` (or `/N` after the shortcode) to pick a carousel item.
 | Posts | `instagram.com/p/…`<br>`instagram.com/username/p/…` |
 | Reels | `instagram.com/reel(s)/…`<br>`instagram.com/username/reel(s)/…` |
 | User profile | `instagram.com/username` |
+| Stories | `instagram.com/stories/username/…` |
 
 Profile links embed the bio, follower stats, and a grid of recent posts.
 
@@ -29,17 +30,17 @@ Profile links embed the bio, follower stats, and a grid of recent posts.
 
 ## Development
 
-Requires Node.js 22.9+, Docker, a Cloudflare Workers Paid account with a domain, and a DataImpulse residential proxy plan.
+Requires a supported Node.js version from `package.json`, Docker, a Cloudflare Workers Paid account with a domain, and a DataImpulse residential proxy plan.
 
 ```bash
-npm install
-cp .env.example .env             # proxy + Analytics Engine credentials
-cp .dev.vars.example .dev.vars   # local secrets for `npm run dev`
+pnpm install
+cp .env.example .env             # proxy, Analytics Engine, and Turnstile credentials
+cp .dev.vars.example .dev.vars   # local secrets for `pnpm run dev`
 
-npm run dev       # start local dev (Worker + container)
-npm run check     # type-check + Go tests
-npm run secrets   # upload .env secrets to Cloudflare
-npm run deploy    # production
+pnpm run dev       # start local dev (Worker + container)
+pnpm run check     # type-check + Go tests
+pnpm run secrets   # upload .env secrets to Cloudflare
+pnpm run deploy    # production
 ```
 
 > [!NOTE]
@@ -51,11 +52,14 @@ npm run deploy    # production
 | Variable | Where | Description |
 |----------|-------|-------------|
 | `PROXY_USERNAME` / `PROXY_PASSWORD` | `.env` | DataImpulse residential proxy credentials |
+| `OFFLOAD_SIGNING_KEYS` | secret | JSON keyring used to sign resource-scoped `/offload` capability URLs (14-day expiry) |
 | `AE_ACCOUNT_ID` / `AE_API_TOKEN` | `.env` | Analytics Engine access for the status dashboard |
-| `PROXY_HOURLY_LIMIT` | container env (optional) | Global proxy requests/hour budget (default 2500; `0` = unlimited) |
 | `BASE_URL` | `wrangler.jsonc` | Public base URL of the deployment |
-| `BRAND_NAME` / `BRAND_COLOR` | `wrangler.jsonc` | Branding for previews and the landing page |
-| `SUPPORT_URL` / `GITHUB_URL` | `wrangler.jsonc` | Footer and call-to-action links |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | secrets | Turnstile widget and Siteverify credentials |
+| `ADMIN_PURGE_TOKEN` | secret | Bearer token for `POST /api/admin/purge` (Workers Caching cache purge) |
+
+The public container uses the external helper fallback; Story routes return
+not found without a compatible private implementation.
 
 ## Acknowledgements
 
