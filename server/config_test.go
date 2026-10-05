@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func validProductionConfig() Config {
@@ -69,8 +70,12 @@ func TestDiscordEmojiConfiguration(t *testing.T) {
 				if key == "DISCORD_VERIFIED_EMOJI_ID" {
 					got = parsed.DiscordVerifiedEmojiID
 				}
-				if got != value {
-					t.Fatalf("%s = %q; want %q", key, got, value)
+				want := value
+				if want == "" {
+					want = map[string]string{"DISCORD_BRAND_EMOJI_ID": defaultDiscordBrandEmojiID, "DISCORD_VERIFIED_EMOJI_ID": defaultDiscordVerifiedEmojiID}[key]
+				}
+				if got != want {
+					t.Fatalf("%s = %q; want %q", key, got, want)
 				}
 				cfg := validProductionConfig()
 				cfg.DiscordBrandEmojiID, cfg.DiscordVerifiedEmojiID = parsed.DiscordBrandEmojiID, parsed.DiscordVerifiedEmojiID
@@ -101,5 +106,33 @@ func TestLoadHomeTemplatesRequiresEveryLocale(t *testing.T) {
 	}
 	if _, err := loadHomeTemplates(g.cfg.AssetsDir); err == nil {
 		t.Fatal("incomplete frontend build accepted")
+	}
+}
+
+func TestOptionalSettingsHaveSafeDefaults(t *testing.T) {
+	t.Setenv("PROXY_BUDGET_START_DATE", "")
+	if got, want := configFromEnv().BudgetStartDate, time.Now().UTC().Format(time.DateOnly); got != want {
+		t.Errorf("default budget start = %q, want today %q", got, want)
+	}
+	cfg := validProductionConfig()
+	cfg.AdminPurgeToken = ""
+	if err := cfg.validate(); err != nil {
+		t.Errorf("ADMIN_PURGE_TOKEN must be optional (purge disabled): %v", err)
+	}
+
+	dir := t.TempDir()
+	first, err := loadOrCreateOffloadKeys(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := loadOrCreateOffloadKeys(dir)
+	if err != nil || second != first {
+		t.Fatalf("generated keyring must persist across restarts: %q vs %q (%v)", first, second, err)
+	}
+	if _, err := parseOffloadSigner(first); err != nil {
+		t.Fatalf("generated keyring is invalid: %v", err)
+	}
+	if info, _ := os.Stat(filepath.Join(dir, "offload-signing-keys.json")); info.Mode().Perm() != 0o600 {
+		t.Errorf("keyring file mode = %v, want 0600", info.Mode().Perm())
 	}
 }

@@ -84,14 +84,14 @@ sudo chown 65532:65532 secrets/tunnel-token
 sudo chmod 0400 secrets/tunnel-token
 ```
 
-`.env`에는 proxy credentials, helper signing pair, Turnstile keys, admin token을 입력합니다. offload keyring의 `active` 키로 새 링크에 서명합니다. 이전 배포가 서명한 링크(Discord에 이미 올라간 임베드의 이미지·영상)를 살리려면 이전 키를 `keys`에 함께 넣어 둡니다. 서명 수명이 14일이라 이전 키는 전환 14일 뒤 제거해도 됩니다. JSON keyring은 `OFFLOAD_SIGNING_KEYS='{"active":...,"keys":...}'`처럼 작은따옴표로 감쌉니다. 비밀번호에 `$` 등이 있어도 동일하게 작은따옴표로 감싸 Compose 보간을 피합니다. `DEVELOPMENT=false`를 유지합니다. 운영에서는 `PROXY_USERNAME`과 `PROXY_PASSWORD`가 모두 필수이며, 개발 모드에서는 둘 다 생략할 수 있습니다. 한쪽만 설정하면 모든 모드에서 시작을 거부합니다. 일반 앱 시작 시 8개 언어 홈 template이 모두 존재하는지도 확인합니다. DB 백업·복구 명령은 웹 자산 없이 수행할 수 있습니다.
+`.env`에는 `.env.example`의 네 값(proxy credentials, Turnstile keys)과 `OG_IMAGE`만 넣습니다. 비밀번호에 `$` 등이 있으면 작은따옴표로 감싸 Compose 보간을 피합니다. 나머지는 기본값을 씁니다.
 
-- `OG_IMAGE`: VM에 적재한 이미지 태그(`oginstagram:<8자리 해시>`).
-- `CLOUDFLARED_IMAGE`: 검증한 connector 이미지 tag/digest.
-- `BASE_URL=https://oginstagram.com`, `ALLOWED_HOSTS`: 기존 6개 hostname.
-- `TRUSTED_PROXIES=172.30.0.3`: Compose connector의 정확한 IP. Docker subnet 전체를 신뢰하지 않습니다. subnet 변경 시 Compose 주소와 설정을 함께 바꿉니다.
-- `DATA_DIR=/data`, `ASSETS_DIR=/app/web`: Compose가 고정합니다.
-- `PROXY_BUDGET_START_DATE`: 기존 Worker를 중지한 뒤 도래하는 **다음 UTC 날짜**. 예를 들어 2026-10-06이면 한국 시간 10월 6일 09:00부터 신규 proxy budget이 열립니다. 현재 소진량을 모르는 상태에서 오늘 날짜로 설정하지 않습니다.
+- `TRUSTED_PROXIES`, `CLOUDFLARED_IMAGE`, `DATA_DIR`, `ASSETS_DIR`: `compose.yaml`이 고정합니다. subnet을 바꾸면 Compose의 connector 주소와 `TRUSTED_PROXIES`를 함께 바꿉니다.
+- `BASE_URL`, `ALLOWED_HOSTS`: `https://oginstagram.com`과 그 6개 hostname이 기본값입니다.
+- `OFFLOAD_SIGNING_KEYS`: 비워 두면 첫 시작 때 `data/offload-signing-keys.json`(0600)을 만들어 계속 씁니다. 이 파일을 잃으면 이미 공유된 미디어 링크가 404가 되므로 백업에 포함합니다. 키를 교체할 때만 `OFFLOAD_SIGNING_KEYS='{"active":"new","keys":{"new":"…","old":"…"}}'`로 지정하고, 이전 키는 14일 뒤 제거합니다.
+- `PROXY_BUDGET_START_DATE`: 기본값은 시작한 날(UTC)입니다. 같은 proxy 계정을 쓰던 다른 배포에서 넘어올 때만 그 배포를 멈춘 뒤의 **다음 UTC 날짜**로 지정합니다. 이 날짜는 앞으로만 움직입니다.
+- `ADMIN_PURGE_TOKEN`: 설정하면 `POST /api/admin/purge`가 켜지고, 비우면 꺼집니다.
+- `WORKERHUB_SIGN_KEY`/`WORKERHUB_SIGN_TS`, `DISCORD_*_EMOJI_ID`: 기본값을 덮어쓸 때만 지정합니다.
 
 터널 token은 `.env`나 command argument 값으로 넣지 않습니다. Compose secret file만 connector에 mount하고 `--token-file /run/secrets/tunnel_token`으로 읽습니다. [Cloudflare 문서](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/)의 remotely managed tunnel용 token-file 옵션은 2025.4.0 이상에서 지원하며, [Compose secret](https://docs.docker.com/compose/how-tos/use-secrets/)은 파일로 mount됩니다. 이 token으로 앱 secret이나 Cloudflare API token을 대체하지 않습니다.
 
@@ -216,7 +216,7 @@ df -h /opt/oginstagram
 
 Vultr 유료 자동백업은 기본으로 선택하지 않습니다. 선택할 경우 월요금에 20%가 추가되고 최근 2개 서버 백업을 보관합니다. [Vultr 자동백업](https://docs.vultr.com/vps-automatic-backups)
 
-앱의 Backup CLI는 존재하지 않는 대상 디렉터리에 SQLite `VACUUM INTO`로 consistent snapshot을 만들며 `state.sqlite`와 `budget.sqlite`를 보관합니다. 실행 중인 WAL 파일을 단순히 `cp`하는 방식 대신 이 명령을 사용합니다. 완료된 backup 디렉터리와 `.env`, Tunnel token을 **암호화하여 VM 외부 보관처로** 복사하고 recovery 시간을 기록합니다. 새 유료 저장소를 자동으로 추가하지 않습니다. state DB의 모델/metrics는 제한된 캐시이며 budget DB는 비용 보호 상태이므로 서로 다른 중요도로 다룹니다. 오래된 snapshot의 budget 잔액을 그대로 재사용하지 않습니다. 외부 보관처 복사와 확인이 끝난 백업은 `sudo rm -rf data/backups/<stamp>`로 VM에서 지웁니다. `tools/deploy.sh`는 정상 배포 뒤 현재·직전 앱 이미지를 제외한 Docker 이미지를 정리합니다. 예전 템플릿에서 복사한 `.env`에 `OG_VERSION`이 있으면 이미지에 넣은 버전을 덮어쓰므로 지웁니다(`PORT`·`DATA_DIR`·`ASSETS_DIR`·`TURNSTILE_HOSTNAMES`·`CLOUDFLARE_*`도 더 이상 쓰지 않습니다).
+앱의 Backup CLI는 존재하지 않는 대상 디렉터리에 SQLite `VACUUM INTO`로 consistent snapshot을 만들며 `state.sqlite`와 `budget.sqlite`, 그리고 자동 생성된 `offload-signing-keys.json`을 보관합니다. 실행 중인 WAL 파일을 단순히 `cp`하는 방식 대신 이 명령을 사용합니다. 완료된 backup 디렉터리와 `.env`, Tunnel token을 **암호화하여 VM 외부 보관처로** 복사하고 recovery 시간을 기록합니다. 새 유료 저장소를 자동으로 추가하지 않습니다. state DB의 모델/metrics는 제한된 캐시이며 budget DB는 비용 보호 상태이므로 서로 다른 중요도로 다룹니다. 오래된 snapshot의 budget 잔액을 그대로 재사용하지 않습니다. 외부 보관처 복사와 확인이 끝난 백업은 `sudo rm -rf data/backups/<stamp>`로 VM에서 지웁니다. `tools/deploy.sh`는 정상 배포 뒤 현재·직전 앱 이미지를 제외한 Docker 이미지를 정리합니다. 예전 템플릿에서 복사한 `.env`에 `OG_VERSION`이 있으면 이미지에 넣은 버전을 덮어쓰므로 지웁니다(`PORT`·`DATA_DIR`·`ASSETS_DIR`·`TURNSTILE_HOSTNAMES`·`CLOUDFLARE_*`도 더 이상 쓰지 않습니다).
 
 ## 7. 복구
 

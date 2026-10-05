@@ -75,7 +75,14 @@ func main() {
 			slog.Warn("ignoring invalid WORKERHUB_SIGN_KEY/WORKERHUB_SIGN_TS override")
 		}
 	}
-	signer, err := parseOffloadSigner(cfg.OffloadSigningKeys)
+	keys := cfg.OffloadSigningKeys
+	if keys == "" {
+		if keys, err = loadOrCreateOffloadKeys(cfg.DataDir); err != nil {
+			slog.Error("cannot create offload signing keys", "error", err)
+			os.Exit(1)
+		}
+	}
+	signer, err := parseOffloadSigner(keys)
 	if err != nil {
 		slog.Error("invalid OFFLOAD_SIGNING_KEYS", "error", err)
 		os.Exit(1)

@@ -11,6 +11,8 @@ services:
       ASSETS_DIR: /app/web
       GOMEMLIMIT: 256MiB
       GOMAXPROCS: "1"
+      # Exact cloudflared address below, never the entire subnet.
+      TRUSTED_PROXIES: 172.30.0.3
     user: "65532:65532"
     restart: unless-stopped
     init: true
@@ -36,7 +38,7 @@ services:
         max-file: "3"
 
   cloudflared:
-    image: ${CLOUDFLARED_IMAGE:?Set a tested cloudflared image tag or digest in .env}
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c}
     command: [tunnel, --no-autoupdate, run, --token-file, /run/secrets/tunnel_token]
     user: "65532:65532"
     restart: unless-stopped

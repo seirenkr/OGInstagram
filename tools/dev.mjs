@@ -13,7 +13,6 @@ env.ALLOWED_HOSTS = "localhost,127.0.0.1";
 env.DATA_DIR = resolve(root, ".local-data");
 env.ASSETS_DIR = resolve(root, "web/dist");
 env.TRUSTED_PROXIES = "";
-env.PROXY_BUDGET_START_DATE ||= new Date().toISOString().slice(0, 10);
 env.TURNSTILE_SITE_KEY ||= "1x00000000000000000000BB"; // Cloudflare's always-pass test sitekey
 mkdirSync(env.DATA_DIR, { recursive: true });
 
