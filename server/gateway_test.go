@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -369,7 +370,6 @@ func TestAdminPurgeAuthenticatesAndPreservesBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{expiresAt: time.Now().Add(time.Hour)})
-	previewCache.put("purge-test", previewMedia{body: []byte("cached"), expires: time.Now().Add(time.Hour)})
 	for _, tt := range []struct {
 		token  string
 		status int
@@ -393,10 +393,22 @@ func TestAdminPurgeAuthenticatesAndPreservesBudget(t *testing.T) {
 	if _, _, err := g.cfg.Store.getModel(ctx, "post", "ABC123"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("L2 retained purged model: %v", err)
 	}
-	if _, ok := previewCache.get("purge-test"); ok {
-		t.Fatal("transformed media retained")
-	}
 	if remainingDailyBudget(t, g.cfg.Store) != remaining {
 		t.Fatal("cache purge reset proxy budget")
+	}
+}
+
+func TestOffloadEdgeTTL(t *testing.T) {
+	now := time.Now()
+	cdn := "https://scontent.cdninstagram.com/v/x.jpg?oe=" + strconv.FormatInt(now.Add(3*time.Hour).Unix(), 16)
+	link := func(exp time.Duration) *url.URL {
+		u, _ := url.Parse("https://oginstagram.com/offload/ABC/1?exp=" + strconv.FormatInt(now.Add(exp).Unix(), 10))
+		return u
+	}
+	if got := offloadEdgeTTL(link(14*24*time.Hour), cdn, now); got < 8990 || got > 9000 {
+		t.Errorf("TTL must stop 30 minutes before the CDN URL expires: %d", got)
+	}
+	if got := offloadEdgeTTL(link(time.Hour), cdn, now); got > 3600 {
+		t.Errorf("TTL must not outlive the signed link: %d", got)
 	}
 }

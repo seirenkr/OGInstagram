@@ -67,6 +67,19 @@ func loadOrCreateOffloadKeys(dataDir string) (string, error) {
 	return raw, err
 }
 
+// backupOffloadKeys copies the generated keyring, if any, into a backup so
+// restored data keeps already shared links valid.
+func backupOffloadKeys(dataDir, destinationDir string) error {
+	b, err := os.ReadFile(filepath.Join(dataDir, "offload-signing-keys.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(destinationDir, "offload-signing-keys.json"), b, 0o600)
+}
+
 func parseOffloadSigner(raw string) (offloadSigner, error) {
 	var config offloadSigningConfig
 	decoder := json.NewDecoder(strings.NewReader(raw))
