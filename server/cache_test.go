@@ -174,7 +174,7 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		"/offload/Ab_12/anything",
 		"/offload/Ab_12/0",
 		"/offload/Ab_12/01",
-		"/offload/Ab_12/1.mp4.mp4",
+		"/offload/Ab_12/1.mp4",
 		"/offload/Ab_12/51",
 		"/offload/@User.Name/01",
 		"/offload/@User.Name/7",

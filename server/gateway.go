@@ -319,11 +319,7 @@ func canonicalOffloadPath(u *url.URL) (string, bool) {
 			return "", false
 		}
 		if len(segments) == 3 && segments[2] != "avatar" {
-			value := segments[2]
-			if maxIndex == maxCachedMediaItems {
-				value = strings.TrimSuffix(value, ".mp4")
-			}
-			n, ok := parseCanonicalDecimal(value)
+			n, ok := parseCanonicalDecimal(segments[2])
 			if !ok || n < 1 || n > maxIndex {
 				return "", false
 			}

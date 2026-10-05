@@ -55,21 +55,16 @@ Compose는 `docker compose` plugin을 사용합니다. [Docker 공식 Compose �
 
 ## 2. 이미지는 다른 컴퓨터에서 빌드
 
-개발 컴퓨터 또는 CI에서 검사하고 **서버 아키텍처에 맞춘 이미지**를 레지스트리에 push합니다. 운영 VM에서는 빌드 부하를 추가하지 않고 검증한 이미지를 pull합니다. AMD64 서버의 예시는 다음과 같습니다. 개인 저장소를 사용하면 VM에서 `sudo docker login`으로 인증합니다.
+개발 컴퓨터에서 검사하고 서버 아키텍처(`linux/amd64`)용 이미지를 빌드한 뒤, 레지스트리 없이 SSH로 VM에 바로 적재합니다. 운영 VM에서는 빌드하지 않습니다. 이미지 태그와 앱 버전(`OG_VERSION`)은 같은 8자리 커밋 해시이며, 커밋하지 않은 변경이 있으면 `-dirty`가 붙습니다.
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm run check
-release_tag=$(git describe --always --dirty --abbrev=8)  # 8자리 커밋 해시, 미커밋 변경이 있으면 -dirty
-docker buildx build --platform linux/amd64 \
-  --build-arg OG_VERSION="$release_tag" \
-  -t ghcr.io/YOUR_ACCOUNT/oginstagram:"$release_tag" \
-  --push .
+pnpm run image:build   # 마지막 줄에 oginstagram:<8자리 해시> 출력
+docker save oginstagram:<해시> | gzip -1 | ssh linuxuser@<VM> 'gunzip | sudo docker load'
 ```
 
-이 이미지는 Go 서버, 빌드된 `web/dist`, Obscura, Node harvester, WebP/AVIF encoder가 있는 FFmpeg를 포함합니다. 공개 checkout에는 비공개 external helper가 없으므로 운영과 동일한 기능을 유지하려면 현재 helper 파일을 포함한 checkout에서 빌드합니다. 빌드 컨텍스트에서 `.env`, `data`, `secrets`, 연구 산출물은 제외됩니다.
-
-운영에는 레지스트리에서 확인한 `ghcr.io/YOUR_ACCOUNT/oginstagram@sha256:...`를 사용합니다. cloudflared도 검증한 tag/digest를 고정합니다. `.env.example`의 `2026.9.3`은 [공식 릴리스](https://github.com/cloudflare/cloudflared/releases/tag/2026.9.3) 기준 기본값입니다.
+이 이미지는 Go 서버, 빌드된 `web/dist`, Obscura, Node harvester, WebP/AVIF encoder가 있는 FFmpeg를 포함합니다. 공개 checkout에는 비공개 external helper가 없으므로 운영과 동일한 기능을 유지하려면 helper 파일을 포함한 checkout에서 빌드합니다. 빌드 컨텍스트에서 `.env`, `data`, `secrets`는 제외됩니다. cloudflared는 검증한 tag/digest를 고정하며, `.env.example`의 `2026.9.3`은 [공식 릴리스](https://github.com/cloudflare/cloudflared/releases/tag/2026.9.3) 기준 기본값입니다.
 
 ## 3. 배포 디렉터리와 비밀 값
 
@@ -91,7 +86,7 @@ sudo chmod 0400 secrets/tunnel-token
 
 `.env`에는 proxy credentials, helper signing pair, Turnstile keys, admin token을 입력합니다. offload keyring의 `active` 키로 새 링크에 서명합니다. 이전 배포가 서명한 링크(Discord에 이미 올라간 임베드의 이미지·영상)를 살리려면 이전 키를 `keys`에 함께 넣어 둡니다. 서명 수명이 14일이라 이전 키는 전환 14일 뒤 제거해도 됩니다. JSON keyring은 `OFFLOAD_SIGNING_KEYS='{"active":...,"keys":...}'`처럼 작은따옴표로 감쌉니다. 비밀번호에 `$` 등이 있어도 동일하게 작은따옴표로 감싸 Compose 보간을 피합니다. `DEVELOPMENT=false`를 유지합니다. 운영에서는 `PROXY_USERNAME`과 `PROXY_PASSWORD`가 모두 필수이며, 개발 모드에서는 둘 다 생략할 수 있습니다. 한쪽만 설정하면 모든 모드에서 시작을 거부합니다. 일반 앱 시작 시 8개 언어 홈 template이 모두 존재하는지도 확인합니다. DB 백업·복구 명령은 웹 자산 없이 수행할 수 있습니다.
 
-- `OG_IMAGE`: push한 이미지 digest.
+- `OG_IMAGE`: VM에 적재한 이미지 태그(`oginstagram:<8자리 해시>`).
 - `CLOUDFLARED_IMAGE`: 검증한 connector 이미지 tag/digest.
 - `BASE_URL=https://oginstagram.com`, `ALLOWED_HOSTS`: 기존 6개 hostname.
 - `TRUSTED_PROXIES=172.30.0.3`: Compose connector의 정확한 IP. Docker subnet 전체를 신뢰하지 않습니다. subnet 변경 시 Compose 주소와 설정을 함께 바꿉니다.
@@ -212,7 +207,7 @@ sudo docker compose logs --tail 50 app cloudflared
 
 ## 6. 업데이트와 백업
 
-새 digest를 `.env`의 `OG_IMAGE`에 저장하고 `sudo sh tools/deploy.sh`를 실행합니다. helper는 image를 먼저 pull한 뒤 connector와 app을 stop하고 단일 instance로 재시작합니다. `/data`를 지우거나 새로 만들지 않습니다. 중단 후 최종 이미지를 배포하는 흐름을 유지하며 old Worker를 되살려 별도 budget으로 서비스하지 않습니다.
+새 이미지를 적재하고 `.env`의 `OG_IMAGE`를 그 태그로 바꾼 뒤 `sudo sh tools/deploy.sh`를 실행합니다. 스크립트는 cloudflared만 pull하고, connector와 app을 멈춘 뒤 단일 instance로 재시작하고, healthcheck 후 쓰지 않는 이미지를 정리합니다. `/data`를 지우거나 새로 만들지 않습니다. 중단 후 최종 이미지를 배포하는 흐름을 유지하며 old Worker를 되살려 별도 budget으로 서비스하지 않습니다.
 
 ```bash
 sudo sh tools/backup.sh

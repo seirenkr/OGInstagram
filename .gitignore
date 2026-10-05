@@ -3,7 +3,6 @@ server/oginstagram
 web/dist/
 .env*
 !.env.example
-.dev.vars*
 .DS_Store
 .claude/
 skills-lock.json
@@ -13,7 +12,5 @@ server/external_helper_private.go
 server/external_helper_private_test.go
 data/
 backups/
-output/
-tmp/
 secrets/
 .local-data/
