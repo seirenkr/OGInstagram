@@ -2,7 +2,7 @@
 
 [English](README.md) | **한국어**
 
-Discord, Telegram 등 검증된 링크 미리보기 봇을 위한 Instagram 임베드 프록시입니다. Open Graph와 Discord가 쓰는 Mastodon/ActivityPub 엔드포인트를 제공하며, 미디어·캡션·통계가 담긴 풍부한 미리보기를 보여 줍니다.
+Discord, Telegram 등 검증된 링크 미리보기 봇을 위한 Instagram 임베드 프록시입니다. Discord Component Embed, Open Graph, Mastodon/ActivityPub을 제공하며, 미디어·캡션·통계가 담긴 풍부한 미리보기를 보여 줍니다.
 
 ## 사용법
 
@@ -26,6 +26,53 @@ Discord, Telegram 등 검증된 링크 미리보기 봇을 위한 Instagram 임�
 | 스토리 | `instagram.com/stories/username/…` |
 
 프로필 링크는 팔로워 통계와 최근 게시물 그리드를 보여 줍니다.
+
+### Discord Component Embed (실험 기능)
+
+Discordbot의 게시물·릴스·프로필·스토리 HTML 요청을 50:50으로 나누어
+기존 Mastodon/ActivityPub 미리보기와 `discord:component-embed` JSON을
+제공합니다. 모델 캐시 적중 여부와 무관하게 요청 ID로 배정하며,
+Discord 자체 미리보기 캐시에는 선택된 레이아웃이 남을 수 있습니다.
+`X-OGInstagram-Embed` 응답 헤더는 실제 형식을 알려 주고,
+`discord embed served` 로그는 배정 결과와 실제 출력을 기록합니다.
+테스트할 때는 `?e=c`로 Discordbot에 Component Embed를, `?e=s`로 Support 버튼까지 고정할 수 있고, 다른 파라미터를 덧붙이면(`&n=2`, `&n=3`, …) Discord 미리보기 캐시를 우회합니다.
+Component Embed는 아바타 옆에 굵은 이름과 링크된 `@사용자명`, 한 줄 띄운 통계를 같은 크기로
+표시하고, 그 뒤로 캡션과 미디어를 보여 줍니다.
+마지막 줄에는 `OGInstagram` 브랜드와 게시물·스토리의 알려진 게시 시각을
+Discord의 `<t:…:s>` 형식으로 표시하고, 오른쪽에 원문으로 연결하는
+`📷 Instagram` 버튼을 Section accessory로 붙입니다. 프로필은 시각 없이 브랜드를 표시합니다.
+갤러리를 제외한 Component Embed 요청의 50%에는 독립적으로 `☕ Support me`
+버튼을 추가하여 `.github/FUNDING.yml`의 [Ko-fi](https://ko-fi.com/seirenkr)로
+연결합니다. 이때는 브랜드 줄만 두고, 구분선 아래 한 행에 두 버튼을 나란히 놓습니다. 갤러리를 제외한 전체 대상 Discord HTML 요청의 약 25%에 해당합니다.
+캐러셀은 사진과 영상을 원래
+순서대로 최대 10개까지 담으며, 항목을 지정하면 해당 미디어만 표시합니다.
+갤러리 링크는 작성자와 미디어만 담고 캡션·통계·브랜드·게시 시각과 두 버튼을 모두 숨깁니다.
+다이렉트 미디어 링크의 리다이렉트는 유지합니다.
+Discord 링크 라벨은 Markdown 이스케이프를 해제하지 못하므로, 일부 이름·캡션 링크처럼
+이스케이프가 필요한 라벨은 일반 텍스트와 뒤따르는 `↗` 링크로 표시합니다.
+작성자 이름은 링크 없는 굵은 글씨로 두고 `@사용자명` 줄에 프로필 링크를 겁니다.
+이모지가 든 일부 이름에서 Discord가 `[라벨](url)`을 그대로 노출했기 때문입니다.
+캡션의 일반 URL은 `<…>` 자동 링크로 한 번만 표시합니다.
+
+선택 설정인 `DISCORD_BRAND_EMOJI_ID`와 `DISCORD_VERIFIED_EMOJI_ID`에는
+Discord 커스텀 이모지의 숫자 ID를 지정합니다. 브랜드 아이콘은 `OGInstagram`
+옆에, 인증 아이콘은 이름 링크 밖에 표시합니다. 인증 아이콘은 Instagram 원본
+데이터가 `is_verified: true`를 명시한 계정에만 표시하며, false이거나 정보가
+없으면 표시하지 않습니다. 이모지 ID를 설정하지 않으면 아이콘을 생략하고
+유니코드 배지나 다른 기호로 대체하지 않습니다. 기존 캐시에는 인증 정보가
+없으므로 모델을 다시 가져올 때까지 인증 아이콘이 나타나지 않습니다.
+
+[Discord 예비 문서](https://github.com/discord/discord-api-docs/pull/8606)와
+[FxEmbed 구현](https://github.com/FxEmbed/FxEmbed/pull/2526)을 참고했습니다.
+이스케이프와 서명된 미디어 URL을 포함한 최종 JSON은 3,000바이트 이하로
+제한합니다. 긴 캡션은 줄이고, URL이 유난히 길면 미디어 개수를 줄이거나
+기존 임베드를 사용합니다.
+
+Open Graph와 Twitter Card 태그는 대체 표시용으로 유지합니다.
+유효한 Component Embed를 제공할 때만 Discordbot 응답의 ActivityPub
+탐색 링크를 대체하며, 다른 클라이언트와 웹 미리보기는 기존 메타데이터를
+사용합니다. 예비 규격과 Discord 클라이언트 지원은 바뀔 수 있으므로,
+규격 테스트 통과가 모든 Discord 클라이언트의 지원을 보장하지는 않습니다.
 
 > [!NOTE]
 > 비공개 게시물, 연령 제한 게시물, 미국에서 볼 수 없는 게시물은 지원하지 않습니다.
@@ -67,7 +114,7 @@ Discord / Telegram / 브라우저
 Vultr High Frequency 1 GB VM(`vhf-1c-1gb`, 뉴저지) 한 대에서 Docker Compose로
 실행합니다. 앱은 1 CPU / 512 MiB, `cloudflared`는 128 MiB로 제한하며 호스트
 포트는 공개하지 않습니다. 이미지는 VM 밖에서 빌드해 SSH로 적재하고, 이미지
-태그와 앱 버전은 8자리 커밋 해시입니다(커밋하지 않은 변경이 있으면 `-dirty`).
+태그와 앱 버전은 8자리 커밋 해시입니다(커밋하지 않은 변경이 있으면 `pnpm run image:build`가 빌드를 거부하며, `-dirty`나 시각 같은 접미사를 붙이지 않습니다).
 
 ```bash
 pnpm run check

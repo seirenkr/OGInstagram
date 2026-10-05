@@ -2,7 +2,7 @@
 
 **English** | [한국어](README.ko.md)
 
-Instagram embed proxy for Discord, Telegram, and other verified link-preview bots (Open Graph, plus the Mastodon/ActivityPub endpoints Discord uses) — with rich previews: media, caption, and stats.
+Instagram embed proxy for Discord, Telegram, and other verified link-preview bots (Discord Component Embeds, Open Graph, and Mastodon/ActivityPub) — with rich previews: media, caption, and stats.
 
 ## Usage
 
@@ -26,6 +26,55 @@ Append `?img_index=N` (or `/N` after the shortcode) to pick a carousel item.
 | Stories | `instagram.com/stories/username/…` |
 
 Profile links embed follower stats and a grid of recent posts.
+
+### Discord Component Embeds (experimental)
+
+Discordbot HTML requests for posts, reels, profiles, and stories are split
+50:50 between the existing Mastodon/ActivityPub preview and a server-rendered
+`discord:component-embed` JSON payload. Each request is assigned using its
+request ID, including cache hits; Discord's own preview cache can retain the
+chosen layout. The `X-OGInstagram-Embed` response header reports the rendered
+format, and `discord embed served` logs record both assignment and output.
+For testing, `?e=c` pins the Component Embed for Discordbot and `?e=s` also
+shows the support button; add any other
+parameter (`&n=2`, `&n=3`, …) to bypass Discord's preview cache.
+Component Embeds show the author's name in bold and the linked `@username`,
+then a blank line and stats, all at the same size beside the avatar, followed by the
+caption and media. The footer line shows `OGInstagram` and, for posts and stories
+with a known date, a Discord `<t:…:s>` timestamp, with the `📷 Instagram` button
+to its right (a Section accessory). Profiles keep the brand footer without a
+date. An independent 50% of non-gallery Component Embed requests also add a
+`☕ Support me` button linking to [Ko-fi](https://ko-fi.com/seirenkr), as
+configured in `.github/FUNDING.yml`; then the brand line stands alone and both
+buttons share one row below a separator;
+this is about 25% of eligible non-gallery Discord HTML requests. Carousels keep
+photos and videos in their original order, up to 10 items; explicit media selection still shows only
+the requested item. Gallery links keep the author and media, without captions,
+stats, brand footer, timestamps, or either button. Direct-media links keep their redirects.
+Discord link labels cannot unescape Markdown, so labels that need escaping
+(including some names and caption links) appear as plain text followed by a `↗`
+link. The author's name is unlinked bold text; the `@handle` line links to the
+profile, because Discord left some names (with emoji) as raw `[label](url)`.
+Bare caption URLs are shown once as `<…>` auto-links.
+
+Optional `DISCORD_BRAND_EMOJI_ID` and `DISCORD_VERIFIED_EMOJI_ID` settings accept
+numeric Discord custom emoji IDs. The brand icon appears beside `OGInstagram`;
+the verified icon appears beside the author's name, outside the link, only when
+Instagram's upstream data explicitly reports `is_verified: true`. Missing or
+false verification data never receives a badge. Without an emoji ID, the icon
+is omitted; no Unicode badge or replacement is added. Older cached models have
+no verification flag, so their badge stays absent until the model is refreshed.
+
+The implementation follows [Discord's draft specification](https://github.com/discord/discord-api-docs/pull/8606)
+and [FxEmbed's implementation](https://github.com/FxEmbed/FxEmbed/pull/2526).
+The final JSON, including escaping and signed media URLs, is limited to 3,000
+bytes. Captions are shortened to fit; unusually long URLs can reduce the
+gallery size or cause the existing embed to be used instead.
+
+Open Graph and Twitter Card tags remain as fallback. A valid component embed
+replaces ActivityPub discovery for Discordbot; other clients and the website
+preview keep their existing metadata. Discord's draft and client support can
+change, so schema tests do not establish availability in every Discord client.
 
 > [!NOTE]
 > Private posts, age-restricted posts, and posts unavailable in the United States are not supported.
@@ -69,7 +118,8 @@ One Vultr High Frequency 1 GB VM (`vhf-1c-1gb`, New Jersey) runs Docker
 Compose: the app is capped at 1 CPU / 512 MiB and `cloudflared` at 128 MiB,
 with no host ports published. Images are built off the VM and loaded over
 SSH; the image tag and the app version are the 8-character commit hash
-(`-dirty` when the tree has uncommitted changes).
+(`pnpm run image:build` refuses to build an uncommitted tree; never add
+suffixes such as `-dirty` or timestamps).
 
 ```bash
 pnpm run check

@@ -49,6 +49,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		OwnerID:     cmp.Or(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
 		ProfilePic:  user.Get("profile_pic_url").String(),
+		IsVerified:  user.Get("is_verified").Type == gjson.True,
 		Caption:     cmp.Or(item.Get("caption.text").String(), item.Get("caption_text").String()),
 		StatsLine:   statsLine(v1StatsPrefix(item), uintOf(item, "like_count"), uintOf(item, "comment_count")),
 		Attachments: attachments,

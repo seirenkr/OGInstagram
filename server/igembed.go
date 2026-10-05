@@ -250,6 +250,7 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		OwnerID:     owner.Get("id").String(),
 		FullName:    owner.Get("full_name").String(),
 		ProfilePic:  owner.Get("profile_pic_url").String(),
+		IsVerified:  owner.Get("is_verified").Type == gjson.True,
 		Caption:     sm.Get("edge_media_to_caption.edges.0.node.text").String(),
 		StatsLine:   statsLine(v1StatsPrefix(sm), uintOf(sm, "edge_liked_by.count"), uintOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
@@ -307,6 +308,7 @@ func parseEmbedProfile(html string) (Profile, *AppError) {
 		FollowerCount: uintOf(ctx, "followers_count"),
 		MediaCount:    uintOf(ctx, "posts_count"),
 		IsPrivate:     ctx.Get("is_private").Bool(),
+		IsVerified:    ctx.Get("is_verified").Type == gjson.True,
 	}
 	ctx.Get("graphql_media").ForEach(func(_, m gjson.Result) bool {
 		sm := m.Get("shortcode_media")

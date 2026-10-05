@@ -55,7 +55,7 @@ Compose는 `docker compose` plugin을 사용합니다. [Docker 공식 Compose �
 
 ## 2. 이미지는 다른 컴퓨터에서 빌드
 
-개발 컴퓨터에서 검사하고 서버 아키텍처(`linux/amd64`)용 이미지를 빌드한 뒤, 레지스트리 없이 SSH로 VM에 바로 적재합니다. 운영 VM에서는 빌드하지 않습니다. 이미지 태그와 앱 버전(`OG_VERSION`)은 같은 8자리 커밋 해시이며, 커밋하지 않은 변경이 있으면 `-dirty`가 붙습니다.
+개발 컴퓨터에서 검사하고 서버 아키텍처(`linux/amd64`)용 이미지를 빌드한 뒤, 레지스트리 없이 SSH로 VM에 바로 적재합니다. 운영 VM에서는 빌드하지 않습니다. 이미지 태그와 앱 버전(`OG_VERSION`)은 같은 8자리 커밋 해시입니다. 커밋하지 않은 변경이 있으면 `pnpm run image:build`가 빌드를 거부하므로 먼저 커밋합니다.
 
 ```bash
 pnpm install --frozen-lockfile

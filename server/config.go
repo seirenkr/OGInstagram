@@ -23,8 +23,7 @@ const (
 	proxyCountry      = "us"
 	proxySessionCount = 10
 
-	defaultProxyHourlyLimit       = 1000
-	proxyByteLeaseSize      int64 = 1 << 20
+	proxyByteLeaseSize int64 = 1 << 20
 
 	// Bound durable budget grants; errors stop proxy traffic until retry.
 	budgetRequestTimeout    = time.Second
@@ -103,23 +102,25 @@ func configFromEnv() Config {
 		proxies = append(proxies, p)
 	}
 	return Config{
-		Port:               port,
-		Version:            cmp.Or(env("OG_VERSION"), "dev"),
-		ProxyUser:          env("PROXY_USERNAME"),
-		ProxyPass:          env("PROXY_PASSWORD"),
-		BaseURL:            strings.TrimRight(baseURL, "/"),
-		OffloadSigningKeys: env("OFFLOAD_SIGNING_KEYS"),
-		WorkerHubSignKey:   env("WORKERHUB_SIGN_KEY"),
-		WorkerHubSignTS:    env("WORKERHUB_SIGN_TS"),
-		DataDir:            cmp.Or(env("DATA_DIR"), "./data"),
-		AssetsDir:          cmp.Or(env("ASSETS_DIR"), "../web/dist"),
-		BudgetStartDate:    env("PROXY_BUDGET_START_DATE"),
-		AllowedHosts:       hosts,
-		TrustedProxies:     proxies,
-		TurnstileSiteKey:   env("TURNSTILE_SITE_KEY"),
-		TurnstileSecretKey: env("TURNSTILE_SECRET_KEY"),
-		AdminPurgeToken:    env("ADMIN_PURGE_TOKEN"),
-		Development:        env("DEVELOPMENT") == "true",
+		Port:                   port,
+		Version:                cmp.Or(env("OG_VERSION"), "dev"),
+		ProxyUser:              env("PROXY_USERNAME"),
+		ProxyPass:              env("PROXY_PASSWORD"),
+		BaseURL:                strings.TrimRight(baseURL, "/"),
+		OffloadSigningKeys:     env("OFFLOAD_SIGNING_KEYS"),
+		WorkerHubSignKey:       env("WORKERHUB_SIGN_KEY"),
+		WorkerHubSignTS:        env("WORKERHUB_SIGN_TS"),
+		DataDir:                cmp.Or(env("DATA_DIR"), "./data"),
+		AssetsDir:              cmp.Or(env("ASSETS_DIR"), "../web/dist"),
+		BudgetStartDate:        env("PROXY_BUDGET_START_DATE"),
+		AllowedHosts:           hosts,
+		TrustedProxies:         proxies,
+		TurnstileSiteKey:       env("TURNSTILE_SITE_KEY"),
+		TurnstileSecretKey:     env("TURNSTILE_SECRET_KEY"),
+		AdminPurgeToken:        env("ADMIN_PURGE_TOKEN"),
+		DiscordBrandEmojiID:    env("DISCORD_BRAND_EMOJI_ID"),
+		DiscordVerifiedEmojiID: env("DISCORD_VERIFIED_EMOJI_ID"),
+		Development:            env("DEVELOPMENT") == "true",
 	}
 }
 
@@ -160,6 +161,14 @@ func (cfg Config) validate() error {
 	}
 	if (cfg.ProxyUser == "") != (cfg.ProxyPass == "") {
 		return fmt.Errorf("PROXY_USERNAME and PROXY_PASSWORD must be set together")
+	}
+	for key, id := range map[string]string{
+		"DISCORD_BRAND_EMOJI_ID":    cfg.DiscordBrandEmojiID,
+		"DISCORD_VERIFIED_EMOJI_ID": cfg.DiscordVerifiedEmojiID,
+	} {
+		if id != "" && !validDiscordEmojiID(id) {
+			return fmt.Errorf("%s must be a Discord emoji snowflake ID", key)
+		}
 	}
 	if !cfg.Development && cfg.ProxyUser == "" {
 		return fmt.Errorf("production requires PROXY_USERNAME and PROXY_PASSWORD")

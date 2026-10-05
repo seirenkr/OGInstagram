@@ -251,7 +251,7 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 		if len(a.pool.sessions) == 0 {
 			return 0, "", igErr(503, errorCodeConnection, "Instagram proxy sessions are not configured")
 		}
-		return 0, "", ephemeralErr(503, errorCodeConnection, "all Instagram proxy sessions are rate limited or cooling down")
+		return 0, "", ephemeralErr(503, errorCodeConnection, "all Instagram proxy sessions are cooling down")
 	}
 
 	started := time.Now()

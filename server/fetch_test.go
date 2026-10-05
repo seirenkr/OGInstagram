@@ -154,7 +154,7 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 		{"ok", respond(200, "{}"), "", false},
 	} {
 		client := &http.Client{Transport: tt.rt}
-		s := &Session{client: client, windowStart: time.Now()}
+		s := &Session{client: client}
 		a := &App{pool: &SessionPool{sessions: []*Session{s}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}}
 		timeout := 5 * time.Second
 		if tt.name == "deadline" {
