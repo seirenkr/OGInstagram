@@ -47,8 +47,6 @@ type Config struct {
 	OffloadSigningKeys     string
 	DiscordBrandEmojiID    string
 	DiscordVerifiedEmojiID string
-	WorkerHubSignKey       string
-	WorkerHubSignTS        string
 	DataDir                string
 	AssetsDir              string
 	BudgetStartDate        string

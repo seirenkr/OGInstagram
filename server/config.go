@@ -113,8 +113,6 @@ func configFromEnv() Config {
 		ProxyPass:          env("PROXY_PASSWORD"),
 		BaseURL:            strings.TrimRight(baseURL, "/"),
 		OffloadSigningKeys: env("OFFLOAD_SIGNING_KEYS"),
-		WorkerHubSignKey:   env("WORKERHUB_SIGN_KEY"),
-		WorkerHubSignTS:    env("WORKERHUB_SIGN_TS"),
 		DataDir:            cmp.Or(env("DATA_DIR"), "./data"),
 		AssetsDir:          cmp.Or(env("ASSETS_DIR"), "../web/dist"),
 		// The ledger only moves the start forward (MAX), so today is a safe default.
