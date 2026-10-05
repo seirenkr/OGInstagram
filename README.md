@@ -48,7 +48,6 @@ Requires Go 1.26, Node.js (see `package.json` engines), and pnpm.
 
 ```bash
 pnpm install --frozen-lockfile
-cp .env.example .env   # set OFFLOAD_SIGNING_KEYS
 pnpm run dev           # frontend build + Go app on :8080
 pnpm run check         # lint, types, tests
 ```
@@ -57,26 +56,7 @@ Without `PROXY_*` set, only the direct embed pages work. Helper key re-harvestin
 
 ## Configuration
 
-`.env.example` lists every variable.
-
-| Variable | Purpose |
-| --- | --- |
-| `OG_IMAGE`, `CLOUDFLARED_IMAGE` | Images Compose runs |
-| `BASE_URL`, `ALLOWED_HOSTS` | Canonical URL and accepted hosts |
-| `TRUSTED_PROXIES` | Address of the `cloudflared` peer; all others are rejected |
-| `PROXY_USERNAME`, `PROXY_PASSWORD` | DataImpulse credentials (required in production) |
-| `PROXY_BUDGET_START_DATE` | First UTC day the proxy may be used; never move it backward |
-| `OFFLOAD_SIGNING_KEYS` | HMAC keyring for `/offload` links |
-| `WORKERHUB_SIGN_KEY`, `WORKERHUB_SIGN_TS` | External-helper signing override |
-| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | Home page preview protection |
-| `ADMIN_PURGE_TOKEN` | Bearer token for `POST /api/admin/purge` |
-| `DISCORD_BRAND_EMOJI_ID`, `DISCORD_VERIFIED_EMOJI_ID` | Optional custom emoji IDs ([assets](docs/discord-emojis/README.md)) |
-
-`OFFLOAD_SIGNING_KEYS` holds 32-byte keys as unpadded base64url. New links are signed with `active`. Keep a retired key for 14 days after rotating it:
-
-```json
-{"active":"2026-10","keys":{"2026-10":"<key>","2026-07":"<previous key>"}}
-```
+Production `.env` needs only `OG_IMAGE`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `TURNSTILE_SITE_KEY`, and `TURNSTILE_SECRET_KEY` (see `.env.example`). Everything else has a default. The offload signing keyring is generated in `/data` on first start. Optional overrides are listed in [docs/vultr-deployment.md](docs/vultr-deployment.md).
 
 ## Acknowledgements
 

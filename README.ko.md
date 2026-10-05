@@ -48,7 +48,6 @@ Go 1.26, Node.js(`package.json`의 engines 참고), pnpm이 필요합니다.
 
 ```bash
 pnpm install --frozen-lockfile
-cp .env.example .env   # OFFLOAD_SIGNING_KEYS 설정
 pnpm run dev           # 프론트엔드 빌드 + :8080에서 Go 앱 실행
 pnpm run check         # lint, 타입, 테스트
 ```
@@ -57,26 +56,7 @@ pnpm run check         # lint, 타입, 테스트
 
 ## 설정
 
-모든 변수는 `.env.example`에 있습니다.
-
-| 변수 | 용도 |
-| --- | --- |
-| `OG_IMAGE`, `CLOUDFLARED_IMAGE` | Compose가 실행할 이미지 |
-| `BASE_URL`, `ALLOWED_HOSTS` | 대표 URL과 허용할 호스트 |
-| `TRUSTED_PROXIES` | `cloudflared` 주소. 이 주소 외의 요청은 거부 |
-| `PROXY_USERNAME`, `PROXY_PASSWORD` | DataImpulse 자격 증명 (운영 필수) |
-| `PROXY_BUDGET_START_DATE` | 프록시를 처음 쓸 수 있는 UTC 날짜. 절대 앞당기지 않음 |
-| `OFFLOAD_SIGNING_KEYS` | `/offload` 링크용 HMAC 키 모음 |
-| `WORKERHUB_SIGN_KEY`, `WORKERHUB_SIGN_TS` | 외부 helper 서명값을 직접 지정 |
-| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | 홈페이지 미리보기 보호 |
-| `ADMIN_PURGE_TOKEN` | `POST /api/admin/purge`용 Bearer 토큰 |
-| `DISCORD_BRAND_EMOJI_ID`, `DISCORD_VERIFIED_EMOJI_ID` | 선택. 커스텀 이모지 ID ([에셋](docs/discord-emojis/README.md)) |
-
-`OFFLOAD_SIGNING_KEYS`의 키는 32바이트를 패딩 없는 base64url로 적습니다. 새 링크는 `active` 키로 서명합니다. 키를 교체한 뒤에도 이전 키는 14일 동안 남겨 둡니다.
-
-```json
-{"active":"2026-10","keys":{"2026-10":"<key>","2026-07":"<previous key>"}}
-```
+운영 `.env`에는 `OG_IMAGE`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`만 넣으면 됩니다(`.env.example` 참고). 나머지는 모두 기본값이 있습니다. offload 서명 키는 첫 시작 때 `/data`에 자동으로 만들어집니다. 덮어쓸 수 있는 선택 항목은 [docs/vultr-deployment.md](docs/vultr-deployment.md)에 있습니다.
 
 ## 감사의 말
 

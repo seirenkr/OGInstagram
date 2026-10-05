@@ -68,6 +68,11 @@ const (
 
 	defaultAvatarPath = "/default-avatar.jpg"
 
+	// Public IDs of the emojis registered in the project's Discord server
+	// (docs/discord-emojis/README.md).
+	defaultDiscordBrandEmojiID    = "1556597080229810266"
+	defaultDiscordVerifiedEmojiID = "1556598045670514798"
+
 	instagramAppUA = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
 	instagramWebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
 
@@ -102,24 +107,25 @@ func configFromEnv() Config {
 		proxies = append(proxies, p)
 	}
 	return Config{
-		Port:                   port,
-		Version:                cmp.Or(env("OG_VERSION"), "dev"),
-		ProxyUser:              env("PROXY_USERNAME"),
-		ProxyPass:              env("PROXY_PASSWORD"),
-		BaseURL:                strings.TrimRight(baseURL, "/"),
-		OffloadSigningKeys:     env("OFFLOAD_SIGNING_KEYS"),
-		WorkerHubSignKey:       env("WORKERHUB_SIGN_KEY"),
-		WorkerHubSignTS:        env("WORKERHUB_SIGN_TS"),
-		DataDir:                cmp.Or(env("DATA_DIR"), "./data"),
-		AssetsDir:              cmp.Or(env("ASSETS_DIR"), "../web/dist"),
-		BudgetStartDate:        env("PROXY_BUDGET_START_DATE"),
+		Port:               port,
+		Version:            cmp.Or(env("OG_VERSION"), "dev"),
+		ProxyUser:          env("PROXY_USERNAME"),
+		ProxyPass:          env("PROXY_PASSWORD"),
+		BaseURL:            strings.TrimRight(baseURL, "/"),
+		OffloadSigningKeys: env("OFFLOAD_SIGNING_KEYS"),
+		WorkerHubSignKey:   env("WORKERHUB_SIGN_KEY"),
+		WorkerHubSignTS:    env("WORKERHUB_SIGN_TS"),
+		DataDir:            cmp.Or(env("DATA_DIR"), "./data"),
+		AssetsDir:          cmp.Or(env("ASSETS_DIR"), "../web/dist"),
+		// The ledger only moves the start forward (MAX), so today is a safe default.
+		BudgetStartDate:        cmp.Or(env("PROXY_BUDGET_START_DATE"), time.Now().UTC().Format(time.DateOnly)),
 		AllowedHosts:           hosts,
 		TrustedProxies:         proxies,
 		TurnstileSiteKey:       env("TURNSTILE_SITE_KEY"),
 		TurnstileSecretKey:     env("TURNSTILE_SECRET_KEY"),
 		AdminPurgeToken:        env("ADMIN_PURGE_TOKEN"),
-		DiscordBrandEmojiID:    env("DISCORD_BRAND_EMOJI_ID"),
-		DiscordVerifiedEmojiID: env("DISCORD_VERIFIED_EMOJI_ID"),
+		DiscordBrandEmojiID:    cmp.Or(env("DISCORD_BRAND_EMOJI_ID"), defaultDiscordBrandEmojiID),
+		DiscordVerifiedEmojiID: cmp.Or(env("DISCORD_VERIFIED_EMOJI_ID"), defaultDiscordVerifiedEmojiID),
 		Development:            env("DEVELOPMENT") == "true",
 	}
 }
@@ -173,8 +179,8 @@ func (cfg Config) validate() error {
 	if !cfg.Development && cfg.ProxyUser == "" {
 		return fmt.Errorf("production requires PROXY_USERNAME and PROXY_PASSWORD")
 	}
-	if !cfg.Development && (len(cfg.TrustedProxies) == 0 || cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "" || cfg.AdminPurgeToken == "") {
-		return fmt.Errorf("production requires TRUSTED_PROXIES, Turnstile keys and ADMIN_PURGE_TOKEN")
+	if !cfg.Development && (len(cfg.TrustedProxies) == 0 || cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "") {
+		return fmt.Errorf("production requires TRUSTED_PROXIES and Turnstile keys")
 	}
 	if !cfg.Development && (base.Port() != "" || !slices.Contains(cfg.AllowedHosts, strings.ToLower(base.Hostname()))) {
 		return fmt.Errorf("production BASE_URL host must be listed in ALLOWED_HOSTS, without a port")

@@ -2,12 +2,16 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,6 +35,27 @@ type offloadSigner struct {
 type offloadSigningConfig struct {
 	Active string            `json:"active"`
 	Keys   map[string]string `json:"keys"`
+}
+
+// Without OFFLOAD_SIGNING_KEYS, the keyring generated on first start persists in
+// DATA_DIR, so issued links stay valid across restarts and deploys.
+func loadOrCreateOffloadKeys(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, "offload-signing-keys.json")
+	key := make([]byte, offloadSigningKeySize)
+	rand.Read(key)
+	raw := `{"active":"local","keys":{"local":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		b, err := os.ReadFile(path)
+		return string(b), err
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err = f.WriteString(raw); err == nil {
+		err = f.Sync()
+	}
+	return raw, errors.Join(err, f.Close())
 }
 
 func parseOffloadSigner(raw string) (offloadSigner, error) {
