@@ -22,7 +22,7 @@ pnpm run dev     # http://localhost:8080
 pnpm run check   # lint, types, tests
 ```
 
-Production runs `compose.yaml` behind a Cloudflare Tunnel (`secrets/tunnel-token`, `data/` owned by UID 65532). Set the values in `.env.example`. Everything else has a default. Releases follow [CONTRIBUTING.md](CONTRIBUTING.md).
+Production runs `compose.yaml` behind a Cloudflare Tunnel (`secrets/tunnel-token`, `data/` owned by UID 65532). Set the values in `.env.example`. Everything else has a default.
 
 ## License
 
