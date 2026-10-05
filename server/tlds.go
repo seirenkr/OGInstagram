@@ -2,6 +2,7 @@ package main
 
 import "strings"
 
+// ASCII only: domainRE ends in [a-z]{2,}, so IDN TLDs never reach hasKnownTLD.
 const tldList = "" +
 	"aaa aarp abb abbott abbvie abc able abogado abudhabi ac academy accenture accountant accountants aco actor ad " +
 	"ads adult ae aeg aero aetna af afl africa ag agakhan agency ai aig airbus airforce airtel akdn al alibaba " +
@@ -68,18 +69,11 @@ const tldList = "" +
 	"tjx tk tkmaxx tl tm tmall tn to today tokyo tools top toray toshiba total tours town toyota toys tr trade " +
 	"trading training travel travelers travelersinsurance trust trv tt tube tui tunes tushu tv tvs tw tz ua ubank " +
 	"ubs ug uk unicom university uno uol ups us uy uz va vacations vana vanguard vc ve vegas ventures verisign " +
-	"vermögensberater vermögensberatung versicherung vet vg vi viajes video vig viking villas vin vip virgin visa " +
+	"versicherung vet vg vi viajes video vig viking villas vin vip virgin visa " +
 	"vision viva vivo vlaanderen vn vodka volvo vote voting voto voyage vu wales walmart walter wang wanggou watch " +
 	"watches weather weatherchannel webcam weber website wed wedding weibo weir wf whoswho wien wiki williamhill " +
 	"win windows wine winners wme woodside work works world wow ws wtc wtf xbox xerox xihuan xin xxx xyz yachts " +
-	"yahoo yamaxun yandex ye yodobashi yoga yokohama you youtube yt yun za zappos zara zero zip zm zone zuerich zw " +
-	"ελ ευ бг бел дети ею католик ком мкд мон москва онлайн орг рус рф сайт срб укр қаз հայ ישראל קום ابوظبي ارامكو " +
-	"الاردن البحرين الجزائر السعودية العليان المغرب امارات ایران بارت بازار بيتك بھارت تونس سودان سورية شبكة عراق " +
-	"عرب عمان فلسطين قطر كاثوليك كوم مصر مليسيا موريتانيا موقع همراه پاکستان ڀارت कॉम नेट भारत भारतम् भारोत संगठन " +
-	"বাংলা ভারত ভাৰত ਭਾਰਤ ભારત ଭାରତ இந்தியா இலங்கை சிங்கப்பூர் భారత్ ಭಾರತ ഭാരതം ලංකා คอม ไทย ລາວ გე みんな アマゾン クラウド " +
-	"グーグル コム ストア セール ファッション ポイント 世界 中信 中国 中國 中文网 亚马逊 企业 佛山 信息 健康 八卦 公司 公益 台湾 台灣 商城 商店 商标 嘉里 嘉里大酒店 在线 大拿 天主教 娱乐 家電 " +
-	"广东 微博 慈善 我爱你 手机 招聘 政务 政府 新加坡 新闻 时尚 書籍 机构 淡马锡 游戏 澳門 点看 移动 组织机构 网址 网店 网站 网络 联通 谷歌 购物 通販 集团 電訊盈科 飞利浦 食品 餐厅 香格里拉 " +
-	"香港 닷넷 닷컴 삼성 한국"
+	"yahoo yamaxun yandex ye yodobashi yoga yokohama you youtube yt yun za zappos zara zero zip zm zone zuerich zw"
 
 var tldSet = func() map[string]struct{} {
 	m := map[string]struct{}{}

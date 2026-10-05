@@ -87,7 +87,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
-		Handler:           newGateway(cfg, app, store, home),
+		Handler:           newGateway(cfg, app, home),
 		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
@@ -191,60 +191,6 @@ func logger(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
-func (a *App) route(req *http.Request) resp {
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		return resp{
-			status:  http.StatusMethodNotAllowed,
-			headers: map[string]string{"Allow": "GET, HEAD"},
-		}
-	}
-	path := req.URL.Path
-
-	if path == "/.well-known/webfinger" {
-		return a.handleWebFinger(req)
-	}
-	segments := splitPath(path)
-	if len(segments) == 5 && segments[0] == "offload" && segments[1] == "story" &&
-		validUsername(segments[2]) && validStoryID(segments[3]) && segments[4] == "avatar" {
-		return a.handleStoryOffload(req, segments[2], segments[3], true)
-	}
-	if len(segments) == 4 && segments[0] == "offload" && segments[1] == "story" &&
-		validUsername(segments[2]) && validStoryID(segments[3]) {
-		return a.handleStoryOffload(req, segments[2], segments[3], false)
-	}
-	if (len(segments) == 2 || len(segments) == 3) && segments[0] == "offload" {
-		return a.handleOffload(req, segments)
-	}
-	if len(segments) == 3 && segments[0] == "stories" && validUsername(segments[1]) && validStoryID(segments[2]) {
-		return a.handleStory(req, segments[1], segments[2])
-	}
-
-	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
-		return a.handleMastodonStatus(req, segments[3])
-	}
-	if len(segments) == 4 && segments[0] == "users" && segments[2] == "statuses" {
-		return a.handleActivity(req, segments[1], segments[3])
-	}
-	if len(segments) == 3 && segments[0] == "users" && validUsername(segments[1]) && (segments[2] == "inbox" || segments[2] == "outbox") {
-		return a.handleActivityCollection(req, segments[1], segments[2])
-	}
-	if len(segments) == 2 && segments[0] == "users" && validUsername(segments[1]) {
-		return a.handleUserAccount(req, segments[1])
-	}
-	if route := parseEmbedSegments(segments); route != nil {
-		return a.handlePost(req, route.PostType, route.Shortcode, route.PathIndex)
-	}
-	if len(segments) == 1 && validUsername(segments[0]) {
-		return a.handleProfile(req, segments[0])
-	}
-	return resp{status: 404, headers: map[string]string{}}
-}
-
-func (a *App) handleUserAccount(req *http.Request, username string) resp {
-	baseURL := a.publicBaseURL(req)
-	return activityJSONResp(200, a.buildFallbackAccount(baseURL, username))
-}
-
 func (a *App) handleWebFinger(req *http.Request) resp {
 	resource := req.URL.Query().Get("resource")
 	account, ok := strings.CutPrefix(resource, "acct:")
@@ -279,7 +225,7 @@ func (a *App) handleActivityCollection(req *http.Request, username, name string)
 	return activityJSONResp(http.StatusOK, emptyOrderedCollection(id))
 }
 
-func (a *App) handleActivity(req *http.Request, _, code string) resp {
+func (a *App) handleActivity(req *http.Request, code string) resp {
 	sp := parseStatusSnowcode(code)
 	baseURL := a.publicBaseURL(req)
 	if sp.Story {
@@ -300,7 +246,7 @@ func (a *App) handleActivity(req *http.Request, _, code string) resp {
 	if err != nil {
 		return textResp(err.Status, err.PublicMessage)
 	}
-	body := a.buildActivityStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
+	body := a.buildActivityStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
 	return activityJSONResp(200, body)
 }
 
@@ -329,20 +275,12 @@ func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
 	if err != nil {
 		return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
 	}
-	body := a.buildMastodonStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
+	body := a.buildMastodonStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
 	return jsonResp(200, body)
 }
 
-func snowMediaIndex(sp snowcodePost) int {
-	if sp.Specified {
-		return sp.MediaIndex
-	}
-	return -1
-}
-
-func (a *App) handleProfile(req *http.Request, username string) resp {
+func (a *App) handleProfile(req *http.Request, username string, gallery bool) resp {
 	origin := profileURL(username)
-	gallery := galleryRequested(req.URL.Query())
 	baseURL := a.publicBaseURL(req)
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
@@ -353,10 +291,7 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 	return tagFetch(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, gallery)), meta)
 }
 
-func (a *App) handlePost(req *http.Request, postType, shortcode string, pathIndex int) resp {
-	values := req.URL.Query()
-	mediaIndex, specified := mediaSelection(values, pathIndex)
-	gallery := galleryRequested(values)
+func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaIndex int, specified, gallery bool) resp {
 	origin := instagramPostURL(postType, shortcode, mediaIndex, specified)
 
 	baseURL := a.publicBaseURL(req)
@@ -393,43 +328,19 @@ func invalidOffloadResp() resp {
 	return resp{status: http.StatusNotFound, headers: map[string]string{}}
 }
 
-func offloadMediaIndex(segment string) (int, bool) {
-	n, ok := parseCanonicalDecimal(segment)
-	if !ok || n < 1 || n > maxCachedMediaItems {
-		return 0, false
-	}
-	return n - 1, true
-}
-
-func (a *App) handleOffload(req *http.Request, segments []string) resp {
-	if username, ok := strings.CutPrefix(segments[1], "@"); ok {
-		return a.handleProfileOffload(req, username, segments)
-	}
-	shortcode := segments[1]
-	if !validShortcode(shortcode) {
-		return invalidOffloadResp()
-	}
-	index := 0
-	if len(segments) == 3 && segments[2] != "avatar" {
-		var ok bool
-		index, ok = offloadMediaIndex(segments[2])
-		if !ok {
-			return invalidOffloadResp()
-		}
-	}
-	thumbnail := req.URL.Query().Has("thumbnail")
+// Offload handlers trust their arguments: canonicalOffloadPath or the d. host
+// route has already validated and bounded them.
+func (a *App) handleOffload(req *http.Request, shortcode string, index int, avatar bool) resp {
 	meta := &fetchMeta{}
 	post, err := a.getPost(req.Context(), shortcode, meta)
 	if err != nil {
 		return tagFetch(offloadErrorResp(err, instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/"), meta)
 	}
-	target := ""
-	if len(segments) == 3 && segments[2] == "avatar" {
-		target = post.ProfilePic
-	} else {
+	target := post.ProfilePic
+	if !avatar {
 		media := post.Attachments[mediaIndexFor(post, index)]
 		target = media.URL
-		if thumbnail && media.Thumbnail != "" {
+		if req.URL.Query().Has("thumbnail") && media.Thumbnail != "" {
 			target = media.Thumbnail
 		}
 	}
@@ -439,24 +350,15 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	return tagFetch(redirectResp(target, 302), meta)
 }
 
-func (a *App) handleProfileOffload(req *http.Request, username string, segments []string) resp {
-	if !validUsername(username) {
-		return invalidOffloadResp()
-	}
-	username = strings.ToLower(username)
-	if len(segments) == 3 && segments[2] != "avatar" {
-		if n, ok := parseCanonicalDecimal(segments[2]); !ok || n < 1 || n > profileGalleryMax {
-			return invalidOffloadResp()
-		}
-	}
+// n selects the nth recent media item; 0 selects the profile picture.
+func (a *App) handleProfileOffload(req *http.Request, username string, n int) resp {
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
 	if err != nil {
 		return tagFetch(offloadErrorResp(err, instagramOrigin+"/"+url.PathEscape(username)+"/"), meta)
 	}
 	target := p.ProfilePic
-	if len(segments) == 3 && segments[2] != "avatar" {
-		n, _ := parseCanonicalDecimal(segments[2])
+	if n > 0 {
 		if n > len(p.RecentMedia) {
 			return invalidOffloadResp()
 		}

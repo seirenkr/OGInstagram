@@ -190,7 +190,6 @@ cd /opt/oginstagram
 sudo docker compose config --quiet
 sudo docker compose pull cloudflared   # app 이미지는 docker load로 적재(레지스트리 없음)
 sudo docker compose up -d --wait --wait-timeout 90 app
-sudo docker compose exec -T app /app/server --healthcheck
 ```
 
 5. 첫 단계 호스트 4개를 Tunnel published application/DNS로 교체하고 connector를 시작합니다.
@@ -232,7 +231,6 @@ sudo install -o 65532 -g 65532 -m 0600 restore/state.sqlite data/state.sqlite
 sudo install -o 65532 -g 65532 -m 0600 restore/budget.sqlite data/budget.sqlite
 sudo docker compose run --rm --no-deps app --exhaust-budget
 sudo docker compose up -d --wait --wait-timeout 90
-sudo docker compose exec -T app /app/server --healthcheck
 ```
 
 `--exhaust-budget`가 성공하기 전에는 app을 시작하지 않습니다. 이 명령은 복구 당일 UTC quota를 모두 사용한 것으로 기록하여 snapshot 이후의 소비를 다시 지급하지 않게 합니다. proxy는 다음 UTC day부터 재개합니다. snapshot도 없거나 budget DB가 유실된 경우에도 `PROXY_BUDGET_START_DATE`를 다음 UTC 날짜로 설정하고 당일 quota를 재지급하지 않습니다. empty DB로 복구할 때는 state와 budget을 함께 새로 준비하며 기존 파일을 임의로 삭제해 quota를 초기화하지 않습니다.

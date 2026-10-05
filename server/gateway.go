@@ -34,7 +34,6 @@ func gatewayIsBot(ua string) bool { return gatewayBotPattern.MatchString(ua) }
 type Gateway struct {
 	cfg    Config
 	app    *App
-	store  *localStore
 	home   map[string]string // locale → home page template
 	slots  chan struct{}
 	rateMu sync.Mutex
@@ -51,8 +50,8 @@ type clearanceLimit struct {
 	count int
 }
 
-func newGateway(cfg Config, app *App, store *localStore, home map[string]string) *Gateway {
-	return &Gateway{cfg: cfg, app: app, store: store, home: home, slots: make(chan struct{}, maxGatewayInFlight), rates: make(map[string]clearanceLimit), client: &http.Client{Timeout: 10 * time.Second}}
+func newGateway(cfg Config, app *App, home map[string]string) *Gateway {
+	return &Gateway{cfg: cfg, app: app, home: home, slots: make(chan struct{}, maxGatewayInFlight), rates: make(map[string]clearanceLimit), client: &http.Client{Timeout: 10 * time.Second}}
 }
 
 func peerAddress(r *http.Request) netip.Addr {
@@ -104,7 +103,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/readyz" {
 			ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 			defer cancel()
-			if g.store == nil || g.store.Healthy(ctx) != nil {
+			if g.cfg.Store.Healthy(ctx) != nil {
 				g.problem(w, r, 503, "storage unavailable")
 				return
 			}
@@ -198,7 +197,6 @@ func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool
 		}
 	}
 	w.Header().Set("Allow", strings.Join(methods, ", "))
-	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusMethodNotAllowed)
 	return false
 }
@@ -208,7 +206,6 @@ func (g *Gateway) problem(w http.ResponseWriter, r *http.Request, status int, de
 		slog.Warn("request rejected", "status", status, "detail", detail, "method", r.Method,
 			"host", r.Host, "path", r.URL.Path, "peer", peerAddress(r).String(), "cf_ray", r.Header.Get("Cf-Ray"))
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	if r.Method != http.MethodHead {
@@ -228,25 +225,22 @@ func (g *Gateway) writeResult(w http.ResponseWriter, r *http.Request, result res
 	}
 }
 
+// handle gets render's request (same URL, plus the render timeout). Its
+// arguments were validated by resolveGatewayRoute; handlers never re-match paths.
 type gatewayRoute struct {
-	path          string
-	query         url.Values
+	handle        func(*App, *http.Request) resp
 	humanRedirect string
 	category      string
 	offload       bool
 }
 
 func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
-	path := r.URL.Path
-	segments := splitPath(path)
-	query := r.URL.Query()
-	query.Del("__gallery")
-	if strings.HasPrefix(r.Host, "g.") || strings.HasPrefix(r.Host, "www.g.") {
-		query.Set("__gallery", "1")
-	}
-	route := gatewayRoute{path: path, query: query}
+	segments := splitPath(r.URL.Path)
+	route := gatewayRoute{}
+	gallery := strings.HasPrefix(r.Host, "g.") || strings.HasPrefix(r.Host, "www.g.")
 	direct := strings.HasPrefix(r.Host, "d.") || strings.HasPrefix(r.Host, "www.d.")
-	if path == "/.well-known/webfinger" {
+	if r.URL.Path == "/.well-known/webfinger" {
+		route.handle = (*App).handleWebFinger
 		return route, true
 	}
 	if len(segments) > 0 && segments[0] == "offload" {
@@ -254,41 +248,61 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		if !ok {
 			return route, false
 		}
-		route.path = canonical
+		route.handle = offloadHandler(splitPath(canonical))
 		route.offload = true
 		return route, true
 	}
 	if len(segments) == 3 && segments[0] == "stories" && validUsername(segments[1]) && validStoryID(segments[2]) {
+		username, id := segments[1], segments[2]
 		route.category = "stories"
 		if direct {
-			route.path = "/offload/story/" + strings.ToLower(segments[1]) + "/" + segments[2]
+			route.handle = func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, username, id, false) }
 		} else {
-			route.humanRedirect = storyOriginURL(segments[1], segments[2])
+			route.humanRedirect = storyOriginURL(username, id)
+			route.handle = func(a *App, r *http.Request) resp { return a.handleStory(r, username, id, gallery) }
 		}
 		return route, true
 	}
-	if len(segments) == 4 && ((segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses") || (segments[0] == "users" && validUsername(segments[1]) && segments[2] == "statuses")) {
-		return route, statusCodePattern.MatchString(segments[3])
+	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
+		code := segments[3]
+		route.handle = func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }
+		return route, statusCodePattern.MatchString(code)
+	}
+	if len(segments) == 4 && segments[0] == "users" && validUsername(segments[1]) && segments[2] == "statuses" {
+		code := segments[3]
+		route.handle = func(a *App, r *http.Request) resp { return a.handleActivity(r, code) }
+		return route, statusCodePattern.MatchString(code)
 	}
 	if len(segments) == 3 && segments[0] == "users" && validUsername(segments[1]) && (segments[2] == "inbox" || segments[2] == "outbox") {
+		username, name := segments[1], segments[2]
+		route.handle = func(a *App, r *http.Request) resp { return a.handleActivityCollection(r, username, name) }
 		return route, true
 	}
 	if len(segments) == 2 && segments[0] == "users" && validUsername(segments[1]) {
+		username := segments[1]
+		route.handle = func(a *App, r *http.Request) resp {
+			return activityJSONResp(http.StatusOK, a.buildFallbackAccount(a.publicBaseURL(r), username))
+		}
 		return route, true
 	}
 	if post := parseEmbedSegments(segments); post != nil {
 		route.category = "posts"
-		index, specified := mediaSelection(query, post.PathIndex)
+		index, specified := mediaSelection(r.URL.Query(), post.PathIndex)
 		if direct {
-			route.path = "/offload/" + post.Shortcode + "/" + strconv.Itoa(index+1)
+			route.handle = func(a *App, r *http.Request) resp { return a.handleOffload(r, post.Shortcode, index, false) }
 		} else {
 			route.humanRedirect = instagramPostURL(post.PostType, post.Shortcode, index, specified)
+			route.handle = func(a *App, r *http.Request) resp {
+				return a.handlePost(r, post.PostType, post.Shortcode, index, specified, gallery)
+			}
 		}
 		return route, true
 	}
 	if len(segments) == 1 && validUsername(segments[0]) {
+		username := segments[0]
 		route.category = "profile"
-		route.humanRedirect = profileURL(segments[0])
+		route.humanRedirect = profileURL(username)
+		route.handle = func(a *App, r *http.Request) resp { return a.handleProfile(r, username, gallery) }
 		return route, true
 	}
 	return route, false
@@ -328,6 +342,23 @@ func canonicalOffloadPath(u *url.URL) (string, bool) {
 	return "/" + strings.Join(segments, "/"), true
 }
 
+// offloadHandler dispatches canonicalOffloadPath's segments, whose usernames
+// are lowercased and whose media number is already within range.
+func offloadHandler(s []string) func(*App, *http.Request) resp {
+	if s[1] == "story" && len(s) >= 4 {
+		return func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, s[2], s[3], len(s) == 5) }
+	}
+	avatar := len(s) == 3 && s[2] == "avatar"
+	n := 0
+	if len(s) == 3 && !avatar {
+		n, _ = parseCanonicalDecimal(s[2])
+	}
+	if username, ok := strings.CutPrefix(s[1], "@"); ok {
+		return func(a *App, r *http.Request) resp { return a.handleProfileOffload(r, username, n) }
+	}
+	return func(a *App, r *http.Request) resp { return a.handleOffload(r, s[1], max(n-1, 0), avatar) }
+}
+
 func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
 	path, ok := canonicalOffloadPath(u)
 	if !ok {
@@ -358,19 +389,13 @@ func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
 	if err != nil || len(signature) != sha256.Size || base64.RawURLEncoding.EncodeToString(signature) != values.Get("sig") {
 		return false
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(offloadSignatureInput(kid, path, expires))
-	return hmac.Equal(signature, mac.Sum(nil))
+	return hmac.Equal(signature, offloadMAC(key, kid, path, expires))
 }
 
 func (g *Gateway) render(r *http.Request, route gatewayRoute) resp {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
-	internal := r.Clone(ctx)
-	internal.URL.Path = route.path
-	internal.URL.RawPath = ""
-	internal.URL.RawQuery = route.query.Encode()
-	return g.app.route(internal)
+	return route.handle(g.app, r.WithContext(ctx))
 }
 
 // previewTarget turns the client-supplied path into the internal bot GET the
@@ -556,7 +581,7 @@ func (g *Gateway) verifyTurnstile(r *http.Request, origin, token string) bool {
 
 func (g *Gateway) recordMetric(r *http.Request, route gatewayRoute, result resp, duration time.Duration) {
 	// Only origin outcomes for bots: cache hits say nothing about upstream health.
-	if g.store == nil || route.category == "" || result.cacheHit || !gatewayIsBot(r.UserAgent()) {
+	if route.category == "" || result.cacheHit || !gatewayIsBot(r.UserAgent()) {
 		return
 	}
 	status := result.status
@@ -565,7 +590,7 @@ func (g *Gateway) recordMetric(r *http.Request, route gatewayRoute, result resp,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
 	defer cancel()
-	if err := g.store.RecordMetric(ctx, route.category, duration, status, result.errorType); err != nil {
+	if err := g.cfg.Store.RecordMetric(ctx, route.category, duration, status, result.errorType); err != nil {
 		slog.Warn("metric write failed", "error", err)
 	}
 }
@@ -578,7 +603,7 @@ func (g *Gateway) serveStatus(w http.ResponseWriter, r *http.Request) {
 	g.statusMu.Lock()
 	if time.Since(g.statusAt) >= time.Minute {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-		report, err := g.store.Status(ctx)
+		report, err := g.cfg.Store.Status(ctx)
 		cancel()
 		if err != nil {
 			g.statusMu.Unlock()
@@ -605,7 +630,7 @@ func (g *Gateway) servePurge(w http.ResponseWriter, r *http.Request) {
 		g.problem(w, r, 403, "forbidden")
 		return
 	}
-	if err := g.store.PurgeModels(r.Context()); err != nil {
+	if err := g.cfg.Store.PurgeModels(r.Context()); err != nil {
 		g.problem(w, r, 503, "local purge failed")
 		return
 	}

@@ -1,7 +1,6 @@
 .git
 .claude
 .agents
-node_modules
 **/node_modules
 **/.DS_Store
 web/dist
@@ -9,7 +8,6 @@ web/dist
 server/server
 server/oginstagram
 data
-backups
 secrets
 .local-data
 docs

@@ -302,13 +302,13 @@ func TestPreviewCacheClearDropsTransformedMedia(t *testing.T) {
 func TestMediaBrowserTTLDoesNotExceedSignedExpiry(t *testing.T) {
 	request := testMediaRequest(http.MethodGet, "/offload/example?exp="+strconv.FormatInt(time.Now().Add(30*time.Second).Unix(), 10))
 	headers := make(http.Header)
-	setMediaHeaders(headers, http.Header{"Content-Type": {"image/jpeg"}}, false, request)
+	setMediaHeaders(headers, http.Header{"Content-Type": {"image/jpeg"}}, request)
 	ttl, err := strconv.Atoi(strings.TrimPrefix(headers.Get("Cache-Control"), "public, max-age="))
 	if err != nil || ttl < 1 || ttl > 30 || headers.Get("Cloudflare-CDN-Cache-Control") != "no-store" {
 		t.Fatalf("unsafe signed media cache policy: %v", headers)
 	}
 	request.URL.RawQuery = "exp=1"
-	setMediaHeaders(headers, make(http.Header), false, request)
+	setMediaHeaders(headers, make(http.Header), request)
 	if headers.Get("Cache-Control") != "no-store" {
 		t.Fatal("expired capability was made browser-cacheable")
 	}

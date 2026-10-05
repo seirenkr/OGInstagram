@@ -1,9 +1,0 @@
-{
-  "name": "oginstagram-harvest",
-  "private": true,
-  "type": "module",
-  "description": "External-helper HMAC key harvester (Obscura headless V8 via CDP).",
-  "dependencies": {
-    "playwright-core": "1.48.2"
-  }
-}

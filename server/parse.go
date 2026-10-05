@@ -27,10 +27,6 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	}
 	username := user.Get("username").String()
 	fullName := user.Get("full_name").String()
-	shortcode := item.Get("code").String()
-	if shortcode == "" {
-		shortcode = item.Get("shortcode").String()
-	}
 
 	var attachments []Attachment
 	carousel := item.Get("carousel_media").Array()
@@ -47,24 +43,16 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		return Post{}, igErr(502, errorCodeUpstream, "v1 media had no usable attachments")
 	}
 
-	created := item.Get("taken_at").Int()
-	if created == 0 {
-		created = item.Get("taken_at_timestamp").Int()
-	}
-	caption := item.Get("caption.text").String()
-	if caption == "" {
-		caption = item.Get("caption_text").String()
-	}
 	return Post{
-		Shortcode:   shortcode,
+		Shortcode:   cmp.Or(item.Get("code").String(), item.Get("shortcode").String()),
 		Username:    username,
 		OwnerID:     cmp.Or(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
 		ProfilePic:  user.Get("profile_pic_url").String(),
-		Caption:     caption,
-		StatsLine:   v1StatsPrefix(item) + "❤️ " + fmtCount(uintOf(item, "like_count")) + "  \U0001f4ac " + fmtCount(uintOf(item, "comment_count")),
+		Caption:     cmp.Or(item.Get("caption.text").String(), item.Get("caption_text").String()),
+		StatsLine:   statsLine(v1StatsPrefix(item), uintOf(item, "like_count"), uintOf(item, "comment_count")),
 		Attachments: attachments,
-		CreatedAt:   unixTime(created),
+		CreatedAt:   unixTime(cmp.Or(item.Get("taken_at").Int(), item.Get("taken_at_timestamp").Int())),
 	}, nil
 }
 
@@ -76,72 +64,38 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 	w, h := mediaWidth(item), mediaHeight(item)
 	id := cmp.Or(item.Get("pk").String(), item.Get("id").String())
 	if uintOf(item, "media_type") == 2 {
-		u := bestVideoURL(item)
-		if u == "" {
-			u = thumbnail
-		}
-		return Attachment{ID: id, Kind: "video", URL: u, Thumbnail: thumbnail, Width: w, Height: h}, true
+		return Attachment{ID: id, Kind: "video", URL: cmp.Or(bestVideoURL(item), thumbnail), Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
 	return Attachment{ID: id, Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
 }
 
 func bestV1ImageURL(item gjson.Result) string {
-	if u := bestCandidateURL(item.Get("image_versions2.candidates")); u != "" {
-		return u
-	}
-	for _, k := range []string{"thumbnail_url", "display_url", "thumbnail_src", "display_src"} {
-		if u := item.Get(k).String(); u != "" {
-			return u
-		}
-	}
-	return ""
+	return cmp.Or(bestCandidateURL(item.Get("image_versions2.candidates")),
+		item.Get("thumbnail_url").String(), item.Get("display_url").String(),
+		item.Get("thumbnail_src").String(), item.Get("display_src").String())
 }
 
 func bestVideoURL(node gjson.Result) string {
-	if u := node.Get("video_url").String(); u != "" {
-		return u
-	}
-	if u := bestCandidateURL(node.Get("video_versions")); u != "" {
-		return u
-	}
-	return bestCandidateURL(node.Get("video_resources"))
+	return cmp.Or(node.Get("video_url").String(),
+		bestCandidateURL(node.Get("video_versions")), bestCandidateURL(node.Get("video_resources")))
 }
 
 func bestCandidateURL(value gjson.Result) string {
-	bestURL := ""
-	bestArea := -1
-	for _, c := range value.Array() {
-		u := c.Get("url").String()
-		if u == "" {
-			u = c.Get("src").String()
-		}
-		if u == "" {
-			continue
-		}
-		area := candidateWidth(c) * candidateHeight(c)
-		if bestURL == "" || area > bestArea {
-			bestURL = u
-			bestArea = area
-		}
-	}
-	return bestURL
+	return candidateURL(bestCandidate(value))
 }
 
-func mediaDimension(value gjson.Result, keys [3]string, fromCandidate func(gjson.Result) int) int {
-	for _, k := range keys {
-		if n := uintOf(value, k); n > 0 {
-			return n
-		}
-	}
-	return fromCandidate(bestImageCandidate(value))
+func candidateURL(c gjson.Result) string {
+	return cmp.Or(c.Get("url").String(), c.Get("src").String())
 }
 
-func mediaWidth(value gjson.Result) int {
-	return mediaDimension(value, [3]string{"dimensions.width", "original_width", "width"}, candidateWidth)
+func mediaWidth(v gjson.Result) int {
+	return cmp.Or(uintOf(v, "dimensions.width"), uintOf(v, "original_width"), uintOf(v, "width"),
+		candidateWidth(bestImageCandidate(v)))
 }
 
-func mediaHeight(value gjson.Result) int {
-	return mediaDimension(value, [3]string{"dimensions.height", "original_height", "height"}, candidateHeight)
+func mediaHeight(v gjson.Result) int {
+	return cmp.Or(uintOf(v, "dimensions.height"), uintOf(v, "original_height"), uintOf(v, "height"),
+		candidateHeight(bestImageCandidate(v)))
 }
 
 func bestImageCandidate(value gjson.Result) gjson.Result {
@@ -158,6 +112,9 @@ func bestCandidate(value gjson.Result) gjson.Result {
 	var best gjson.Result
 	bestArea := -1
 	for _, c := range value.Array() {
+		if candidateURL(c) == "" {
+			continue
+		}
 		area := candidateWidth(c) * candidateHeight(c)
 		if !best.Exists() || area > bestArea {
 			best = c
@@ -168,27 +125,16 @@ func bestCandidate(value gjson.Result) gjson.Result {
 }
 
 func candidateWidth(value gjson.Result) int {
-	if w := uintOf(value, "width"); w > 0 {
-		return w
-	}
-	return uintOf(value, "config_width")
+	return cmp.Or(uintOf(value, "width"), uintOf(value, "config_width"))
 }
 
 func candidateHeight(value gjson.Result) int {
-	if h := uintOf(value, "height"); h > 0 {
-		return h
-	}
-	return uintOf(value, "config_height")
+	return cmp.Or(uintOf(value, "height"), uintOf(value, "config_height"))
 }
 
 func v1StatsPrefix(item gjson.Result) string {
-	play := 0
-	for _, k := range []string{"play_count", "video_play_count", "view_count", "video_view_count", "ig_play_count", "fb_play_count"} {
-		if play = uintOf(item, k); play > 0 {
-			break
-		}
-	}
-	if play > 0 {
+	if play := cmp.Or(uintOf(item, "play_count"), uintOf(item, "video_play_count"), uintOf(item, "view_count"),
+		uintOf(item, "video_view_count"), uintOf(item, "ig_play_count"), uintOf(item, "fb_play_count")); play > 0 {
 		return "▶️ " + fmtCount(play) + "  "
 	}
 	return ""

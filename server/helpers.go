@@ -83,6 +83,10 @@ func fmtCount(value int) string {
 	return s
 }
 
+func statsLine(prefix string, likes, comments int) string {
+	return prefix + "❤️ " + fmtCount(likes) + "  \U0001f4ac " + fmtCount(comments)
+}
+
 func truncateFlat(text string, limit int) string {
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
@@ -104,13 +108,7 @@ func normalizeCaption(text string) string {
 	for i := range lines {
 		lines[i] = strings.TrimSpace(lines[i])
 	}
-	for len(lines) > 0 && lines[0] == "" {
-		lines = lines[1:]
-	}
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return strings.Join(lines, "\n")
+	return strings.Trim(strings.Join(lines, "\n"), "\n")
 }
 
 func postDescription(caption, reaction string) string {
@@ -152,40 +150,21 @@ func cdnExpiry(rawURL string) (time.Time, bool) {
 func cacheTTLFromURLs(urls ...string) time.Duration {
 	ttl := cdnFallbackTTL
 	for _, u := range urls {
-		if u == "" {
-			continue
-		}
 		if expiry, ok := cdnExpiry(u); ok {
-			candidate := time.Until(expiry) - cdnTTLMargin
-			if candidate < time.Minute {
-				candidate = time.Minute
-			}
-			if candidate < ttl {
-				ttl = candidate
-			}
+			ttl = min(ttl, max(time.Until(expiry)-cdnTTLMargin, time.Minute))
 		}
 	}
 	return ttl
 }
 
 func mediaIndexFor(post Post, requested int) int {
-	if len(post.Attachments) == 0 || requested < 0 {
-		return 0
-	}
-	if requested >= len(post.Attachments) {
-		return len(post.Attachments) - 1
-	}
-	return requested
+	return max(0, min(requested, len(post.Attachments)-1))
 }
 
 func instagramPostURL(postType, shortcode string, mediaIndex int, specified bool) string {
 	target := instagramOrigin + "/" + normalizePostType(postType) + "/" + url.PathEscape(shortcode) + "/"
 	if specified {
-		idx := mediaIndex
-		if idx < 0 {
-			idx = 0
-		}
-		target += "?img_index=" + strconv.Itoa(idx+1)
+		target += "?img_index=" + strconv.Itoa(mediaIndex+1)
 	}
 	return target
 }

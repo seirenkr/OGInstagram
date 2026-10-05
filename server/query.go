@@ -17,17 +17,11 @@ func parseCanonicalDecimal(raw string) (int, bool) {
 }
 
 func queryInt(values url.Values, key string) (int, bool) {
-	if _, has := values[key]; !has {
+	if !values.Has(key) {
 		return 0, false
 	}
-	raw := values.Get(key)
-	if raw == "" {
-		return 0, true
-	}
-	n, ok := parseCanonicalDecimal(raw)
-	if !ok {
-		return 0, true
-	}
+	// Present but empty or non-canonical selects 0.
+	n, _ := parseCanonicalDecimal(values.Get(key))
 	return n, true
 }
 
@@ -50,5 +44,3 @@ func mediaSelection(values url.Values, pathIndex int) (index int, specified bool
 func boundedMediaIndex(index int) int {
 	return min(maxCachedMediaItems-1, max(0, index))
 }
-
-func galleryRequested(values url.Values) bool { return values.Get("__gallery") == "1" }

@@ -26,31 +26,22 @@ func isPostRouteType(value string) bool {
 	return value == "p" || value == "reel" || value == "reels"
 }
 
-func optionalPathIndex(segments []string, index int) (int, bool) {
-	if len(segments) <= index {
-		return -1, true
-	}
-	n, ok := parseCanonicalDecimal(segments[index])
-	if !ok {
-		return -1, false
-	}
-	return n, true
-}
-
+// parseEmbedSegments accepts /p/X[/n] and /user/p/X[/n]. A shape match with a
+// non-canonical index rejects the path instead of trying the other shape.
 func parseEmbedSegments(segments []string) *EmbedRoute {
-	if (len(segments) == 2 || len(segments) == 3) && isPostRouteType(segments[0]) && validShortcode(segments[1]) {
-		idx, ok := optionalPathIndex(segments, 2)
-		if !ok {
-			return nil
+	for _, s := range [][]string{segments, segments[min(1, len(segments)):]} {
+		if len(s) < 2 || len(s) > 3 || !isPostRouteType(s[0]) || !validShortcode(s[1]) {
+			continue
 		}
-		return &EmbedRoute{PostType: normalizePostType(segments[0]), Shortcode: segments[1], PathIndex: idx}
-	}
-	if (len(segments) == 3 || len(segments) == 4) && isPostRouteType(segments[1]) && validShortcode(segments[2]) {
-		idx, ok := optionalPathIndex(segments, 3)
-		if !ok {
-			return nil
+		index := -1
+		if len(s) == 3 {
+			n, ok := parseCanonicalDecimal(s[2])
+			if !ok {
+				return nil
+			}
+			index = n
 		}
-		return &EmbedRoute{PostType: normalizePostType(segments[1]), Shortcode: segments[2], PathIndex: idx}
+		return &EmbedRoute{PostType: normalizePostType(s[0]), Shortcode: s[1], PathIndex: index}
 	}
 	return nil
 }

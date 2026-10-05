@@ -1,5 +1,2 @@
-packages:
-  - harvest
-
 allowBuilds:
   esbuild: true

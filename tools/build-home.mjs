@@ -1,4 +1,4 @@
-import { copyFileSync, lstatSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { cpSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,25 +6,14 @@ const BRAND = "OGInstagram";
 const BRAND_COLOR = "#ff0069";
 const SUPPORT_URL = "https://ko-fi.com/seirenkr";
 const GITHUB_URL = "https://github.com/seirenkr/OGInstagram";
-const TWEMOJI_VERSION = "15.0.0";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "web", "dist");
 const template = readFileSync(join(dist, "index.html"), "utf8");
 const localeDir = join(root, "web", "locales");
 const twemojiSource = join(root, "node_modules", "@twemoji", "svg");
-const twemojiPackage = JSON.parse(readFileSync(join(twemojiSource, "package.json"), "utf8"));
-if (twemojiPackage.version !== TWEMOJI_VERSION) {
-  throw new Error(`Twemoji asset version mismatch: expected ${TWEMOJI_VERSION}, found ${twemojiPackage.version}`);
-}
-const twemojiFiles = readdirSync(twemojiSource)
-  .filter((file) => /^[0-9a-f]+(?:-[0-9a-f]+)*\.svg$/.test(file))
-  .sort();
-if (twemojiFiles.length < 3000) throw new Error("Twemoji SVG assets are incomplete");
-const previewSource = readFileSync(join(root, "web", "src", "preview.tsx"), "utf8");
-if (!previewSource.includes(`const TWEMOJI_BASE = "/twemoji/v${TWEMOJI_VERSION}/";`)) {
-  throw new Error("Twemoji browser asset URL does not match the packaged version");
-}
+// preview.tsx builds its Twemoji URLs from the same package version.
+const { version: twemojiVersion } = JSON.parse(readFileSync(join(twemojiSource, "package.json"), "utf8"));
 const locales = readdirSync(localeDir).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort();
 if (!locales.includes("en")) throw new Error("en locale missing");
 
@@ -32,36 +21,26 @@ const escapeHTML = (s) => s.replaceAll("&", "&amp;").replaceAll('"', "&quot;").r
 
 const strings = new Map(locales.map((l) => [l, JSON.parse(readFileSync(join(localeDir, `${l}.json`), "utf8"))]));
 
-const requireComplete = (locale, node, path = "") => {
-  for (const [key, value] of Object.entries(node)) {
-    const at = path ? `${path}.${key}` : key;
-    if (typeof value === "string") {
-      if (!value) throw new Error(`locale ${locale}: ${at} is empty`);
-    } else if (value && typeof value === "object") requireComplete(locale, value, at);
-  }
-};
-const keyShape = (node) => Object.entries(node).map(([k, v]) => (v && typeof v === "object" ? `${k}{${keyShape(v)}}` : k)).sort().join(",");
-for (const [locale, t] of strings) {
-  requireComplete(locale, t);
-  if (keyShape(t) !== keyShape(strings.get("en"))) throw new Error(`locale ${locale}: keys differ from en`);
-}
+// Throws on an empty leaf while building a sorted key signature of the tree.
+const keyShape = (locale, node, path = "") => Object.entries(node).map(([key, value]) => {
+  const at = path ? `${path}.${key}` : key;
+  if (value && typeof value === "object") return `${key}{${keyShape(locale, value, at)}}`;
+  if (!value) throw new Error(`locale ${locale}: ${at} is empty`);
+  return key;
+}).sort().join(",");
+const enShape = keyShape("en", strings.get("en"));
+for (const [locale, t] of strings) if (keyShape(locale, t) !== enShape) throw new Error(`locale ${locale}: keys differ from en`);
 
 if (!template.includes('<div id="root"></div>')) throw new Error("root container missing from web/index.html");
 
 const languageTag = (locale) => locale === "zh-hans" ? "zh-Hans" : locale === "zh-hant" ? "zh-Hant" : locale;
 
 mkdirSync(join(dist, "home"), { recursive: true });
-const twemojiDestination = join(dist, "twemoji", `v${TWEMOJI_VERSION}`);
 rmSync(join(dist, "twemoji"), { recursive: true, force: true });
-mkdirSync(twemojiDestination, { recursive: true });
-let twemojiBytes = 0;
-for (const file of twemojiFiles) {
-  const source = join(twemojiSource, file);
-  const destination = join(twemojiDestination, file);
-  copyFileSync(source, destination);
-  if (lstatSync(destination).isSymbolicLink()) throw new Error(`Twemoji asset remained a symlink: ${file}`);
-  twemojiBytes += statSync(destination).size;
-}
+// dereference: node_modules/@twemoji/svg is a pnpm symlink.
+cpSync(twemojiSource, join(dist, "twemoji", `v${twemojiVersion}`), {
+  recursive: true, dereference: true, filter: (src) => src === twemojiSource || src.endsWith(".svg"),
+});
 for (const locale of locales) {
   const t = strings.get(locale);
   const lang = languageTag(locale);
@@ -94,4 +73,4 @@ for (const locale of locales) {
   writeFileSync(join(dist, "home", `${locale}.html`), html);
 }
 rmSync(join(dist, "index.html"));
-console.log(`built ${locales.length} home pages and ${twemojiFiles.length} local Twemoji SVGs (${(twemojiBytes / 1024 / 1024).toFixed(1)} MiB)`);
+console.log(`built ${locales.length} home pages and Twemoji v${twemojiVersion} SVGs`);

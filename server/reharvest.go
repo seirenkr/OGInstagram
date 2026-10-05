@@ -17,7 +17,7 @@ import (
 
 const (
 	obscuraBin    = "/app/obscura"
-	nodeBin       = "/nodejs/bin/node"
+	nodeBin       = "/usr/local/bin/node"
 	harvestScript = "/app/harvest/harvest.mjs"
 	obscuraPort   = "9222"
 	obscuraCDP    = "ws://127.0.0.1:" + obscuraPort

@@ -15,21 +15,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY harvest/package.json harvest/
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ web/
 COPY shared/ shared/
-COPY tsconfig.json ./
 COPY tools/build-home.mjs tools/build-home.mjs
 RUN pnpm run build
-
-# playwright-core connects to the bundled Obscura over CDP.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS harvest
-WORKDIR /src
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY harvest/package.json harvest/
-RUN corepack enable && pnpm --dir harvest install --prod --frozen-lockfile \
-    --lockfile-dir=. --virtual-store-dir=harvest/node_modules/.pnpm
 
 # Real negotiated WebP/AVIF previews need ffmpeg; Obscura needs glibc.
 FROM node:22-bookworm-slim
@@ -38,13 +28,12 @@ RUN apt-get update \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libwebp ' \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libaom-av1 ' \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /nodejs/bin /app /data \
-    && ln -s /usr/local/bin/node /nodejs/bin/node \
+    && mkdir -p /data \
     && chown 65532:65532 /data
 COPY --from=obscura /obscura /app/obscura
 COPY --from=build /out/server /app/server
-# playwright-core has no dependencies; the workspace install also pulls frontend packages.
-COPY --from=harvest /src/harvest/node_modules/playwright-core /app/harvest/node_modules/playwright-core
+# playwright-core (no dependencies) connects to the bundled Obscura over CDP.
+COPY --from=web /src/node_modules/playwright-core /app/harvest/node_modules/playwright-core
 COPY harvest/harvest.mjs /app/harvest/
 COPY --from=web /src/web/dist /app/web
 # Declared late so a new version does not invalidate the ffmpeg layer.

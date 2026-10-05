@@ -129,7 +129,7 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}
 
 	code := statusSnowcode("p", "DaD8phTyclR", 0, false, false)
-	status := a.route(httptest.NewRequest(http.MethodGet, "https://example.test/users/instagram/statuses/"+code, nil))
+	status := serveApp(t, a, httptest.NewRequest(http.MethodGet, "https://example.test/users/instagram/statuses/"+code, nil))
 	if status.status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status.status)
 	}
@@ -139,7 +139,7 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}
 
 	offload := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
-	media := a.route(offload)
+	media := serveApp(t, a, offload)
 	if media.status != http.StatusFound || directCalls != 1 {
 		t.Fatalf("offload = %d, Instagram fetches = %d; want 302 and one fetch", media.status, directCalls)
 	}
@@ -159,7 +159,7 @@ func TestEdgeAuthorizedDirectOffloadMayFetchOrigin(t *testing.T) {
 		posts: postCache,
 	}
 	req := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
-	result := a.route(req)
+	result := serveApp(t, a, req)
 	if result.status != http.StatusFound {
 		t.Fatalf("authorized offload status = %d, want 302", result.status)
 	}
@@ -169,7 +169,6 @@ func TestEdgeAuthorizedDirectOffloadMayFetchOrigin(t *testing.T) {
 }
 
 func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
-	a := &App{}
 	for _, path := range []string{
 		"/offload/Ab_12/anything",
 		"/offload/Ab_12/0",
@@ -183,9 +182,8 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		if _, ok := canonicalOffloadPath(&url.URL{Path: path}); ok {
 			t.Errorf("%s was canonicalized", path)
 		}
-		result := a.route(httptest.NewRequest(http.MethodGet, "https://example.test"+path, nil))
-		if result.status != http.StatusNotFound {
-			t.Errorf("%s = %#v, want no-store 404", path, result)
+		if _, ok := resolveGatewayRoute(httptest.NewRequest(http.MethodGet, "https://example.test"+path, nil)); ok {
+			t.Errorf("%s was routed, want 404 before any lookup", path)
 		}
 	}
 	for _, tt := range []struct{ path, want string }{

@@ -41,11 +41,7 @@ func statusSnowcode(postType, shortcode string, mediaIndex int, specified, galle
 		payload += `,"p":"` + n + `"`
 	}
 	if specified {
-		idx := mediaIndex
-		if idx < 0 {
-			idx = 0
-		}
-		payload += `,"n":` + strconv.Itoa(idx+1)
+		payload += `,"n":` + strconv.Itoa(mediaIndex+1)
 	}
 	if gallery {
 		payload += `,"g":1`

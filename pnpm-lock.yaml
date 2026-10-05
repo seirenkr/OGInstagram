@@ -23,6 +23,9 @@ importers:
       echarts:
         specifier: ^6.1.0
         version: 6.1.0
+      playwright-core:
+        specifier: 1.48.2
+        version: 1.48.2
       react:
         specifier: ^19.3.0
         version: 19.3.0
@@ -48,9 +51,6 @@ importers:
       eslint-plugin-react-hooks:
         specifier: ^7.1.1
         version: 7.1.1(eslint@10.12.0(jiti@2.7.0))
-      globals:
-        specifier: ^17.13.0
-        version: 17.13.0
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
@@ -63,12 +63,6 @@ importers:
       vite:
         specifier: ^8.3.2
         version: 8.3.2(esbuild@0.28.1)(jiti@2.7.0)
-
-  harvest:
-    dependencies:
-      playwright-core:
-        specifier: 1.48.2
-        version: 1.48.2
 
 packages:
 
@@ -1009,10 +1003,6 @@ packages:
   glob-parent@6.0.2:
     resolution: {integrity: sha512-XxwI8EOhVQgWp6iDL+3b0r86f4d6AX6zSU55HfB4ydCEuXLXc5FcYeOu+nnGftS4TEju/11rt4KJPTMgbfmv4A==}
     engines: {node: '>=10.13.0'}
-
-  globals@17.13.0:
-    resolution: {integrity: sha512-RwMTC61u7hrG3ZJMkZQOK4JLJrKS8QtoTii63EmWvFXHqycY9FObBJQCbsLxSO8kjKhWE5kV1GC+Vb1g3RI0Zg==}
-    engines: {node: '>=18'}
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
@@ -2463,8 +2453,6 @@ snapshots:
   glob-parent@6.0.2:
     dependencies:
       is-glob: 4.0.3
-
-  globals@17.13.0: {}
 
   graceful-fs@4.2.11: {}
 
