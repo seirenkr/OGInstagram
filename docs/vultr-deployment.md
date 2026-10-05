@@ -55,7 +55,7 @@ Compose는 `docker compose` plugin을 사용합니다. [Docker 공식 Compose �
 
 ## 2. 이미지는 다른 컴퓨터에서 빌드
 
-개발 컴퓨터에서 검사하고 서버 아키텍처(`linux/amd64`)용 이미지를 빌드한 뒤, 레지스트리 없이 SSH로 VM에 바로 적재합니다. 운영 VM에서는 빌드하지 않습니다. 이미지 태그와 앱 버전(`OG_VERSION`)은 같은 8자리 커밋 해시입니다. 커밋하지 않은 변경이 있으면 `pnpm run image:build`가 빌드를 거부하므로 먼저 커밋합니다.
+개발 컴퓨터에서 검사하고 서버 아키텍처(`linux/amd64`)용 이미지를 빌드한 뒤, 레지스트리 없이 SSH로 VM에 바로 적재합니다. 운영 VM에서는 빌드하지 않습니다. 이미지 태그와 앱 버전(`OG_VERSION`)은 같은 8자리 커밋 해시입니다. 커밋하지 않은 변경이나 `origin/main`에 없는 커밋이면 `pnpm run image:build`가 빌드를 거부하므로, PR을 `main`에 병합한 뒤 `main`에서 빌드합니다.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -206,7 +206,7 @@ sudo docker compose logs --tail 50 app cloudflared
 
 ## 6. 업데이트와 백업
 
-새 이미지를 적재하고 `.env`의 `OG_IMAGE`를 그 태그로 바꾼 뒤 `sudo sh tools/deploy.sh`를 실행합니다. 스크립트는 cloudflared만 pull하고, connector와 app을 멈춘 뒤 단일 instance로 재시작하고, healthcheck 후 쓰지 않는 이미지를 정리합니다. `/data`를 지우거나 새로 만들지 않습니다. 중단 후 최종 이미지를 배포하는 흐름을 유지하며 old Worker를 되살려 별도 budget으로 서비스하지 않습니다.
+새 이미지를 적재하고 `.env`의 `OG_IMAGE`를 그 태그로 바꾼 뒤 `sudo sh tools/deploy.sh`를 실행합니다. 스크립트는 cloudflared만 pull하고, connector와 app을 멈춘 뒤 단일 instance로 재시작하고, healthcheck 후 현재·직전 앱 이미지만 남기고 나머지를 정리합니다. 롤백은 출력된 직전 이미지로 `OG_IMAGE`를 되돌리고 스크립트를 다시 실행합니다. `/data`를 지우거나 새로 만들지 않습니다. 중단 후 최종 이미지를 배포하는 흐름을 유지하며 old Worker를 되살려 별도 budget으로 서비스하지 않습니다.
 
 ```bash
 sudo sh tools/backup.sh
@@ -216,7 +216,7 @@ df -h /opt/oginstagram
 
 Vultr 유료 자동백업은 기본으로 선택하지 않습니다. 선택할 경우 월요금에 20%가 추가되고 최근 2개 서버 백업을 보관합니다. [Vultr 자동백업](https://docs.vultr.com/vps-automatic-backups)
 
-앱의 Backup CLI는 존재하지 않는 대상 디렉터리에 SQLite `VACUUM INTO`로 consistent snapshot을 만들며 `state.sqlite`와 `budget.sqlite`를 보관합니다. 실행 중인 WAL 파일을 단순히 `cp`하는 방식 대신 이 명령을 사용합니다. 완료된 backup 디렉터리와 `.env`, Tunnel token을 **암호화하여 VM 외부 보관처로** 복사하고 recovery 시간을 기록합니다. 새 유료 저장소를 자동으로 추가하지 않습니다. state DB의 모델/metrics는 제한된 캐시이며 budget DB는 비용 보호 상태이므로 서로 다른 중요도로 다룹니다. 오래된 snapshot의 budget 잔액을 그대로 재사용하지 않습니다. 외부 보관처 복사와 확인이 끝난 백업은 `sudo rm -rf data/backups/<stamp>`로 VM에서 지웁니다. `tools/deploy.sh`는 정상 배포 뒤 쓰지 않는 Docker 이미지를 정리합니다. 예전 템플릿에서 복사한 `.env`에 `OG_VERSION`이 있으면 이미지에 넣은 버전을 덮어쓰므로 지웁니다(`PORT`·`DATA_DIR`·`ASSETS_DIR`·`TURNSTILE_HOSTNAMES`·`CLOUDFLARE_*`도 더 이상 쓰지 않습니다).
+앱의 Backup CLI는 존재하지 않는 대상 디렉터리에 SQLite `VACUUM INTO`로 consistent snapshot을 만들며 `state.sqlite`와 `budget.sqlite`를 보관합니다. 실행 중인 WAL 파일을 단순히 `cp`하는 방식 대신 이 명령을 사용합니다. 완료된 backup 디렉터리와 `.env`, Tunnel token을 **암호화하여 VM 외부 보관처로** 복사하고 recovery 시간을 기록합니다. 새 유료 저장소를 자동으로 추가하지 않습니다. state DB의 모델/metrics는 제한된 캐시이며 budget DB는 비용 보호 상태이므로 서로 다른 중요도로 다룹니다. 오래된 snapshot의 budget 잔액을 그대로 재사용하지 않습니다. 외부 보관처 복사와 확인이 끝난 백업은 `sudo rm -rf data/backups/<stamp>`로 VM에서 지웁니다. `tools/deploy.sh`는 정상 배포 뒤 현재·직전 앱 이미지를 제외한 Docker 이미지를 정리합니다. 예전 템플릿에서 복사한 `.env`에 `OG_VERSION`이 있으면 이미지에 넣은 버전을 덮어쓰므로 지웁니다(`PORT`·`DATA_DIR`·`ASSETS_DIR`·`TURNSTILE_HOSTNAMES`·`CLOUDFLARE_*`도 더 이상 쓰지 않습니다).
 
 ## 7. 복구
 

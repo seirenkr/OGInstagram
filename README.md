@@ -118,15 +118,17 @@ One Vultr High Frequency 1 GB VM (`vhf-1c-1gb`, New Jersey) runs Docker
 Compose: the app is capped at 1 CPU / 512 MiB and `cloudflared` at 128 MiB,
 with no host ports published. Images are built off the VM and loaded over
 SSH; the image tag and the app version are the 8-character commit hash
-(`pnpm run image:build` refuses to build an uncommitted tree; never add
-suffixes such as `-dirty` or timestamps).
+(`pnpm run image:build` refuses an uncommitted tree or a commit not on
+`origin/main`). [CONTRIBUTING.md](CONTRIBUTING.md) is the full branch, commit,
+release, and rollback process.
 
 ```bash
+git switch main && git pull --ff-only
 pnpm run check
 pnpm run image:build    # prints oginstagram:<hash>
 docker save oginstagram:<hash> | gzip -1 | ssh linuxuser@<vm> 'gunzip | sudo docker load'
 # on the VM: set OG_IMAGE=oginstagram:<hash> in /opt/oginstagram/.env, then
-sudo sh tools/deploy.sh # restart, healthcheck, prune old images
+sudo sh tools/deploy.sh # restart, healthcheck, keep current + previous image
 sudo sh tools/backup.sh # consistent SQLite snapshot under data/backups
 ```
 

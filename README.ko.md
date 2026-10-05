@@ -114,14 +114,17 @@ Discord / Telegram / 브라우저
 Vultr High Frequency 1 GB VM(`vhf-1c-1gb`, 뉴저지) 한 대에서 Docker Compose로
 실행합니다. 앱은 1 CPU / 512 MiB, `cloudflared`는 128 MiB로 제한하며 호스트
 포트는 공개하지 않습니다. 이미지는 VM 밖에서 빌드해 SSH로 적재하고, 이미지
-태그와 앱 버전은 8자리 커밋 해시입니다(커밋하지 않은 변경이 있으면 `pnpm run image:build`가 빌드를 거부하며, `-dirty`나 시각 같은 접미사를 붙이지 않습니다).
+태그와 앱 버전은 8자리 커밋 해시입니다(`pnpm run image:build`는 커밋하지 않은 변경이나
+`origin/main`에 없는 커밋이면 빌드를 거부합니다). 브랜치·커밋·릴리스·롤백 절차 전체는
+[CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다.
 
 ```bash
+git switch main && git pull --ff-only
 pnpm run check
 pnpm run image:build    # oginstagram:<해시> 출력
 docker save oginstagram:<해시> | gzip -1 | ssh linuxuser@<vm> 'gunzip | sudo docker load'
 # VM에서 /opt/oginstagram/.env의 OG_IMAGE=oginstagram:<해시>로 바꾼 뒤
-sudo sh tools/deploy.sh # 재시작, healthcheck, 예전 이미지 정리
+sudo sh tools/deploy.sh # 재시작, healthcheck, 현재·직전 이미지만 보관
 sudo sh tools/backup.sh # data/backups에 일관된 SQLite 스냅샷
 ```
 
