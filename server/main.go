@@ -70,11 +70,6 @@ func main() {
 		slog.Error("frontend assets unavailable", "error", err)
 		os.Exit(1)
 	}
-	if cfg.WorkerHubSignKey != "" || cfg.WorkerHubSignTS != "" {
-		if !seedSignCreds(cfg.WorkerHubSignKey, cfg.WorkerHubSignTS) {
-			slog.Warn("ignoring invalid WORKERHUB_SIGN_KEY/WORKERHUB_SIGN_TS override")
-		}
-	}
 	keys := cfg.OffloadSigningKeys
 	if keys == "" {
 		if keys, err = loadOrCreateOffloadKeys(cfg.DataDir); err != nil {

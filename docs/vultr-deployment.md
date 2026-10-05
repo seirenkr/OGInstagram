@@ -91,7 +91,7 @@ sudo chmod 0400 secrets/tunnel-token
 - `OFFLOAD_SIGNING_KEYS`: 비워 두면 첫 시작 때 `data/offload-signing-keys.json`(0600)을 만들어 계속 씁니다. 이 파일을 잃으면 이미 공유된 미디어 링크가 404가 되므로 백업에 포함합니다. 키를 교체할 때만 `OFFLOAD_SIGNING_KEYS='{"active":"new","keys":{"new":"…","old":"…"}}'`로 지정하고, 이전 키는 14일 뒤 제거합니다.
 - `PROXY_BUDGET_START_DATE`: 기본값은 시작한 날(UTC)입니다. 같은 proxy 계정을 쓰던 다른 배포에서 넘어올 때만 그 배포를 멈춘 뒤의 **다음 UTC 날짜**로 지정합니다. 이 날짜는 앞으로만 움직입니다.
 - `ADMIN_PURGE_TOKEN`: 설정하면 `POST /api/admin/purge`가 켜지고, 비우면 꺼집니다.
-- `WORKERHUB_SIGN_KEY`/`WORKERHUB_SIGN_TS`, `DISCORD_*_EMOJI_ID`: 기본값을 덮어쓸 때만 지정합니다.
+- `DISCORD_*_EMOJI_ID`: 기본값을 덮어쓸 때만 지정합니다.
 
 터널 token은 `.env`나 command argument 값으로 넣지 않습니다. Compose secret file만 connector에 mount하고 `--token-file /run/secrets/tunnel_token`으로 읽습니다. [Cloudflare 문서](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/)의 remotely managed tunnel용 token-file 옵션은 2025.4.0 이상에서 지원하며, [Compose secret](https://docs.docker.com/compose/how-tos/use-secrets/)은 파일로 mount됩니다. 이 token으로 앱 secret이나 Cloudflare API token을 대체하지 않습니다.
 
