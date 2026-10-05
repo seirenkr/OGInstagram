@@ -28,7 +28,7 @@ func TestProxyByteRefundDoesNotCrossLeaseBoundary(t *testing.T) {
 	}
 }
 
-func TestProxySessionContinuesPastFormerHourlyLimitAndHonorsCooldown(t *testing.T) {
+func TestProxySessionHonorsCooldown(t *testing.T) {
 	now := time.Now()
 	session := &Session{}
 	pool := &SessionPool{

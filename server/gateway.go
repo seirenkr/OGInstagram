@@ -41,6 +41,7 @@ type Gateway struct {
 	client *http.Client
 
 	accessLog *accessLog // nil disables access logging (tests)
+	metrics   chan metricEvent
 
 	statusMu   sync.Mutex
 	statusBody []byte
@@ -52,8 +53,28 @@ type clearanceLimit struct {
 	count int
 }
 
+type metricEvent struct {
+	category, errorType string
+	duration            time.Duration
+	status              int
+}
+
 func newGateway(cfg Config, app *App, home map[string]string) *Gateway {
-	return &Gateway{cfg: cfg, app: app, home: home, slots: make(chan struct{}, maxGatewayInFlight), rates: make(map[string]clearanceLimit), client: &http.Client{Timeout: 10 * time.Second}}
+	g := &Gateway{cfg: cfg, app: app, home: home, slots: make(chan struct{}, maxGatewayInFlight), rates: make(map[string]clearanceLimit),
+		client: &http.Client{Timeout: 10 * time.Second}, metrics: make(chan metricEvent, 256)}
+	go g.writeMetrics()
+	return g
+}
+
+// One writer keeps SQLite metric inserts off every response's critical path.
+func (g *Gateway) writeMetrics() {
+	for m := range g.metrics {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		if err := g.cfg.Store.RecordMetric(ctx, m.category, m.duration, m.status, m.errorType); err != nil {
+			slog.Warn("metric write failed", "error", err)
+		}
+		cancel()
+	}
 }
 
 func peerAddress(r *http.Request) netip.Addr {
@@ -196,8 +217,9 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	result := g.render(r, route)
-	g.recordMetric(r, route, result, time.Since(started))
-	w.Header().Set("Server-Timing", "origin;dur="+strconv.FormatFloat(float64(time.Since(started).Microseconds())/1000, 'f', 2, 64))
+	elapsed := time.Since(started)
+	g.recordMetric(r, route, result, elapsed)
+	w.Header().Set("Server-Timing", "origin;dur="+strconv.FormatFloat(float64(elapsed.Microseconds())/1000, 'f', 2, 64))
 	if route.offload && result.status == http.StatusFound && proxyOffloadMedia(w, r, result) {
 		return
 	}
@@ -547,10 +569,15 @@ func (g *Gateway) allowClearance(key string, now time.Time) bool {
 				delete(g.rates, k)
 			}
 		}
-		if len(g.rates) >= 4096 {
-			if _, exists := g.rates[key]; !exists {
-				return false
+		// Still full: evict the oldest window rather than lock out new visitors.
+		if _, exists := g.rates[key]; !exists && len(g.rates) >= 4096 {
+			oldest, oldestStart := "", now
+			for k, v := range g.rates {
+				if v.start.Before(oldestStart) {
+					oldest, oldestStart = k, v.start
+				}
 			}
+			delete(g.rates, oldest)
 		}
 	}
 	state.count++
@@ -602,10 +629,10 @@ func (g *Gateway) recordMetric(r *http.Request, route gatewayRoute, result resp,
 	if result.originStatus > 0 {
 		status = result.originStatus
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
-	defer cancel()
-	if err := g.cfg.Store.RecordMetric(ctx, route.category, duration, status, result.errorType); err != nil {
-		slog.Warn("metric write failed", "error", err)
+	// Metrics are best-effort: a full backlog drops the sample, never the response.
+	select {
+	case g.metrics <- metricEvent{category: route.category, errorType: result.errorType, duration: duration, status: status}:
+	default:
 	}
 }
 

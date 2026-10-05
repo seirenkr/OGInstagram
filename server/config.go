@@ -45,7 +45,7 @@ const (
 	oembedFallbackAt = requestTimeout - 500*time.Millisecond
 
 	rotateCooldown = 3 * time.Second
-	// Keep origin work bounded on the single small Vultr instance.
+	// Keep origin work bounded on a single small instance.
 	maxConcurrentFetches = 48
 
 	localPostCacheBytes    = 16 << 20

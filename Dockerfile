@@ -1,7 +1,3 @@
-# Obscura headless V8 (multi-arch: amd64/arm64) — bundled for in-container
-# HMAC key re-harvesting on external-helper signature rotation.
-FROM h4ckf0r0day/obscura@sha256:16c2131acc625cd9ee4f8b95215afa3478ac391b68cb27b584ed841c7267343e AS obscura
-
 # Base images are pinned by digest (Docker build best practices); bump tag and
 # digest together.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
@@ -23,8 +19,8 @@ COPY shared/ shared/
 COPY tools/build-home.mjs tools/build-home.mjs
 RUN pnpm run build
 
-# Real negotiated WebP/AVIF previews need ffmpeg; Obscura needs glibc.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+# Negotiated WebP/AVIF previews need ffmpeg.
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libwebp ' \
@@ -32,11 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data \
     && chown 65532:65532 /data
-COPY --from=obscura /obscura /app/obscura
 COPY --from=build /out/server /app/server
-# playwright-core (no dependencies) connects to the bundled Obscura over CDP.
-COPY --from=web /src/node_modules/playwright-core /app/harvest/node_modules/playwright-core
-COPY harvest/harvest.mjs /app/harvest/
 COPY --from=web /src/web/dist /app/web
 # Declared late so a new version does not invalidate the ffmpeg layer.
 ARG OG_VERSION=dev

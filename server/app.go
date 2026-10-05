@@ -83,25 +83,30 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	oembedTimer := time.AfterFunc(oembedHedgeDelay, startOembed)
 	defer oembedTimer.Stop()
 
-	post, persist, err = stagedFetch(stagedCtx,
-		stagedSource[Post]{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
+	sources := []stagedSource[Post]{
+		{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
 			return valid(a.fetchPostEmbed(ctx, shortcode))
 		}},
-		stagedSource[Post]{name: "post_graphql", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+		{name: "post_graphql", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
 			_, body, gqlErr := a.fetchViaProxy(ctx, webLoggedOutSpec(shortcode))
 			if gqlErr != nil {
 				return Post{}, gqlErr
 			}
 			return valid(parseInstagramPost(body))
 		}},
-		stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
-			helperPost, ok := externalHelperPostImpl(a, ctx, shortcode)
-			if !ok {
-				return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
-			}
-			return valid(helperPost, nil)
-		}},
-	)
+	}
+	if externalHelperPostImpl != nil {
+		sources = append(sources,
+			stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+				helperPost, ok := externalHelperPostImpl(a, ctx, shortcode)
+				if !ok {
+					return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
+				}
+				return valid(helperPost, nil)
+			}},
+		)
+	}
+	post, persist, err = stagedFetch(stagedCtx, sources...)
 	if err != nil {
 		startOembed()
 		var outcome oembedOutcome

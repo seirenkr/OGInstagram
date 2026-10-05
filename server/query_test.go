@@ -24,7 +24,7 @@ func TestCanonicalMediaIndexParsing(t *testing.T) {
 	}
 }
 
-func TestMediaSelectionMatchesWorkerCacheCases(t *testing.T) {
+func TestMediaSelectionSharedCases(t *testing.T) {
 	var cases []struct {
 		Query     string `json:"query"`
 		PathIndex *int   `json:"pathIndex"`

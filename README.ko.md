@@ -2,64 +2,30 @@
 
 [English](README.md) | **한국어**
 
-Discord, Telegram 등 링크 미리보기 봇에 미디어·캡션·통계가 담긴 미리보기를 보여 주는 Instagram 임베드 프록시입니다.
+Discord, Telegram 등 링크 미리보기 봇을 위한 Instagram 임베드 프록시입니다.
 
 ## 사용법
 
-`instagram.com`을 다음 호스트로 바꿉니다.
+게시물·릴스·프로필·스토리 링크의 `instagram.com`을 바꿉니다.
 
 | 호스트 | 임베드 |
 |--------|--------|
 | `oginstagram.com` | 작성자, 캡션, 통계, 미디어 |
-| `g.oginstagram.com` | 작성자와 미디어만 |
-| `d.oginstagram.com` | 미디어 직접 URL (프로필은 일반 임베드) |
+| `g.oginstagram.com` | 작성자, 미디어 |
+| `d.oginstagram.com` | 미디어 파일만 |
 
-지원 경로는 `/p/…`, `/reel/…`, `/reels/…`(앞에 `/username`을 붙여도 됨), `/username`, `/stories/username/…`입니다. 캐러셀 항목은 `?img_index=N` 또는 `/N`으로 고릅니다.
+캐러셀 항목은 `?img_index=N`으로 고릅니다. 비공개·연령 제한 게시물은 지원하지 않습니다.
 
-비공개 게시물, 연령 제한 게시물, 미국에서 볼 수 없는 게시물은 지원하지 않습니다.
-
-### Discord Component Embed
-
-Discordbot 요청은 Mastodon/ActivityPub 미리보기와 [Component Embed](https://github.com/discord/discord-api-docs/pull/8606)로 50:50 나뉩니다. Component Embed 중 절반에는 Ko-fi 후원 버튼이 붙습니다. Open Graph 태그는 대체용으로 남아 있습니다.
-
-- `?e=c`를 붙이면 Component Embed로, `?e=s`를 붙이면 후원 버튼까지 고정됩니다. Discord 미리보기 캐시를 우회하려면 파라미터를 하나 더 붙입니다(`&n=2`).
-- 어떤 형식이 나갔는지는 `X-OGInstagram-Embed` 헤더와 `discord embed served` 로그로 확인합니다.
-- 페이로드는 3,000바이트를 넘을 수 없어서 긴 캡션은 잘립니다.
-
-## 구조
-
-```text
-봇 → Cloudflare (WAF, Redirect Rules, Turnstile) → Tunnel → Vultr VM의 Go 앱 → SQLite (/data)
-```
-
-- **엣지:** Cloudflare가 브라우저는 Instagram으로 리다이렉트하고 검증되지 않은 클라이언트에는 challenge를 걸기 때문에, 임베드 경로에는 검증된 봇만 들어옵니다.
-- **게시물:** Instagram 임베드 페이지를 먼저 시도하고, 이어서 미국 주거용 프록시를 거쳐 GraphQL과 외부 helper를, 마지막으로 oEmbed를 시도합니다.
-- **프로필:** `web_profile_info`, 실패하면 프로필 임베드 페이지. **스토리:** 외부 helper만 사용합니다.
-- **미디어:** `/offload/*` 링크는 HMAC 서명(유효기간 14일)이 붙어 있고 Instagram CDN으로 리다이렉트합니다.
-- **프록시 예산:** 일별 바이트 한도(월 100 GB를 날짜 수로 나눔)를 DB에 저장해 재시작해도 유지합니다.
-
-## 배포
-
-릴리스는 [CONTRIBUTING.md](CONTRIBUTING.md)를 따릅니다. `main`에서만 빌드하고, 이미지 태그는 8자리 커밋 해시로 붙이며, 롤백용으로 직전 이미지를 남깁니다. 서버 준비, 비밀값, WAF 규칙, 백업과 복구는 [docs/vultr-deployment.md](docs/vultr-deployment.md)에 있습니다.
-
-## 개발
-
-Go 1.26, Node.js(`package.json`의 engines 참고), pnpm이 필요합니다.
+## 실행
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm run dev           # 프론트엔드 빌드 + :8080에서 Go 앱 실행
-pnpm run check         # lint, 타입, 테스트
+pnpm run dev     # http://localhost:8080
+pnpm run check   # lint, 타입, 테스트
 ```
 
-`PROXY_*`를 설정하지 않으면 직접 가져오는 임베드 페이지만 동작합니다. helper 키 재수집과 WebP/AVIF 미리보기에는 Obscura와 FFmpeg가 들어 있는 Docker 이미지가 필요합니다.
+운영 환경은 Cloudflare Tunnel 뒤에서 `compose.yaml`로 실행합니다(`secrets/tunnel-token`, UID 65532 소유의 `data/`). `.env.example`의 값만 채우면 되고 나머지는 기본값이 있습니다. 릴리스 절차는 [CONTRIBUTING.md](CONTRIBUTING.md)를 따릅니다.
 
-## 설정
+## 라이선스
 
-운영 `.env`에는 `OG_IMAGE`, `PROXY_USERNAME`, `PROXY_PASSWORD`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`만 넣으면 됩니다(`.env.example` 참고). 나머지는 모두 기본값이 있습니다. offload 서명 키는 첫 시작 때 `/data`에 자동으로 만들어집니다. 덮어쓸 수 있는 선택 항목은 [docs/vultr-deployment.md](docs/vultr-deployment.md)에 있습니다.
-
-## 감사의 말
-
-- [FxEmbed/FxEmbed](https://github.com/FxEmbed/FxEmbed)
-- [subzeroid/instagrapi](https://github.com/subzeroid/instagrapi)
-- [Wikidepia/InstaFix](https://github.com/Wikidepia/InstaFix)
+[LICENSE](LICENSE) · [서드파티 고지](THIRD_PARTY_NOTICES.md)
