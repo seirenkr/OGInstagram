@@ -394,8 +394,7 @@ func invalidOffloadResp() resp {
 }
 
 func offloadMediaIndex(segment string) (int, bool) {
-	raw := strings.TrimSuffix(segment, ".mp4")
-	n, ok := parseCanonicalDecimal(raw)
+	n, ok := parseCanonicalDecimal(segment)
 	if !ok || n < 1 || n > maxCachedMediaItems {
 		return 0, false
 	}

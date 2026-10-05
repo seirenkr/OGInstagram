@@ -5,15 +5,11 @@ node_modules
 **/node_modules
 **/.DS_Store
 web/dist
-npm-debug.log
 .env*
-.dev.vars*
 server/server
 server/oginstagram
 data
 backups
 secrets
 .local-data
-output
-tmp
 docs

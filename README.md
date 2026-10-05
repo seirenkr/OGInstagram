@@ -23,121 +23,124 @@ Append `?img_index=N` (or `/N` after the shortcode) to pick a carousel item.
 | User profile | `instagram.com/username` |
 | Stories | `instagram.com/stories/username/…` |
 
-Profile links embed the bio, follower stats, and a grid of recent posts.
+Profile links embed follower stats and a grid of recent posts.
 
 > [!NOTE]
 > Private posts, age-restricted posts, and posts unavailable in the United States are not supported.
 
+## Architecture
+
+```text
+Discord / Telegram / browsers
+  → Cloudflare (DNS, static CDN, WAF, Turnstile, Redirect Rules)
+  → Cloudflare Tunnel → cloudflared container
+  → Go app container on one Vultr VM (gateway, embeds, static web, media previews)
+  → SQLite in /data (model cache + metrics, separate proxy-budget ledger)
+```
+
+- **Edge:** browser navigations are sent to Instagram by Cloudflare Redirect
+  Rules before the WAF; unverified clients are challenged; only verified
+  bots reach the origin. The Go app keeps a minimal fallback for the same
+  `Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document` signal.
+  `www.d.` and `www.g.` are served by a stateless Cloudflare Worker that
+  308-redirects to `d.` and `g.` (second-level hosts only get a free
+  certificate through Workers Custom Domains).
+- **Posts:** the Instagram embed page (direct), then logged-out GraphQL and
+  an external helper (through US residential proxies), with oEmbed as the
+  last resort. Results race on a schedule, are validated before they win,
+  and are cached in memory and SQLite.
+- **Profiles:** `web_profile_info` (proxy), then the profile embed page.
+  **Stories:** external helper only.
+- **Media:** `/offload/*` links are HMAC-signed capabilities (14-day TTL)
+  that redirect to Instagram's CDN; the home page preview resizes images to
+  WebP/AVIF with FFmpeg.
+- **Proxy budget:** DataImpulse traffic has a durable daily byte cap of
+  `100,000,000,000 / days in the UTC month`, reserved in 1 MiB leases and
+  kept across restarts.
+
 ## Deployment
 
-The complete application runs on one **Vultr High Frequency 1 GB
-(`vhf-1c-1gb`) in New Jersey (`ewr`)**, with 1 shared vCPU, 1,024 MB RAM,
-32 GB NVMe, and 1,024 GB monthly transfer. The VM costs **$6/month before
-tax**, or an expected **$6.60 with 10% Korean VAT**. Automatic provider backup
-is optional and excluded by default; enabling it adds 20% ($7.20 before tax,
-$7.92 with Korean VAT). The app remains capped at **1 CPU and 512 MiB**, with
-128 MiB for `cloudflared`. Use one VM without paid addons. See the
-[official plan API](https://api.vultr.com/v2/plans) and
-[tax policy](https://docs.vultr.com/support/platform/billing/does-vultr-collect-vat-or-sales-tax).
-Cloudflare provides DNS, static asset CDN, WAF, Turnstile, and Tunnel ingress.
-The application does not require Workers, Containers, KV, Durable Objects, or
-Analytics Engine. Production deployment uses Docker Compose and a prebuilt
-image; build images away from the small VM.
+One Vultr High Frequency 1 GB VM (`vhf-1c-1gb`, New Jersey) runs Docker
+Compose: the app is capped at 1 CPU / 512 MiB and `cloudflared` at 128 MiB,
+with no host ports published. Images are built off the VM and loaded over
+SSH; the image tag and the app version are the 8-character commit hash
+(`-dirty` when the tree has uncommitted changes).
 
-Follow [the Vultr deployment and recovery guide](docs/vultr-deployment.md) for
-Ubuntu 24.04, secrets, all six public hostnames, the WAF and redirect rules, cold
-cutover, backups, and recovery. Deployment intentionally stops the old service
-before starting the replacement. There is one app process and one durable
-proxy-budget ledger.
+```bash
+pnpm run check
+pnpm run image:build    # prints oginstagram:<hash>
+docker save oginstagram:<hash> | gzip -1 | ssh linuxuser@<vm> 'gunzip | sudo docker load'
+# on the VM: set OG_IMAGE=oginstagram:<hash> in /opt/oginstagram/.env, then
+sudo sh tools/deploy.sh # restart, healthcheck, prune old images
+sudo sh tools/backup.sh # consistent SQLite snapshot under data/backups
+```
+
+The [Vultr deployment and recovery guide](docs/vultr-deployment.md) covers
+server setup, secrets, Tunnel hostnames, the live WAF and Redirect rules,
+cache ownership, backups, and recovery. There is one app process and one
+proxy-budget ledger; never run two app instances against the same `/data`.
 
 ## Development
 
-Requires Go 1.26, a supported Node.js version from `package.json`, and pnpm.
-Docker is needed to test the production image and its bundled Obscura/FFmpeg.
+Requires Go 1.26, Node.js (see `package.json` engines), and pnpm. Docker is
+needed to test the production image with its bundled Obscura and FFmpeg.
 
 ```bash
 pnpm install --frozen-lockfile
-cp .env.example .env
-# Set OFFLOAD_SIGNING_KEYS; proxy/helper credentials are optional locally.
-pnpm run dev       # build the frontend and serve the complete Go app on :8080
-pnpm run check     # frontend lint/types, browser URL tests, and Go tests
-pnpm run image:build
+cp .env.example .env   # set OFFLOAD_SIGNING_KEYS; proxy/helper credentials are optional
+pnpm run dev           # build the frontend and serve the Go app on :8080
+pnpm run check         # lint, type checks, route/preview tests, Go tests
 ```
 
-`pnpm run dev` uses `DEVELOPMENT=true`, a local data directory, localhost
-hostnames, and the current UTC date for a fresh local proxy budget. Production
-always uses `DEVELOPMENT=false`. Restart development after frontend edits;
-`pnpm run build` also builds the eight localized home pages and local emoji
-assets. The image includes a harvester runtime and real WebP/AVIF encoders;
-`go run` alone does not supply those executables.
+`pnpm run dev` sets `DEVELOPMENT=true`, localhost hosts, a local data
+directory, Cloudflare's always-pass Turnstile test site key, and today's UTC
+date as the budget start. Restart it after frontend edits. `go run` alone
+does not provide the harvester or the WebP/AVIF encoders; the image does.
 
 ## Configuration
 
-`.env.example` documents the production environment. Keep `.env` readable only
-by the deployment administrator and keep the Tunnel token in
-`secrets/tunnel-token`, not a command argument. `compose.yaml` mounts `/data`
-for persistent SQLite and `/tmp` as bounded temporary memory, runs UID 65532,
-and publishes no host ports; cloudflared reaches `app:8080` on the Compose network. Normal startup verifies that all
-eight localized home templates exist; storage maintenance commands do not
-require frontend assets. Partial proxy credentials are rejected in every mode.
+`.env.example` lists the production variables. Compose sets `PORT`,
+`DATA_DIR`, and `ASSETS_DIR`, and mounts the Tunnel token from
+`secrets/tunnel-token`. Keep `.env` readable only by the administrator.
 
 | Variables | Purpose |
 | --- | --- |
-| `BASE_URL`, `ALLOWED_HOSTS` | Canonical home URL and accepted public hosts |
-| `TRUSTED_PROXIES` | Exact connector IP allowed to supply Cloudflare client metadata |
-| `DATA_DIR`, `ASSETS_DIR` | SQLite directory and built frontend assets |
-| `PROXY_USERNAME`, `PROXY_PASSWORD` | Required together in production; development may omit both |
-| `PROXY_BUDGET_START_DATE` | Required earliest UTC day for a cold deployment's proxy use |
-| `OFFLOAD_SIGNING_KEYS` | New or explicitly selected JSON HMAC keyring for 14-day media links |
+| `OG_IMAGE`, `CLOUDFLARED_IMAGE` | Image tags Compose runs |
+| `BASE_URL`, `ALLOWED_HOSTS` | Canonical home URL and accepted public hosts (the `BASE_URL` host must be listed) |
+| `TRUSTED_PROXIES` | Exact `cloudflared` address; every other peer is rejected |
+| `PROXY_USERNAME`, `PROXY_PASSWORD` | DataImpulse credentials, required together in production |
+| `PROXY_BUDGET_START_DATE` | First UTC day this deployment may use the proxy; never move it backward |
+| `OFFLOAD_SIGNING_KEYS` | JSON HMAC keyring for `/offload` links |
 | `WORKERHUB_SIGN_KEY`, `WORKERHUB_SIGN_TS` | External-helper signing override; rotate together |
-| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | Preview pre-clearance widget and Siteverify |
-| `ADMIN_PURGE_TOKEN` | Bearer token for `POST /api/admin/purge` (local model and preview caches) |
+| `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | Home page preview widget and Siteverify |
+| `ADMIN_PURGE_TOKEN` | Bearer token for `POST /api/admin/purge` (local caches) |
 
-Models and the status page use bounded local SQLite storage. DataImpulse
-traffic has a durable daily byte cap of `100,000,000,000 / days in the UTC
-month`; unused capacity does not carry forward. The Go proxy transport counts
-all socket bytes and reserves 1 MiB leases. The proxy ledger survives restarts.
-Restoring an older backup must exhaust the current UTC day's budget before
-traffic resumes; see the recovery guide. Vultr's public media transfer is a
-separate allowance and cost.
-
-`OFFLOAD_SIGNING_KEYS` has this shape, with canonical unpadded base64url
-32-byte keys:
+`OFFLOAD_SIGNING_KEYS` uses canonical unpadded base64url 32-byte keys. New
+links are signed with `active`; any other key in `keys` still verifies, so
+keep a retired key for 14 days after rotating:
 
 ```json
-{"active":"2026-07","keys":{"2026-07":"<32-byte base64url key>"}}
+{"active":"2026-10","keys":{"2026-10":"<key>","2026-07":"<previous key>"}}
 ```
 
-Generate a fresh keyring for this deployment, or explicitly choose to reuse an
-existing one. Prior deployment links do not need to remain compatible.
-Unsigned, malformed, expired, or longer-lived `/offload` links return 404
-before the model or transformed image cache is consulted. Dynamic responses are
-`no-store`, so Cloudflare caches only static assets; no Cache Rule is needed.
+Unsigned, malformed, or expired `/offload` links return 404 before any cache
+lookup. Dynamic responses are `no-store`, so Cloudflare caches only static
+assets. Logs are JSON lines on stderr, rotated by Docker.
 
-The optional external helper and PP Mori files are intentionally closed-source.
-The tracked `server/external_helper.go` supplies the public fallback seam;
-when the private implementation is present, its package initializer installs
-the helper automatically. System font fallbacks cover absent PP Mori files.
-Pretendard and Pretendard JP use pinned 1.3.9 dynamic subsets from jsDelivr.
+The external helper and PP Mori fonts are closed-source. The tracked
+`server/external_helper.go` is the public fallback; a private implementation
+installs itself at init when present. System fonts replace absent PP Mori
+files; Pretendard comes from jsDelivr.
 
 ## Preview protection
 
-The browser posts `POST /api/embed` without a token and executes the existing
-Turnstile widget when `Cf-Mitigated: challenge` is returned. Its callback
-retries once with the generated token. The application Siteverifies supplied
-tokens and checks the action and that the hostname matches the request host. Later tokenless requests
-rely on Cloudflare's WAF validating pre-clearance before Tunnel ingress.
-The cookie hash is a rate-limit key, not an application authentication proof.
-
-Keep the widget's managed pre-clearance and this WAF Managed Challenge rule:
-
-```text
-http.request.method eq "POST" and http.request.uri.path eq "/api/embed"
-```
-
-Keep the origin private and `DEVELOPMENT=false`. Forged Cloudflare or internal
-headers from an untrusted peer must never authorize a production preview or
-origin media fetch.
+The home page posts `POST /api/embed` without a token. When Cloudflare answers
+`Cf-Mitigated: challenge`, the page runs the Turnstile widget (managed
+pre-clearance) and retries once with the token. The app Siteverifies the
+token, its action, and that its hostname matches the request host. The WAF
+rule `http.request.method eq "POST" and http.request.uri.path eq "/api/embed"`
+must stay a Managed Challenge. The `cf_clearance` hash is only a rate-limit
+key.
 
 ## Acknowledgements
 
