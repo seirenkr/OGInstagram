@@ -10,12 +10,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
 
-func (a *App) directGet(ctx context.Context, operation, rawURL string) (string, *AppError) {
-	return a.fetch(ctx, fetchSpec{
+func (a *App) directGet(ctx context.Context, operation, rawURL string) (out string, ferr *AppError) {
+	started := time.Now()
+	status := 0
+	defer func() {
+		logOutbound(ctx, operation, "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
+	}()
+	status, out, ferr = fetchRequest(ctx, http.DefaultClient, fetchSpec{
 		operation: operation,
 		method:    http.MethodGet,
 		url:       rawURL,
@@ -23,6 +29,7 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (string, 
 		headers:   map[string]string{"User-Agent": embedUA},
 		interpret: statusOnly,
 	})
+	return
 }
 
 func embedContextJSON(html string) (string, *AppError) {
@@ -124,14 +131,13 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 	}
 
 	return Post{
-		Shortcode:  firstGroup(simplePermalinkRE, page),
-		Username:   username,
-		OwnerID:    firstGroup(simpleOwnerIDRE, page),
-		FullName:   "",
-		ProfilePic: html.UnescapeString(cmp.Or(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page))),
-		Caption:    simpleCaption(page),
-		StatsLine: "❤️ " + fmtCount(parseCount(firstGroup(simpleLikesRE, page))) +
-			"  \U0001f4ac " + fmtCount(simpleCommentCount(page)),
+		Shortcode:   firstGroup(simplePermalinkRE, page),
+		Username:    username,
+		OwnerID:     firstGroup(simpleOwnerIDRE, page),
+		FullName:    "",
+		ProfilePic:  html.UnescapeString(cmp.Or(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page))),
+		Caption:     simpleCaption(page),
+		StatsLine:   statsLine("", parseCount(firstGroup(simpleLikesRE, page)), simpleCommentCount(page)),
 		Attachments: []Attachment{att},
 	}, nil
 }
@@ -239,14 +245,13 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 	}
 
 	return Post{
-		Shortcode:  sm.Get("shortcode").String(),
-		Username:   username,
-		OwnerID:    owner.Get("id").String(),
-		FullName:   owner.Get("full_name").String(),
-		ProfilePic: owner.Get("profile_pic_url").String(),
-		Caption:    sm.Get("edge_media_to_caption.edges.0.node.text").String(),
-		StatsLine: v1StatsPrefix(sm) + "❤️ " + fmtCount(uintOf(sm, "edge_liked_by.count")) +
-			"  \U0001f4ac " + fmtCount(uintOf(sm, "edge_media_to_comment.count")),
+		Shortcode:   sm.Get("shortcode").String(),
+		Username:    username,
+		OwnerID:     owner.Get("id").String(),
+		FullName:    owner.Get("full_name").String(),
+		ProfilePic:  owner.Get("profile_pic_url").String(),
+		Caption:     sm.Get("edge_media_to_caption.edges.0.node.text").String(),
+		StatsLine:   statsLine(v1StatsPrefix(sm), uintOf(sm, "edge_liked_by.count"), uintOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
 	}, nil
 }
@@ -269,10 +274,7 @@ func graphAttachment(n gjson.Result) (att Attachment, ok, blocked bool) {
 }
 
 func bestGraphImageURL(n gjson.Result) string {
-	if u := n.Get("display_url").String(); u != "" {
-		return u
-	}
-	return bestCandidateURL(n.Get("display_resources"))
+	return cmp.Or(n.Get("display_url").String(), bestCandidateURL(n.Get("display_resources")))
 }
 
 func (a *App) fetchProfileEmbed(ctx context.Context, username string) (Profile, *AppError) {

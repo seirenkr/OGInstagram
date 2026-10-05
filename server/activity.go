@@ -22,9 +22,6 @@ func emptyOrderedCollection(id string) []byte {
 }
 
 func noteObject(id string, attributedTo any, content, url, published string, attachment []any) []byte {
-	if attachment == nil {
-		attachment = []any{}
-	}
 	n := map[string]any{
 		"@context":     asContext,
 		"id":           id,
@@ -131,9 +128,7 @@ func (a *App) buildStoryActivityStatus(baseURL string, story Story, gallery bool
 
 func profileDigestContent(p Profile) string {
 	content := "<p><b>" + html.EscapeString(profileStatsLine(p)) + "</b></p>"
-	if bio := captionParagraphHTML(p.Biography); bio != "" {
-		content += bio
-	}
+	content += captionParagraphHTML(p.Biography)
 	if p.IsPrivate {
 		content += "<p>" + html.EscapeString(profilePrivateNotice) + "</p>"
 	}

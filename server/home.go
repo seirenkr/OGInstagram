@@ -1,15 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/json"
 	"html"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -41,13 +40,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("hl"); err == nil && homeLocales[cookie.Value] {
 		cookieLocale = cookie.Value
 	}
-	locale := forced
-	if locale == "" {
-		locale = cookieLocale
-	}
-	if locale == "" {
-		locale = resolveHomeLocale(r.Header.Get("Accept-Language"))
-	}
+	locale := cmp.Or(forced, cookieLocale, resolveHomeLocale(r.Header.Get("Accept-Language")))
 	nonce := rand.Text()
 	origin := base.Scheme + "://" + base.Host
 	canonical := origin + "/"
@@ -182,9 +175,6 @@ func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request) bool {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-	}
-	if contentType := mime.TypeByExtension(path.Ext(file)); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
 	}
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 	return true

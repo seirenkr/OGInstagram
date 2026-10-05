@@ -22,7 +22,6 @@ p { text-wrap: pretty; }
     radial-gradient(46% 50% at 56% 0%, rgb(255 122 0 / 0.11), transparent 70%),
     radial-gradient(64% 56% at 6% 94%, rgb(255 214 0 / 0.14), transparent 72%),
     radial-gradient(48% 48% at 44% 104%, rgb(211 0 197 / 0.09), transparent 70%);
-  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
   mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
 }
 
@@ -71,10 +70,7 @@ p { text-wrap: pretty; }
   animation-timing-function: ease-out;
 }
 
-@keyframes typewriter-caret-blink {
-  0%, 49.9%, 100% { opacity: 1; }
-  50%, 99.9% { opacity: 0; }
-}
+@keyframes typewriter-caret-blink { 50% { opacity: 0; } }
 
 @keyframes hero-line-in {
   from { transform: translateY(112%); }

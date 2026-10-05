@@ -4,13 +4,12 @@
 // We run the real signer inside a real V8 (passes the anti-tamper gate), hook crypto.subtle.importKey
 // to capture the raw key bytes, and read the fixed _ts from a controlled sign call.
 //
-// Usage: node harvest.mjs [ws://127.0.0.1:9222] <site-url>
+// Usage: node harvest.mjs <cdp-ws-url> <site-url>
 // Prints JSON: { key, fixedTs }
 
 import { chromium } from "playwright-core";
 
-const CDP = process.argv[2] || "ws://127.0.0.1:9222";
-const SITE = process.argv[3];
+const [, , CDP, SITE] = process.argv;
 if (!SITE) throw new Error("external-helper site URL is required");
 const log = (...a) => console.error("[harvest]", ...a);
 
@@ -49,7 +48,7 @@ try {
       try {
         const b = keyData instanceof ArrayBuffer ? new Uint8Array(keyData)
           : ArrayBuffer.isView(keyData) ? new Uint8Array(keyData.buffer, keyData.byteOffset, keyData.byteLength) : null;
-        if (b) keys.push({ hex: [...b].map(x => x.toString(16).padStart(2, "0")).join(""), algo: JSON.stringify(algo) });
+        if (b) keys.push({ hex: [...b].map(x => x.toString(16).padStart(2, "0")).join("") });
       } catch (e) { keys.push({ err: String(e) }); }
       return realImport(fmt, keyData, algo, ext, usages);
     };
@@ -61,9 +60,9 @@ try {
     return { keys, out };
   });
 
-  const keyHit = (result.keys || []).find(k => k.hex && /^[0-9a-f]{64}$/.test(k.hex));
+  const keyHit = result.keys.find(k => k.hex && /^[0-9a-f]{64}$/.test(k.hex));
   // Stderr reaches the server log: report candidate key lengths, never key bytes.
-  if (!keyHit) throw new Error("HMAC key not captured: " + JSON.stringify((result.keys || []).map(k => k.hex ? k.hex.length / 2 : k.err)));
+  if (!keyHit) throw new Error("HMAC key not captured: " + JSON.stringify(result.keys.map(k => k.hex ? k.hex.length / 2 : k.err)));
   const key = keyHit.hex;
   const fixedTs = result.out._ts;
 

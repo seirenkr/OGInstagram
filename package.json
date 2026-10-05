@@ -10,11 +10,9 @@
   "scripts": {
     "dev": "node tools/dev.mjs",
     "build": "vite build --config web/vite.config.ts && node tools/build-home.mjs",
-    "lint": "eslint web/src shared",
-    "check": "pnpm run lint && tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit && node --experimental-strip-types --test shared/routes.test.mjs web/src/preview-request.test.mjs && cd server && go test ./...",
-    "image:build": "v=$(git describe --always --dirty --abbrev=8) && docker buildx build --platform linux/amd64 --build-arg OG_VERSION=$v -t oginstagram:$v --load . && echo oginstagram:$v",
-    "deploy": "sh tools/deploy.sh",
-    "backup": "sh tools/backup.sh"
+    "lint": "eslint web/src",
+    "check": "pnpm run lint && tsc -p web/tsconfig.json --noEmit && node --experimental-strip-types --test shared/routes.test.mjs web/src/preview-request.test.mjs && cd server && go test ./...",
+    "image:build": "v=$(git describe --always --dirty --abbrev=8) && docker buildx build --platform linux/amd64 --build-arg OG_VERSION=$v -t oginstagram:$v --load . && echo oginstagram:$v"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.14.0",
@@ -22,6 +20,7 @@
     "@twemoji/parser": "15.0.0",
     "@twemoji/svg": "15.0.0",
     "echarts": "^6.1.0",
+    "playwright-core": "1.48.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
@@ -32,7 +31,6 @@
     "@types/react-dom": "^19.3.0",
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "globals": "^17.13.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.71.0",

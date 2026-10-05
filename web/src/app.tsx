@@ -7,7 +7,6 @@ import { LayerCard } from "@cloudflare/kumo/components/layer-card";
 import { DropdownMenu } from "@cloudflare/kumo/components/dropdown";
 import { Text } from "@cloudflare/kumo/components/text";
 import { Tooltip, TooltipProvider } from "@cloudflare/kumo/components/tooltip";
-import { KumoPortalProvider } from "@cloudflare/kumo/utils";
 import { CheckIcon as Check } from "@phosphor-icons/react/Check";
 import { ClockIcon as Clock } from "@phosphor-icons/react/Clock";
 import { CoffeeIcon as Coffee } from "@phosphor-icons/react/Coffee";
@@ -18,27 +17,20 @@ import { SunIcon as Sun } from "@phosphor-icons/react/Sun";
 import { TranslateIcon as Translate } from "@phosphor-icons/react/Translate";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { canonicalServiceHost } from "../../shared/routes.ts";
-import Preview, { HighlightedHost, type PreviewCopy } from "./preview.tsx";
+import type en from "../locales/en.json";
+import Preview, { HighlightedHost } from "./preview.tsx";
 import type { StatusCategory, StatusReport } from "./status.tsx";
 import { Tabs } from "@cloudflare/kumo/components/tabs";
 
 const StatusCharts = React.lazy(() => import("./status.tsx"));
-type Copy = {
-  successful: string; failed: string; restricted: string; ms: string;
-  noDataYet: string; statsUnavailable: string; skipToContent: string; timeUTC: string; language: string;
-};
 
-type AppData = {
-  brand: string; version: string; host: string; lang: string; tagline: string; hero: PreviewCopy; turnstileSiteKey: string;
-  supportUrl: string; supportCta: string; githubUrl: string; darkMode: string; lightMode: string;
-  usageH2: string; normalView: string; normalDesc: string; galleryView: string;
-  galleryDesc: string; directView: string; directDesc: string; supportedH2: string;
-  supportNote: string; posts: string; userProfile: string; reels: string; stories: string; all: string; beta: string;
-  statusH2: string; statusSub: string; requests: string; responseTime: string;
-  disclaimer: string; js: Copy;
+// Locale strings plus the fields tools/build-home.mjs merges in.
+type AppData = typeof en & {
+  brand: string; version: string; host: string; lang: string; turnstileSiteKey: string; supportUrl: string; githubUrl: string;
 };
 
 const data = JSON.parse(document.getElementById("app-data")!.textContent!) as AppData;
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const languages = { en: "English", es: "Español", fr: "Français", ja: "日本語", ko: "한국어", pt: "Português", "zh-hans": "简体中文", "zh-hant": "繁體中文" };
 
 class ChartBoundary extends React.Component<React.PropsWithChildren, { failed: boolean }> {
@@ -76,15 +68,15 @@ function UsageCard({ title, url, description }: { title: string; url: React.Reac
   </LayerCard>;
 }
 
-function ThemeToggle({ dark, reduceMotion, onChange }: { dark: boolean; reduceMotion: boolean; onChange: (dark: boolean) => void }) {
+function ThemeToggle({ dark, onChange }: { dark: boolean; onChange: (dark: boolean) => void }) {
   function setTheme(nextDark: boolean) {
     const apply = () => {
       document.documentElement.dataset.mode = nextDark ? "dark" : "light";
       localStorage.setItem("theme", nextDark ? "dark" : "light");
       onChange(nextDark);
     };
-    if (reduceMotion || !document.startViewTransition) apply();
-    else document.startViewTransition(apply);
+    if (document.startViewTransition) document.startViewTransition(apply);
+    else apply();
   }
 
   return <Tooltip content={dark ? data.lightMode : data.darkMode} side="bottom" render={
@@ -93,14 +85,12 @@ function ThemeToggle({ dark, reduceMotion, onChange }: { dark: boolean; reduceMo
   } />;
 }
 
-function App() {
+export function App() {
   const serviceHost = canonicalServiceHost(data.host);
-  const [reduceMotion] = useState(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
   const [dark, setDark] = useState(() => document.documentElement.dataset.mode === "dark");
   const [scrolled, setScrolled] = useState(false);
   const topSentinel = useRef<HTMLDivElement>(null);
   const statusSection = useRef<HTMLElement>(null);
-  const overlayPortal = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<StatusReport | null>(null);
   const [statusTab, setStatusTab] = useState<StatusCategory>("all");
   const [statusFailed, setStatusFailed] = useState(false);
@@ -147,9 +137,8 @@ function App() {
     return () => io.disconnect();
   }, []);
   const richParts = data.hero.line2.split("{rich}");
-  return <KumoPortalProvider container={overlayPortal}>
-    <TooltipProvider>
-    <div className="min-h-[100dvh] bg-kumo-base text-kumo-default">
+  return <TooltipProvider>
+    <div className="isolate min-h-[100dvh] bg-kumo-base text-kumo-default">
       <div ref={topSentinel} aria-hidden="true" className="absolute top-0 left-0 h-px w-full" />
       <a className="fixed top-2 left-2 z-50 -translate-y-[160%] rounded-lg bg-kumo-contrast text-kumo-base px-3 py-2 focus-visible:translate-y-0" href="#main-content">{data.js.skipToContent}</a>
       <header className="sticky top-0 z-40 -mb-12">
@@ -171,7 +160,7 @@ function App() {
               })}
             </DropdownMenu.Content>
           </DropdownMenu>
-          <ThemeToggle dark={dark} reduceMotion={reduceMotion} onChange={setDark} />
+          <ThemeToggle dark={dark} onChange={setDark} />
           </div>
         </div>
       </header>
@@ -248,12 +237,6 @@ function App() {
       <footer className="border-kumo-hairline border-t bg-kumo-recessed">
         <div className="max-w-[1200px] mx-auto px-8 max-sm:px-4 py-6 flex flex-col gap-2"><Text bold translate="no">{data.brand} ({data.version})</Text><Text variant="secondary" size="sm">{data.disclaimer}</Text></div>
       </footer>
-      <div ref={overlayPortal} className="relative z-60" />
     </div>
-    </TooltipProvider>
-  </KumoPortalProvider>;
-}
-
-export function Root() {
-  return <App />;
+  </TooltipProvider>;
 }

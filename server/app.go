@@ -95,7 +95,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			return valid(parseInstagramPost(body))
 		}},
 		stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
-			helperPost, ok := a.externalHelperPost(ctx, shortcode)
+			helperPost, ok := externalHelperPostImpl(a, ctx, shortcode)
 			if !ok {
 				return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
 			}

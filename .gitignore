@@ -11,6 +11,5 @@ web/public/PPMori-*.woff2
 server/external_helper_private.go
 server/external_helper_private_test.go
 data/
-backups/
 secrets/
 .local-data/

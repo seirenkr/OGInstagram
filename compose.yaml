@@ -29,12 +29,6 @@ services:
     networks:
       origin:
         ipv4_address: 172.30.0.2
-    healthcheck:
-      test: [CMD, /app/server, --healthcheck]
-      interval: 30s
-      timeout: 5s
-      start_period: 10s
-      retries: 3
     logging:
       driver: local
       options:

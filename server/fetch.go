@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -18,8 +19,8 @@ import (
 )
 
 // One outbound request. interpret turns the upstream status and body into an
-// AppError (nil accepts it); it runs inside fetch so the deferred log still
-// sees the final error.
+// AppError (nil accepts it); it runs inside fetchRequest so the deferred log
+// still sees the final error.
 type fetchSpec struct {
 	operation string
 	method    string
@@ -37,12 +38,7 @@ func statusOnly(status int, _ []byte) *AppError {
 	return nil
 }
 
-func fetchRequest(
-	ctx context.Context,
-	client *http.Client,
-	spec fetchSpec,
-	requestError func(error, string) *AppError,
-) (status int, out string, ferr *AppError) {
+func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (status int, out string, ferr *AppError) {
 	var reader io.Reader
 	if spec.body != "" {
 		reader = strings.NewReader(spec.body)
@@ -77,18 +73,6 @@ func fetchRequest(
 		return status, "", err
 	}
 	return status, string(raw), nil
-}
-
-func (a *App) fetch(ctx context.Context, spec fetchSpec) (out string, ferr *AppError) {
-	started := time.Now()
-	upstreamStatus := 0
-	defer func() {
-		logOutbound(ctx, spec.operation, "direct", spec.method, spec.url, started, upstreamStatus, len(out), ferr, false)
-	}()
-	upstreamStatus, out, ferr = fetchRequest(ctx, http.DefaultClient, spec, func(err error, fallback string) *AppError {
-		return causedErr(502, errorCodeConnection, fallback, err)
-	})
-	return
 }
 
 func webLoggedOutSpec(shortcode string) fetchSpec {
@@ -137,9 +121,6 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 		err     *AppError
 	}
 	var zero T
-	if len(sources) == 0 {
-		return zero, false, ephemeralErr(http.StatusBadGateway, errorCodeConnection, "no sources configured")
-	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	results := make(chan result, len(sources))
@@ -225,50 +206,29 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	return zero, false, lastErr
 }
 
-func proxyRequestError(err error, fallback string) *AppError {
-	switch proxyBudgetErrorCode(err) {
-	case errorCodeBudgetExhausted:
-		return ephemeralErr(503, errorCodeBudgetExhausted, "daily proxy bandwidth budget reached")
-	case errorCodeBudgetBackend:
-		return ephemeralErr(503, errorCodeBudgetBackend, "daily proxy bandwidth budget is temporarily unavailable")
-	default:
-		return causedErr(502, errorCodeConnection, fallback, err)
+func requestError(err error, fallback string) *AppError {
+	if code := proxyBudgetErrorCode(err); code != "" {
+		return budgetAppError(code)
 	}
+	return causedErr(502, errorCodeConnection, fallback, err)
 }
 
 func logOutbound(ctx context.Context, operation, session, method, rawURL string, started time.Time, status, bytes int, appErr *AppError, sessionRotated bool) {
-	endpoint := rawURL
-	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
-		endpoint = endpoint[:i]
+	if (appErr == nil && mathrand.IntN(100) != 0) || (appErr != nil && appErr.Status == 499) {
+		return
 	}
-	parsedEndpoint, _ := url.Parse(endpoint)
-	host, path := parsedEndpoint.Hostname(), parsedEndpoint.Path
-	ms := time.Since(started).Milliseconds()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		u = &url.URL{}
+	}
+	attrs := []any{"operation", operation, "method", method, "host", u.Hostname(), "path", u.Path,
+		"session", session, "duration_ms", time.Since(started).Milliseconds()}
 	if appErr == nil {
-		if mathrand.IntN(100) != 0 {
-			return
-		}
-		logger(ctx).InfoContext(ctx, "outbound request completed",
-			"operation", operation, "method", method, "host", host,
-			"path", path, "status", status, "session", session,
-			"duration_ms", ms, "bytes", bytes)
+		logger(ctx).InfoContext(ctx, "outbound request completed", append(attrs, "status", status, "bytes", bytes)...)
 		return
 	}
-	if appErr.Status == 499 {
-		return
-	}
-	attrs := []any{
-		"operation", operation,
-		"method", method,
-		"host", host,
-		"path", path,
-		"app_status", appErr.Status,
-		"session", session,
-		"duration_ms", ms,
-		"error_type", appErr.errorType(),
-		"error", appErr.logMessage(),
-		"session_rotated", sessionRotated,
-	}
+	attrs = append(attrs, "app_status", appErr.Status, "error_type", appErr.errorType(),
+		"error", appErr.logMessage(), "session_rotated", sessionRotated)
 	if status > 0 {
 		attrs = append(attrs, "status", status)
 	}
@@ -285,11 +245,8 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 	}
 	s, pickReason := a.pool.pick(ctx)
 	if s == nil {
-		switch pickReason {
-		case errorCodeBudgetBackend:
-			return 0, "", ephemeralErr(503, errorCodeBudgetBackend, "daily proxy bandwidth budget is temporarily unavailable")
-		case errorCodeBudgetExhausted:
-			return 0, "", ephemeralErr(503, errorCodeBudgetExhausted, "daily proxy bandwidth budget reached")
+		if pickReason == errorCodeBudgetBackend || pickReason == errorCodeBudgetExhausted {
+			return 0, "", budgetAppError(pickReason)
 		}
 		if len(a.pool.sessions) == 0 {
 			return 0, "", igErr(503, errorCodeConnection, "Instagram proxy sessions are not configured")
@@ -312,18 +269,15 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 		}
 	}()
 
-	return fetchRequest(ctx, s.getClient(), spec, proxyRequestError)
+	return fetchRequest(ctx, s.getClient(), spec)
 }
 
 func instagramJSON(status int, raw []byte) *AppError {
 	body := string(raw)
 	if status >= 400 {
-		msg := ""
+		msg := http.StatusText(status)
 		if gjson.Valid(body) {
-			msg = strings.TrimSpace(gjson.Get(body, "message").String())
-		}
-		if msg == "" {
-			msg = http.StatusText(status)
+			msg = cmp.Or(strings.TrimSpace(gjson.Get(body, "message").String()), msg)
 		}
 		code := errorCodeUpstream
 		switch status {
@@ -348,19 +302,10 @@ func instagramJSON(status int, raw []byte) *AppError {
 	}
 	parsed := gjson.Parse(body)
 	if parsed.Get("status").String() == "fail" {
-		msg := strings.TrimSpace(parsed.Get("message").String())
-		if msg == "" {
-			msg = "Instagram request failed"
-		}
+		msg := cmp.Or(strings.TrimSpace(parsed.Get("message").String()), "Instagram request failed")
 		return causedErr(502, errorCodeGraphQL, "Instagram request failed", errors.New(msg))
 	}
 	return nil
-}
-
-func (c Config) oembedURL(shortcode string) string {
-	q := url.Values{}
-	q.Set("url", instagramOrigin+"/p/"+shortcode+"/")
-	return instagramOrigin + "/api/v1/oembed/?" + q.Encode()
 }
 
 type oembedOutcome struct {
@@ -371,7 +316,8 @@ type oembedOutcome struct {
 
 func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
 	status, body, err := a.fetchViaProxy(ctx, fetchSpec{
-		operation: "oembed", method: http.MethodGet, url: a.cfg.oembedURL(shortcode), subject: "Instagram",
+		operation: "oembed", method: http.MethodGet, subject: "Instagram",
+		url: instagramOrigin + "/api/v1/oembed/?" + url.Values{"url": {instagramOrigin + "/p/" + shortcode + "/"}}.Encode(),
 		headers: map[string]string{
 			"User-Agent":  instagramAppUA,
 			"Accept":      "*/*",

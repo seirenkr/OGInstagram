@@ -67,12 +67,15 @@ func parseOffloadSigner(raw string) (offloadSigner, error) {
 	return offloadSigner{active: config.Active, keys: keys}, nil
 }
 
-func offloadSignatureInput(keyID, path string, expires int64) []byte {
-	return []byte("oginstagram-offload-capability\n" +
+// offloadMAC is shared by signing and authorize, so both hash the same input.
+func offloadMAC(key []byte, keyID, path string, expires int64) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte("oginstagram-offload-capability\n" +
 		"v=" + offloadSignatureVersion + "\n" +
 		"kid=" + keyID + "\n" +
 		"exp=" + strconv.FormatInt(expires, 10) + "\n" +
-		"path=" + path + "\n")
+		"path=" + path + "\n"))
+	return mac.Sum(nil)
 }
 
 func (s offloadSigner) signature(path string, expires int64) string {
@@ -80,22 +83,15 @@ func (s offloadSigner) signature(path string, expires int64) string {
 	if len(key) != offloadSigningKeySize {
 		panic("offload signer is not configured")
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write(offloadSignatureInput(s.active, path, expires))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString(offloadMAC(key, s.active, path, expires))
 }
 
 func (s offloadSigner) url(baseURL, path string, thumbnail bool) string {
-	query := ""
-	if thumbnail {
-		query = "thumbnail=1"
-	}
 	expires := time.Now().Add(offloadCapabilityTTL).Unix()
-	signature := s.signature(path, expires)
-	if query != "" {
-		query += "&"
+	query := "v=" + offloadSignatureVersion + "&kid=" + s.active +
+		"&exp=" + strconv.FormatInt(expires, 10) + "&sig=" + s.signature(path, expires)
+	if thumbnail {
+		query = "thumbnail=1&" + query
 	}
-	query += "v=" + offloadSignatureVersion + "&kid=" + s.active +
-		"&exp=" + strconv.FormatInt(expires, 10) + "&sig=" + signature
 	return strings.TrimRight(baseURL, "/") + path + "?" + query
 }

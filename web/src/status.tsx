@@ -6,6 +6,7 @@ import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import { AriaComponent, AxisPointerComponent, GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import { SVGRenderer } from "echarts/renderers";
+import type en from "../locales/en.json";
 
 echarts.use([LineChart, AxisPointerComponent, GridComponent, LegendComponent, TooltipComponent, AriaComponent, SVGRenderer]);
 
@@ -14,7 +15,7 @@ const chartEcharts = {
   init: (dom: Parameters<typeof echarts.init>[0], theme?: Parameters<typeof echarts.init>[1], options?: Parameters<typeof echarts.init>[2]) => {
     const chart = echarts.init(dom, theme, { ...options, renderer: "svg" });
     const fontFamily = getComputedStyle(document.documentElement).getPropertyValue("--font-sans").trim();
-    chart.setOption({ useUTC: false, textStyle: { fontFamily } });
+    chart.setOption({ textStyle: { fontFamily } });
     return chart;
   },
 } as typeof echarts;
@@ -38,23 +39,15 @@ type StatusChartsProps = {
   lang: string;
   requests: string;
   responseTime: string;
-  copy: {
-    successful: string;
-    failed: string;
-    restricted: string;
-    ms: string;
-    noDataYet: string;
-    timeUTC: string;
-  };
+  copy: typeof en.js;
 };
+
+type Series = { name: string; color: string; values: number[] };
 
 const EMPTY_VALUES: number[] = [];
 
-function sum(values: number[] = []) { return values.reduce((total, value) => total + value, 0); }
-function latest(values: number[] = []) { return values.length ? values[values.length - 1] : 0; }
-function incompleteAfter(times: number[]): { after: number } | undefined {
-  return times.length >= 2 ? { after: times[times.length - 2] * 1000 } : undefined;
-}
+function sum(values: number[]) { return values.reduce((total, value) => total + value, 0); }
+function latest(values: number[]) { return values.length ? values[values.length - 1] : 0; }
 
 function useSeriesIsolation(dark: boolean, series: { name: string }[]) {
   const chartRef = useRef<echarts.ECharts>(null);
@@ -72,89 +65,56 @@ function useSeriesIsolation(dark: boolean, series: { name: string }[]) {
   return { chartRef, isolated, toggle };
 }
 
+function SeriesCard({ title, series, legendValue, ariaDescription, times, loading, dark, xAxisName, noDataYet }: {
+  title: string;
+  series: Series[];
+  legendValue: (values: number[]) => string;
+  ariaDescription: string;
+  times: number[];
+  loading: boolean;
+  dark: boolean;
+  xAxisName: string;
+  noDataYet: string;
+}) {
+  const data = useMemo(() => series.map(({ name, color, values }) => ({
+    name, color, data: times.map((time, index) => [time * 1000, values[index] ?? 0] as [number, number]),
+  })), [series, times]);
+  const { chartRef, isolated, toggle } = useSeriesIsolation(dark, series);
+  return <GridItem className="min-w-0"><LayerCard>
+    <LayerCard.Secondary>{title}</LayerCard.Secondary>
+    <LayerCard.Primary>
+      <div className="flex flex-wrap gap-4">
+        {series.map(({ name, color, values }) => <ChartLegend.SmallItem key={name} name={name} color={color} value={legendValue(values)}
+          inactive={isolated !== null && isolated !== name} onClick={() => toggle(name)} />)}
+      </div>
+      {!loading && !times.length ? <div className="min-h-[300px] grid place-items-center text-kumo-subtle text-[13px]">{noDataYet}</div> :
+        <TimeseriesChart ref={chartRef} echarts={chartEcharts} isDarkMode={dark} data={data}
+          height={300} xAxisName={xAxisName} incomplete={times.length >= 2 ? { after: times[times.length - 2] * 1000 } : undefined}
+          loading={loading} enableLegendSelection ariaDescription={ariaDescription} />}
+    </LayerCard.Primary>
+  </LayerCard></GridItem>;
+}
+
 export default function StatusCharts({ status, dark, lang, requests, responseTime, copy }: StatusChartsProps) {
-  const times = status?.t ?? EMPTY_VALUES;
-  const resolved = status?.resolved ?? EMPTY_VALUES;
-  const restricted = status?.restricted ?? EMPTY_VALUES;
-  const failed = status?.failed ?? EMPTY_VALUES;
-  const p50 = status?.p50 ?? EMPTY_VALUES;
-  const p90 = status?.p90 ?? EMPTY_VALUES;
-  const p99 = status?.p99 ?? EMPTY_VALUES;
   const numberFormatter = useMemo(() => new Intl.NumberFormat(lang, { maximumFractionDigits: 0 }), [lang]);
   const format = (value: number) => numberFormatter.format(Math.round(value));
   const chartTimeLabel = copy.timeUTC.replace("UTC",
     new Intl.DateTimeFormat(undefined, { timeZoneName: "shortOffset" })
       .formatToParts().find((part) => part.type === "timeZoneName")?.value || "UTC");
-  const successColor = ChartPalette.semantic("Success", dark);
-  const restrictedColor = ChartPalette.semantic("Warning", dark);
-  const errorColor = ChartPalette.semantic("Attention", dark);
-  const p50Color = ChartPalette.categorical(0, dark);
-  const p90Color = ChartPalette.categorical(1, dark);
-  const p99Color = ChartPalette.categorical(2, dark);
   const requestSeries = useMemo(() => [
-    { name: copy.successful, color: successColor, data: times.map((time, index) => [time * 1000, resolved[index] ?? 0] as [number, number]) },
-    { name: copy.restricted, color: restrictedColor, data: times.map((time, index) => [time * 1000, restricted[index] ?? 0] as [number, number]) },
-    { name: copy.failed, color: errorColor, data: times.map((time, index) => [time * 1000, failed[index] ?? 0] as [number, number]) },
-  ], [times, resolved, restricted, failed, copy.successful, copy.restricted, copy.failed, successColor, restrictedColor, errorColor]);
-  const {
-    chartRef: requestsChartRef, isolated: isolatedRequest, toggle: toggleRequestSeries,
-  } = useSeriesIsolation(dark, requestSeries);
-
-  const percentileSeries = useMemo(() => [
-    {
-      name: "P50",
-      data: times.map((time, index) => [time * 1000, p50[index] ?? 0] as [number, number]),
-      color: p50Color,
-    },
-    {
-      name: "P90",
-      data: times.map((time, index) => [time * 1000, p90[index] ?? 0] as [number, number]),
-      color: p90Color,
-    },
-    {
-      name: "P99",
-      data: times.map((time, index) => [time * 1000, p99[index] ?? 0] as [number, number]),
-      color: p99Color,
-    },
-  ], [times, p50, p90, p99, p50Color, p90Color, p99Color]);
-  const {
-    chartRef: percentileChartRef, isolated: isolatedPercentile, toggle: togglePercentileSeries,
-  } = useSeriesIsolation(dark, percentileSeries);
+    { name: copy.successful, color: ChartPalette.semantic("Success", dark), values: status?.resolved ?? EMPTY_VALUES },
+    { name: copy.restricted, color: ChartPalette.semantic("Warning", dark), values: status?.restricted ?? EMPTY_VALUES },
+    { name: copy.failed, color: ChartPalette.semantic("Attention", dark), values: status?.failed ?? EMPTY_VALUES },
+  ], [status, dark, copy]);
+  const percentileSeries = useMemo(() => (["p50", "p90", "p99"] as const).map((key, index) => ({
+    name: key.toUpperCase(), color: ChartPalette.categorical(index, dark), values: status?.[key] ?? EMPTY_VALUES,
+  })), [status, dark]);
+  const card = { times: status?.t ?? EMPTY_VALUES, loading: status === null, dark, xAxisName: chartTimeLabel, noDataYet: copy.noDataYet };
 
   return <Grid variant="2up" gap="base">
-    <GridItem className="min-w-0"><LayerCard>
-      <LayerCard.Secondary>{requests}</LayerCard.Secondary>
-      <LayerCard.Primary>
-        <div className="flex flex-wrap gap-4">
-          <ChartLegend.SmallItem name={copy.successful} color={successColor} value={format(sum(resolved))}
-            inactive={isolatedRequest !== null && isolatedRequest !== copy.successful} onClick={() => toggleRequestSeries(copy.successful)} />
-          <ChartLegend.SmallItem name={copy.restricted} color={restrictedColor} value={format(sum(restricted))}
-            inactive={isolatedRequest !== null && isolatedRequest !== copy.restricted} onClick={() => toggleRequestSeries(copy.restricted)} />
-          <ChartLegend.SmallItem name={copy.failed} color={errorColor} value={format(sum(failed))}
-            inactive={isolatedRequest !== null && isolatedRequest !== copy.failed} onClick={() => toggleRequestSeries(copy.failed)} />
-        </div>
-        {status !== null && !times.length ? <div className="min-h-[300px] grid place-items-center text-kumo-subtle text-[13px]">{copy.noDataYet}</div> :
-          <TimeseriesChart ref={requestsChartRef} echarts={chartEcharts} isDarkMode={dark} data={requestSeries}
-            height={300} xAxisName={chartTimeLabel} incomplete={incompleteAfter(times)}
-            loading={status === null} enableLegendSelection ariaDescription={`${copy.successful}, ${copy.restricted}, ${copy.failed}`} />}
-      </LayerCard.Primary>
-    </LayerCard></GridItem>
-    <GridItem className="min-w-0"><LayerCard>
-      <LayerCard.Secondary>{responseTime}</LayerCard.Secondary>
-      <LayerCard.Primary>
-        <div className="flex flex-wrap gap-4">
-          <ChartLegend.SmallItem name="P50" color={p50Color} value={format(latest(p50))} unit={copy.ms}
-            inactive={isolatedPercentile !== null && isolatedPercentile !== "P50"} onClick={() => togglePercentileSeries("P50")} />
-          <ChartLegend.SmallItem name="P90" color={p90Color} value={format(latest(p90))} unit={copy.ms}
-            inactive={isolatedPercentile !== null && isolatedPercentile !== "P90"} onClick={() => togglePercentileSeries("P90")} />
-          <ChartLegend.SmallItem name="P99" color={p99Color} value={format(latest(p99))} unit={copy.ms}
-            inactive={isolatedPercentile !== null && isolatedPercentile !== "P99"} onClick={() => togglePercentileSeries("P99")} />
-        </div>
-        {status !== null && !times.length ? <div className="min-h-[300px] grid place-items-center text-kumo-subtle text-[13px]">{copy.noDataYet}</div> :
-          <TimeseriesChart ref={percentileChartRef} xAxisName={chartTimeLabel} echarts={chartEcharts} isDarkMode={dark} data={percentileSeries} height={300}
-            loading={status === null} incomplete={incompleteAfter(times)}
-            enableLegendSelection ariaDescription={`${responseTime}: ${percentileSeries.map(({ name }) => name).join(", ")}`} />}
-      </LayerCard.Primary>
-    </LayerCard></GridItem>
+    <SeriesCard {...card} title={requests} series={requestSeries} legendValue={(values) => format(sum(values))}
+      ariaDescription={`${copy.successful}, ${copy.restricted}, ${copy.failed}`} />
+    <SeriesCard {...card} title={responseTime} series={percentileSeries} legendValue={(values) => format(latest(values))}
+      ariaDescription={`${responseTime}: ${percentileSeries.map(({ name }) => name).join(", ")}`} />
   </Grid>;
 }

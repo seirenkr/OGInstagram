@@ -277,6 +277,9 @@ func TestProxyBudgetExhaustionAndBackendFailuresFailClosed(t *testing.T) {
 	if _, reason := p.reserveProxyBytes(1); reason != errorCodeBudgetExhausted {
 		t.Fatalf("memoized exhaustion reason=%s", reason)
 	}
+	if session, reason := p.pick(context.Background()); session != nil || reason != errorCodeBudgetExhausted {
+		t.Fatalf("exhausted budget pick=%v,%s", session, reason)
+	}
 	for _, store := range []*localStore{nil, newTestStore(t)} {
 		if store != nil {
 			_ = store.budget.Close()

@@ -21,7 +21,17 @@ func testGateway(t *testing.T) *Gateway {
 	t.Helper()
 	store := newTestStore(t)
 	cfg := Config{BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com", "g.oginstagram.com", "d.oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, Store: store, TurnstileSecretKey: "test", AdminPurgeToken: "admin-test"}
-	return newGateway(cfg, newApp(cfg, newSessionPool(cfg), mustOffloadSigner(testOffloadSigningKeys)), store, nil)
+	return newGateway(cfg, newApp(cfg, newSessionPool(cfg), mustOffloadSigner(testOffloadSigningKeys)), nil)
+}
+
+// serveApp is Gateway.render without the gateway's admission checks and timeout.
+func serveApp(t *testing.T, a *App, r *http.Request) resp {
+	t.Helper()
+	route, ok := resolveGatewayRoute(r)
+	if !ok {
+		t.Fatalf("%s %s not routed", r.Host, r.URL)
+	}
+	return route.handle(a, r)
 }
 
 func publicRequest(method, path string) *http.Request {
@@ -86,26 +96,58 @@ func TestGatewayWebFingerUsesValidatedHost(t *testing.T) {
 }
 
 func TestGatewayBotHumanGalleryDirectRoutes(t *testing.T) {
+	g := testGateway(t)
+	exp := time.Now().Add(time.Hour)
+	var media []Attachment
+	for _, name := range []string{"1", "2", "3"} {
+		media = append(media, Attachment{Kind: "image", URL: "https://scontent.cdninstagram.com/" + name + ".jpg"})
+	}
+	cdn := "https://scontent.cdninstagram.com/"
+	media[1].Thumbnail = cdn + "t2.jpg"
+	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: Post{Shortcode: "ABC123", Username: "alice", Caption: "caption", ProfilePic: cdn + "pa.jpg", Attachments: media}, expiresAt: exp})
+	g.app.profiles.storeLocal("alice", &cacheEntry[Profile]{value: Profile{Username: "alice", Biography: "bio", ProfilePic: cdn + "a.jpg", RecentMedia: []ProfileMedia{{Thumbnail: cdn + "r1.jpg"}}}, expiresAt: exp})
+	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", Caption: "story caption", ProfilePic: cdn + "sa.jpg", Media: Attachment{Kind: "image", URL: cdn + "s.jpg"}}, expiresAt: exp})
+	// Direct hosts and offload paths redirect to the media; gallery hosts (never a
+	// client query) blank the description. Offload signatures are checked in ServeHTTP.
 	for _, tt := range []struct {
-		host, path, wantPath, redirect, category string
+		host, path, redirect, category, location string
 		gallery                                  bool
 	}{
-		{"oginstagram.com", "/p/ABC123", "/p/ABC123", "https://www.instagram.com/p/ABC123/", "posts", false},
-		{"g.oginstagram.com", "/alice/p/ABC123/2?__gallery=bad", "/alice/p/ABC123/2", "https://www.instagram.com/p/ABC123/?img_index=2", "posts", true},
-		{"d.oginstagram.com", "/reel/ABC123?img_index=3", "/offload/ABC123/3", "", "posts", false},
-		{"d.oginstagram.com", "/stories/Alice/123", "/offload/story/alice/123", "", "stories", false},
-		{"d.test.example", "/p/ABC123", "/offload/ABC123/1", "", "posts", false},
-		{"www.g.test.example", "/p/ABC123", "/p/ABC123", "https://www.instagram.com/p/ABC123/", "posts", true},
-		{"oginstagram.com", "/alice?__gallery=1", "/alice", "https://www.instagram.com/alice/", "profile", false},
+		{"oginstagram.com", "/p/ABC123", "https://www.instagram.com/p/ABC123/", "posts", "", false},
+		{"g.oginstagram.com", "/alice/p/ABC123/2?__gallery=bad", "https://www.instagram.com/p/ABC123/?img_index=2", "posts", "", true},
+		{"d.oginstagram.com", "/reel/ABC123?img_index=3", "", "posts", "https://scontent.cdninstagram.com/3.jpg", false},
+		{"d.oginstagram.com", "/stories/Alice/123", "", "stories", "https://scontent.cdninstagram.com/s.jpg", false},
+		{"g.oginstagram.com", "/stories/alice/123", storyOriginURL("alice", "123"), "stories", "", true},
+		{"d.test.example", "/p/ABC123", "", "posts", "https://scontent.cdninstagram.com/1.jpg", false},
+		{"www.g.test.example", "/p/ABC123", "https://www.instagram.com/p/ABC123/", "posts", "", true},
+		{"oginstagram.com", "/alice?__gallery=1", "https://www.instagram.com/alice/", "profile", "", false},
+		{"g.oginstagram.com", "/alice", "https://www.instagram.com/alice/", "profile", "", true},
+		{"oginstagram.com", "/offload/ABC123/2", "", "", cdn + "2.jpg", false},
+		{"oginstagram.com", "/offload/ABC123/2?thumbnail=1", "", "", cdn + "t2.jpg", false},
+		{"oginstagram.com", "/offload/ABC123/avatar", "", "", cdn + "pa.jpg", false},
+		{"oginstagram.com", "/offload/@Alice/1", "", "", cdn + "r1.jpg", false},
+		{"oginstagram.com", "/offload/@alice", "", "", cdn + "a.jpg", false},
+		{"oginstagram.com", "/offload/story/alice/123/avatar", "", "", cdn + "sa.jpg", false},
 	} {
 		r := publicRequest("GET", tt.path)
 		r.Host = tt.host
 		got, ok := resolveGatewayRoute(r)
-		if !ok || got.path != tt.wantPath || got.humanRedirect != tt.redirect || got.category != tt.category || (got.query.Get("__gallery") == "1") != tt.gallery {
+		if !ok || got.humanRedirect != tt.redirect || got.category != tt.category {
 			t.Fatalf("route %s %s = %+v,%v", tt.host, tt.path, got, ok)
 		}
+		res := got.handle(g.app, r)
+		if tt.location != "" {
+			if res.status != 302 || res.headers["Location"] != tt.location {
+				t.Fatalf("direct %s %s = %d %v", tt.host, tt.path, res.status, res.headers)
+			}
+		} else if res.status != 200 || strings.Contains(string(res.body), `name="description" content=""`) != tt.gallery {
+			t.Fatalf("render %s %s = %d %.400s", tt.host, tt.path, res.status, res.body)
+		}
 	}
-	g := testGateway(t)
+	// In range for the URL, but past what the profile actually has.
+	if res := serveApp(t, g.app, publicRequest("GET", "/offload/@alice/2")); res.status != 404 {
+		t.Fatalf("missing profile media = %d", res.status)
+	}
 	// Only browser document navigations are humans; the User-Agent is irrelevant.
 	r := publicRequest("GET", "/p/ABC123/2/")
 	r.Header.Set("User-Agent", "Mozilla/5.0 [LinkedInApp]")
@@ -160,7 +202,7 @@ func TestGatewayOffloadAuthBeforeWarmModel(t *testing.T) {
 	g := testGateway(t)
 	post := Post{Shortcode: "ABC123", Username: "alice", Attachments: []Attachment{{URL: "https://scontent.cdninstagram.com/photo.jpg", Kind: "image"}}}
 	data, _ := json.Marshal(cachePayload[Post]{Value: post})
-	if err := g.store.putModel(context.Background(), "post", "ABC123", data, time.Now().Add(time.Hour)); err != nil {
+	if err := g.cfg.Store.putModel(context.Background(), "post", "ABC123", data, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	signed := g.app.offloadSigner.url("https://oginstagram.com", "/offload/ABC123/1", false)
@@ -328,11 +370,11 @@ func TestPreviewExtendsWriteDeadlineForSiteverify(t *testing.T) {
 func TestAdminPurgeAuthenticatesAndPreservesBudget(t *testing.T) {
 	g := testGateway(t)
 	ctx := context.Background()
-	if _, _, err := g.store.takeBudget(ctx, time.Now()); err != nil {
+	if _, _, err := g.cfg.Store.takeBudget(ctx, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	remaining := remainingDailyBudget(t, g.store)
-	if err := g.store.putModel(ctx, "post", "ABC123", []byte(`{}`), time.Now().Add(time.Hour)); err != nil {
+	remaining := remainingDailyBudget(t, g.cfg.Store)
+	if err := g.cfg.Store.putModel(ctx, "post", "ABC123", []byte(`{}`), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{expiresAt: time.Now().Add(time.Hour)})
@@ -357,13 +399,13 @@ func TestAdminPurgeAuthenticatesAndPreservesBudget(t *testing.T) {
 	if _, ok := g.app.posts.localGet("ABC123"); ok {
 		t.Fatal("L1 retained purged model")
 	}
-	if _, _, err := g.store.getModel(ctx, "post", "ABC123"); !errors.Is(err, sql.ErrNoRows) {
+	if _, _, err := g.cfg.Store.getModel(ctx, "post", "ABC123"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("L2 retained purged model: %v", err)
 	}
 	if _, ok := previewCache.get("purge-test"); ok {
 		t.Fatal("transformed media retained")
 	}
-	if remainingDailyBudget(t, g.store) != remaining {
+	if remainingDailyBudget(t, g.cfg.Store) != remaining {
 		t.Fatal("cache purge reset proxy budget")
 	}
 }

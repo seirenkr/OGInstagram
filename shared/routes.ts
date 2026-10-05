@@ -1,62 +1,32 @@
-type EmbedRoute = {
-  postType: string;
-  shortcode: string;
-  pathIndex: number | null;
-};
+type EmbedRoute = { pathIndex: number | null };
 
 const shortcodePattern = /^[A-Za-z0-9_-]{1,24}$/;
-
-function validShortcode(value: string): boolean {
-  return shortcodePattern.test(value);
-}
 
 const usernamePattern = /^[A-Za-z0-9._]{1,30}$/;
 
 const storyIdPattern = /^[0-9]{1,32}$/;
 
 const maxPostMediaItems = 50;
-function validUsername(value: string): boolean {
-  return usernamePattern.test(value);
+
+function isStoriesPath(segments: string[]): boolean {
+  return segments.length === 3 && segments[0] === "stories" && usernamePattern.test(segments[1]) && storyIdPattern.test(segments[2]);
 }
 
-function parseStoriesSegments(segments: string[]): { username: string; storyId: string } | null {
-  if (segments.length === 3 && segments[0] === "stories" && validUsername(segments[1]) && storyIdPattern.test(segments[2])) {
-    return { username: segments[1], storyId: segments[2] };
-  }
-  return null;
-}
-
+// Accepts /{p|reel|reels}/{shortcode}[/{index}] with an optional leading /{username}.
 function parseEmbedSegments(segments: string[]): EmbedRoute | null {
-  if ((segments.length === 2 || segments.length === 3) && isPostRouteType(segments[0]) && validShortcode(segments[1])) {
-    const pathIndex = optionalPathIndex(segments, 2);
-    if (pathIndex === undefined) {
-      return null;
+  for (const offset of [0, 1]) {
+    const length = segments.length - offset;
+    if ((length === 2 || length === 3) && isPostRouteType(segments[offset]) && shortcodePattern.test(segments[offset + 1])) {
+      if (length === 2) return { pathIndex: null };
+      const pathIndex = parseCanonicalDecimal(segments[offset + 2]);
+      return pathIndex === null ? null : { pathIndex };
     }
-    return { postType: normalizePostType(segments[0]), shortcode: segments[1], pathIndex };
-  }
-  if ((segments.length === 3 || segments.length === 4) && isPostRouteType(segments[1]) && validShortcode(segments[2])) {
-    const pathIndex = optionalPathIndex(segments, 3);
-    if (pathIndex === undefined) {
-      return null;
-    }
-    return { postType: normalizePostType(segments[1]), shortcode: segments[2], pathIndex };
   }
   return null;
-}
-
-function normalizePostType(value: string): string {
-  return value === "reel" || value === "reels" ? "reel" : "p";
 }
 
 function isPostRouteType(value: string): boolean {
   return value === "p" || value === "reel" || value === "reels";
-}
-
-function optionalPathIndex(segments: string[], index: number): number | null | undefined {
-  if (segments.length <= index) {
-    return null;
-  }
-  return parseCanonicalDecimal(segments[index]) ?? undefined;
 }
 
 export function parseCanonicalDecimal(value: string): number | null {
@@ -121,8 +91,8 @@ export function validEmbedPath(path: string): boolean {
       || (imgIndex !== null && imgIndex > 0 && imgIndex <= maxPostMediaItems);
   }
   return query.length === 0 && (
-    parseStoriesSegments(segments) !== null
-    || (segments.length === 1 && validUsername(segments[0]))
+    isStoriesPath(segments)
+    || (segments.length === 1 && usernamePattern.test(segments[0]))
   );
 }
 
@@ -154,7 +124,7 @@ export function mastodonStatusPathFromAlternate(href: string, origin: string): s
       url.origin !== new URL(origin).origin
       || segments.length !== 4
       || segments[0] !== "users"
-      || !validUsername(segments[1])
+      || !usernamePattern.test(segments[1])
       || segments[2] !== "statuses"
       || !/^\d{1,256}$/.test(segments[3])
     ) {

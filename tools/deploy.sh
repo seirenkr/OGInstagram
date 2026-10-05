@@ -12,6 +12,5 @@ docker compose pull cloudflared
 # One application instance owns the SQLite state and proxy budget.
 docker compose stop cloudflared app
 docker compose up -d --wait --wait-timeout 90
-docker compose exec -T app /app/server --healthcheck
 # Superseded images otherwise accumulate on the 32 GB disk that holds /data.
 docker image prune -af

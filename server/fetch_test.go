@@ -173,3 +173,8 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
+	logOutbound(context.Background(), "op", "direct", http.MethodGet, "https://example.com/p#%zz", time.Now(), 0, 0,
+		causedErr(502, errorCodeConnection, "boom", errors.New("boom")), false)
+}

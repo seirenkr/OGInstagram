@@ -106,7 +106,8 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(mediaWriteTimeout))
 	format := preferredPreviewFormat(r.Header.Get("Accept"))
 	cacheKey := target.String() + "|" + strconv.Itoa(width) + "|" + format
-	if width > 0 && r.Header.Get("Range") == "" {
+	transform := r.Header.Get("Range") == ""
+	if transform {
 		if cached, ok := previewCache.get(cacheKey); ok {
 			writeMediaPreview(w, r, cached)
 			return true
@@ -114,7 +115,6 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), mediaTransferTimeout)
 	defer cancel()
-	transform := width > 0 && r.Header.Get("Range") == ""
 	// At most one decoded image and one encoder process can exist on a 1 GiB VM.
 	// Busy requests still stream the original CDN representation.
 	if transform {
@@ -135,7 +135,7 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 	}
 	defer upstream.Body.Close()
 	if upstream.StatusCode == http.StatusRequestedRangeNotSatisfiable {
-		setMediaHeaders(w.Header(), upstream.Header, width > 0, r)
+		setMediaHeaders(w.Header(), upstream.Header, r)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return true
@@ -143,8 +143,7 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 	if !safeMediaContentType(upstream.Header.Get("Content-Type")) {
 		return false
 	}
-	if transform && upstream.StatusCode == http.StatusOK && strings.HasPrefix(strings.ToLower(upstream.Header.Get("Content-Type")), "image/") &&
-		(upstream.ContentLength < 0 || upstream.ContentLength <= maxPreviewBytes) {
+	if transform && upstream.StatusCode == http.StatusOK && (upstream.ContentLength < 0 || upstream.ContentLength <= maxPreviewBytes) {
 		body, readErr := io.ReadAll(io.LimitReader(upstream.Body, maxPreviewBytes+1))
 		if readErr != nil {
 			return false
@@ -160,7 +159,7 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 		}
 		// Unsupported formats, oversized images, or unavailable encoders retain
 		// their actual representation and Content-Type instead of relabeling data.
-		setMediaHeaders(w.Header(), upstream.Header, width > 0, r)
+		setMediaHeaders(w.Header(), upstream.Header, r)
 		if len(body) <= maxPreviewBytes {
 			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		} else {
@@ -175,7 +174,7 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 		}
 		return true
 	}
-	setMediaHeaders(w.Header(), upstream.Header, width > 0, r)
+	setMediaHeaders(w.Header(), upstream.Header, r)
 	w.WriteHeader(upstream.StatusCode)
 	if r.Method != http.MethodHead {
 		_, _ = io.Copy(w, upstream.Body)
@@ -261,7 +260,7 @@ func safeMediaContentType(value string) bool {
 	return strings.HasPrefix(mediaType, "image/") && mediaType != "image/svg+xml"
 }
 
-func setMediaHeaders(target, source http.Header, preview bool, r *http.Request) {
+func setMediaHeaders(target, source http.Header, r *http.Request) {
 	for _, name := range []string{"Content-Type", "Content-Length", "Content-Range", "Content-Encoding", "Accept-Ranges", "ETag", "Last-Modified"} {
 		if value := source.Get(name); value != "" {
 			target.Set(name, value)
@@ -287,9 +286,7 @@ func setMediaHeaders(target, source http.Header, preview bool, r *http.Request) 
 	// Verification must run for every signed capability, including CDN hits.
 	target.Set("Cloudflare-CDN-Cache-Control", "no-store")
 	target.Set("Cross-Origin-Resource-Policy", "cross-origin")
-	if preview {
-		target.Set("Vary", "Accept")
-	}
+	target.Set("Vary", "Accept")
 }
 
 func preferredPreviewFormat(accept string) string {
@@ -378,40 +375,34 @@ func encodeModernPreview(parent context.Context, pngBody []byte, format string) 
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-filter_threads", "1", "-filter_complex_threads", "1", "-threads", "1", "-f", "image2pipe", "-c:v", "png", "-i", "pipe:0", "-frames:v", "1", "-an", "-threads", "1"}
-	var output limitedMediaBuffer
-	if format == "webp" {
-		args = append(args, "-c:v", "libwebp", "-quality", "80", "-f", "webp", "pipe:1")
-		command := exec.CommandContext(ctx, "ffmpeg", args...)
-		command.Stdin = bytes.NewReader(pngBody)
-		command.Stdout = &output
-		command.Stderr = io.Discard
-		if err := command.Run(); err != nil {
+	name := "" // AVIF output file; WebP streams to stdout
+	if format == "avif" {
+		// The AVIF muxer requires a seekable output, unlike WebP's stream muxer.
+		f, err := os.CreateTemp("", "oginstagram-preview-*.avif")
+		if err != nil {
 			return nil, err
 		}
+		name = f.Name()
+		f.Close()
+		defer os.Remove(name)
+		args = append(args, "-c:v", "libaom-av1", "-cpu-used", "8", "-crf", "35", "-still-picture", "1", "-pix_fmt", "yuv420p", "-f", "avif", "-y", name)
+	} else {
+		args = append(args, "-c:v", "libwebp", "-quality", "80", "-f", "webp", "pipe:1")
+	}
+	var output limitedMediaBuffer
+	command := exec.CommandContext(ctx, "ffmpeg", args...)
+	command.Stdin = bytes.NewReader(pngBody)
+	command.Stdout = &output
+	if err := command.Run(); err != nil {
+		return nil, err
+	}
+	if name == "" {
 		if output.Len() == 0 {
 			return nil, errors.New("empty WebP encoding")
 		}
 		return output.Bytes(), nil
 	}
-	if format != "avif" {
-		return nil, errors.New("unsupported preview encoding")
-	}
-	// The AVIF muxer requires a seekable output, unlike WebP's stream muxer.
-	f, err := os.CreateTemp("", "oginstagram-preview-*.avif")
-	if err != nil {
-		return nil, err
-	}
-	name := f.Name()
-	f.Close()
-	defer os.Remove(name)
-	args = append(args, "-c:v", "libaom-av1", "-cpu-used", "8", "-crf", "35", "-still-picture", "1", "-pix_fmt", "yuv420p", "-f", "avif", "-y", name)
-	command := exec.CommandContext(ctx, "ffmpeg", args...)
-	command.Stdin = bytes.NewReader(pngBody)
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	if err := command.Run(); err != nil {
-		return nil, err
-	}
-	f, err = os.Open(name)
+	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +482,7 @@ func (c *mediaPreviewCache) put(key string, entry previewMedia) {
 }
 
 func writeMediaPreview(w http.ResponseWriter, r *http.Request, entry previewMedia) {
-	setMediaHeaders(w.Header(), http.Header{"Content-Type": {entry.contentType}}, true, r)
+	setMediaHeaders(w.Header(), http.Header{"Content-Type": {entry.contentType}}, r)
 	checksum := sha256.Sum256(entry.body)
 	w.Header().Set("ETag", `"`+hex.EncodeToString(checksum[:])+`"`)
 	http.ServeContent(w, r, "preview", time.Time{}, bytes.NewReader(entry.body))

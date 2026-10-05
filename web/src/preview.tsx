@@ -4,23 +4,10 @@ import { Input } from "@cloudflare/kumo/components/input";
 import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { PlayIcon as Play } from "@phosphor-icons/react/Play";
 import { parse as parseEmoji } from "@twemoji/parser";
+import { version as twemojiVersion } from "@twemoji/svg/package.json";
 import { canonicalServiceHost, instagramEmbedPath, mastodonStatusPathFromAlternate } from "../../shared/routes.ts";
-import { continueCurrentAttempt, requestPreview } from "./preview-request.ts";
-
-export type PreviewCopy = {
-  line1: string;
-  line2: string;
-  rich: string;
-  channel: string;
-  placeholder: string;
-  invalid: string;
-  fetchError: string;
-  rateLimited: string;
-  submit: string;
-  previewDesc: string;
-  you: string;
-  videoUnavailable: string;
-};
+import type en from "../locales/en.json";
+import { requestPreview } from "./preview-request.ts";
 
 declare global {
   interface Window {
@@ -66,14 +53,14 @@ type PreviewProps = {
   brand: string;
   host: string;
   lang: string;
-  copy: PreviewCopy;
+  copy: typeof en.hero;
   turnstileSiteKey: string;
   reduceMotion: boolean;
 };
 
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onloadTurnstileCallback";
 const STATS_EMOJI_RE = /❤️|💬|📝|👤|▶️/;
-const TWEMOJI_BASE = "/twemoji/v15.0.0/";
+const TWEMOJI_BASE = `/twemoji/v${twemojiVersion}/`;
 let turnstileReady: Promise<void> | null = null;
 
 function loadTurnstile(): Promise<void> {
@@ -115,27 +102,27 @@ function TwemojiImage({ text, url }: { text: string; url: string }) {
 }
 
 const TwemojiText = React.memo(function TwemojiText({ children }: { children: string }) {
-  const emojis = useMemo(() => parseEmoji(children, {
-    buildUrl: (codepoints) => codepoints ? `${TWEMOJI_BASE}${codepoints}.svg` : "",
-  }), [children]);
+  const emojis = parseEmoji(children, { buildUrl: (codepoints) => `${TWEMOJI_BASE}${codepoints}.svg` });
   if (!emojis.length) return children;
   const parts: React.ReactNode[] = [];
   let cursor = 0;
   for (const emoji of emojis) {
     const [start, end] = emoji.indices;
     if (start > cursor) parts.push(children.slice(cursor, start));
-    if (emoji.url) {
-      parts.push(<TwemojiImage key={`${start}-${emoji.text}`} text={emoji.text} url={emoji.url} />);
-    } else {
-      parts.push(emoji.text);
-    }
+    // A lone U+FE0F parses with an empty url; keep it as text.
+    parts.push(emoji.url ? <TwemojiImage key={`${start}-${emoji.text}`} text={emoji.text} url={emoji.url} /> : emoji.text);
     cursor = end;
   }
   if (cursor < children.length) parts.push(children.slice(cursor));
   return <>{parts}</>;
 });
 
-function normalizePreviewUrl(raw: string, serviceHost: string): string | undefined {
+function previewMediaUrl(
+  raw: string,
+  serviceHost: string,
+  video = false,
+  variant: "media" | "avatar" = "media"
+): string | undefined {
   if (!raw) return undefined;
   let url: URL;
   try { url = new URL(raw, location.origin); } catch { return undefined; }
@@ -147,18 +134,6 @@ function normalizePreviewUrl(raw: string, serviceHost: string): string | undefin
   } else if (url.hostname.endsWith(".fbcdn.net") || url.hostname.endsWith(".cdninstagram.com")) {
     url.hostname = "scontent.cdninstagram.com";
   }
-  return url.href;
-}
-
-function previewMediaUrl(
-  raw: string,
-  serviceHost: string,
-  video = false,
-  variant: "media" | "avatar" = "media"
-): string | undefined {
-  const normalized = normalizePreviewUrl(raw, serviceHost);
-  if (!normalized) return undefined;
-  const url = new URL(normalized);
   if (url.origin === location.origin && url.pathname.startsWith("/offload/")) {
     url.searchParams.set("preview", variant === "avatar" ? "avatar" : "1");
     if (video) url.searchParams.set("thumbnail", "1");
@@ -210,11 +185,7 @@ async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHos
     account?: { url?: unknown; avatar?: unknown };
   };
   if (typeof status.content !== "string") throw new Error("invalid Mastodon status");
-  let captionNodes: React.ReactNode[] | undefined;
-  if (status.content) {
-    const nodes = renderStatusContent(status.content);
-    if (nodes.length) captionNodes = nodes;
-  }
+  const captionNodes = status.content ? renderStatusContent(status.content) : [];
   const media = Array.isArray(status.media_attachments) ? status.media_attachments.flatMap((raw): PreviewMedia[] => {
     if (!raw || typeof raw !== "object") return [];
     const item = raw as Record<string, unknown>;
@@ -236,7 +207,7 @@ async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHos
     authorIconUrl: typeof account?.avatar === "string"
       ? previewMediaUrl(account.avatar, serviceHost, false, "avatar")
       : undefined,
-    captionNodes,
+    captionNodes: captionNodes.length ? captionNodes : undefined,
     media: media.length ? media : undefined,
     date: previewDate(status.created_at, dateFormatter),
   };
@@ -472,12 +443,10 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
         const attempt = ++verificationAttempt.current;
         pendingPath.current = path;
         setVerifying(true);
-        void continueCurrentAttempt(
-          loadTurnstile(),
-          () => verificationAttempt.current === attempt && pendingPath.current === path,
-          executeTurnstile,
-          failVerification,
-        );
+        const current = () => verificationAttempt.current === attempt && pendingPath.current === path;
+        void loadTurnstile()
+          .then(() => { if (current()) executeTurnstile(); })
+          .catch(() => { if (current()) failVerification(); });
         return;
       }
       setError(reason instanceof Error && reason.message === "rate-limited" ? copy.rateLimited : copy.fetchError);
@@ -563,7 +532,7 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
           {previewActive && !reduceMotion && typewriterState !== "done" ? <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-3 right-3 flex items-center overflow-hidden whitespace-pre text-base text-kumo-default">
             <span className="relative inline-block max-w-full">
               <span ref={typewriterText} className="typewriter-text block truncate">{`https://${baseHost}${samplePost.path}`}</span>
-              <span ref={typewriterCaret} className={`typewriter-caret absolute top-[0.1em] left-[0.2em] inline-block h-[1em] w-[2px] bg-kumo-brand ${typewriterState === "paused" ? "typewriter-caret-blink" : ""}`} />
+              <span ref={typewriterCaret} className={`absolute top-[0.1em] left-[0.2em] inline-block h-[1em] w-[2px] bg-kumo-brand ${typewriterState === "paused" ? "typewriter-caret-blink" : ""}`} />
             </span>
           </span> : null}
         </div>

@@ -11,12 +11,3 @@ export async function requestPreview(path: string, token: string | undefined, si
   if (response.headers.get("cf-mitigated") === "challenge") throw new Error("cloudflare-challenge");
   return response;
 }
-
-export async function continueCurrentAttempt(loading: Promise<void>, current: () => boolean, next: () => void, fail: () => void): Promise<void> {
-  try {
-    await loading;
-    if (current()) next();
-  } catch {
-    if (current()) fail();
-  }
-}

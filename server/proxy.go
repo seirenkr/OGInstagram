@@ -14,10 +14,8 @@ import (
 type Session struct {
 	name string
 
-	mu        sync.Mutex
-	proxyURL  string
-	client    *http.Client
-	sessionID string
+	mu     sync.Mutex
+	client *http.Client
 
 	ewmaMs        float64
 	hasEWMA       bool
@@ -45,7 +43,11 @@ func (e *proxyBudgetError) Error() string {
 	if e.code == errorCodeBudgetExhausted {
 		return "daily proxy bandwidth budget reached"
 	}
-	return "proxy bandwidth budget is temporarily unavailable"
+	return "daily proxy bandwidth budget is temporarily unavailable"
+}
+
+func budgetAppError(code string) *AppError {
+	return ephemeralErr(503, code, (&proxyBudgetError{code}).Error())
 }
 
 func proxyBudgetErrorCode(err error) string {
@@ -61,58 +63,35 @@ type budgetedConn struct {
 	pool *SessionPool
 }
 
-func (c *budgetedConn) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return c.Conn.Read(p)
-	}
-	leaseExpires, code := c.pool.reserveProxyBytes(int64(len(p)))
-	if code != "" {
-		_ = c.Conn.Close()
-		return 0, &proxyBudgetError{code: code}
-	}
-	n, err := c.Conn.Read(p)
-	c.pool.refundProxyBytes(int64(len(p)-n), leaseExpires)
-	return n, err
-}
+func (c *budgetedConn) Read(p []byte) (int, error)  { return c.metered(p, c.Conn.Read) }
+func (c *budgetedConn) Write(p []byte) (int, error) { return c.metered(p, c.Conn.Write) }
 
-func (c *budgetedConn) Write(p []byte) (int, error) {
+// Reserve len(p) before the transfer and refund what it did not move.
+func (c *budgetedConn) metered(p []byte, op func([]byte) (int, error)) (int, error) {
 	if len(p) == 0 {
-		return c.Conn.Write(p)
+		return op(p)
 	}
 	leaseExpires, code := c.pool.reserveProxyBytes(int64(len(p)))
 	if code != "" {
 		_ = c.Conn.Close()
 		return 0, &proxyBudgetError{code: code}
 	}
-	n, err := c.Conn.Write(p)
+	n, err := op(p)
 	c.pool.refundProxyBytes(int64(len(p)-n), leaseExpires)
 	return n, err
 }
 
 func newSessionPool(cfg Config) *SessionPool {
-	pool := &SessionPool{
-		cfg: cfg,
-	}
-	now := time.Now()
-	add := func(s *Session) {
-		client, err := buildSessionClient(s.proxyURL, pool)
-		if err != nil {
-			slog.Warn("proxy session skipped: invalid proxy configuration", "session", s.name, "error", err)
-			return
-		}
-		s.client = client
-		s.windowStart = now
-		pool.sessions = append(pool.sessions, s)
-	}
-
+	pool := &SessionPool{cfg: cfg}
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
-		for i := 0; i < proxySessionCount; i++ {
+		for range proxySessionCount {
 			id := newSessionID()
-			add(&Session{
-				name:      "us-" + id,
-				proxyURL:  proxyURL(cfg.ProxyUser, cfg.ProxyPass, id),
-				sessionID: id,
-			})
+			client, err := buildSessionClient(proxyURL(cfg.ProxyUser, cfg.ProxyPass, id), pool)
+			if err != nil {
+				slog.Warn("proxy session skipped: invalid proxy configuration", "session", "us-"+id, "error", err)
+				continue
+			}
+			pool.sessions = append(pool.sessions, &Session{name: "us-" + id, client: client})
 		}
 	}
 
@@ -209,8 +188,8 @@ func (p *SessionPool) ensureBudgetBytesLocked(ctx context.Context, now time.Time
 		granted, expires, err := p.cfg.Store.takeBudget(requestCtx, time.Now())
 		cancel()
 		if err != nil {
-			p.logBudgetFailure(ctx, "storage", 0, err)
-			p.memoizeBudgetBackendFailureLocked()
+			logger(ctx).ErrorContext(ctx, "proxy budget request failed", "error_type", "budget_storage", "error", err)
+			p.budgetBackendRetryAt = time.Now().Add(budgetBackendRetryDelay)
 			return errorCodeBudgetBackend
 		}
 		if granted == 0 {
@@ -254,21 +233,6 @@ func (p *SessionPool) refundProxyBytes(bytes int64, leaseExpires time.Time) {
 	p.mu.Unlock()
 }
 
-func (p *SessionPool) memoizeBudgetBackendFailureLocked() {
-	p.budgetBackendRetryAt = time.Now().Add(budgetBackendRetryDelay)
-}
-
-func (p *SessionPool) logBudgetFailure(ctx context.Context, failure string, status int, err error) {
-	attrs := []any{"error_type", "budget_" + failure}
-	if status != 0 {
-		attrs = append(attrs, "status", status)
-	}
-	if err != nil {
-		attrs = append(attrs, "error", err)
-	}
-	logger(ctx).ErrorContext(ctx, "proxy budget request failed", attrs...)
-}
-
 func (p *SessionPool) recordLatency(s *Session, d time.Duration) {
 	ms := float64(d.Milliseconds())
 	s.mu.Lock()
@@ -299,15 +263,7 @@ func (p *SessionPool) fail(s *Session) {
 }
 
 func (p *SessionPool) rotate(s *Session) {
-	s.mu.Lock()
-	if p.cfg.ProxyUser != "" {
-		s.sessionID = newSessionID()
-		s.proxyURL = proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, s.sessionID)
-	}
-	proxyURL := s.proxyURL
-	s.mu.Unlock()
-
-	client, err := buildSessionClient(proxyURL, p)
+	client, err := buildSessionClient(proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), p)
 	if err != nil {
 		return
 	}

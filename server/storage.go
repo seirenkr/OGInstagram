@@ -5,11 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -398,14 +399,9 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 		return report, err
 	}
 	for category, grouped := range buckets {
-		times := make([]int64, 0, len(grouped))
-		for t := range grouped {
-			times = append(times, t)
-		}
-		sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
-		for _, t := range times {
+		for _, t := range slices.Sorted(maps.Keys(grouped)) {
 			bucket := grouped[t]
-			sort.Float64s(bucket.durations)
+			slices.Sort(bucket.durations)
 			quantile := func(q float64) float64 {
 				index := max(0, int(math.Ceil(q*float64(len(bucket.durations))))-1)
 				return math.Round(bucket.durations[index]*100) / 100

@@ -11,7 +11,7 @@ import (
 func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
 	a := &App{cfg: Config{Port: 8080}}
 	req := httptest.NewRequest("GET", "https://oginstagram.com/users/instagram", nil)
-	res := a.handleUserAccount(req, "instagram")
+	res := serveApp(t, a, req)
 	if res.status != 200 {
 		t.Fatalf("status = %d, want 200", res.status)
 	}
@@ -39,6 +39,7 @@ func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
 
 func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
 	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
+	g := testGateway(t)
 	for _, name := range []string{"inbox", "outbox"} {
 		req := httptest.NewRequest(http.MethodGet, "https://oginstagram.com/users/instagram/"+name, nil)
 		res := a.handleActivityCollection(req, "instagram", name)
@@ -50,9 +51,10 @@ func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
 		if res.status != http.StatusOK || json.Unmarshal(res.body, &collection) != nil || collection.Type != "OrderedCollection" || collection.TotalItems != 0 || len(collection.OrderedItems) != 0 {
 			t.Fatalf("%s collection = status %d, body %s", name, res.status, res.body)
 		}
-		post := httptest.NewRequest(http.MethodPost, req.URL.String(), nil)
-		if got := a.route(post); got.status != http.StatusMethodNotAllowed || got.headers["Allow"] != "GET, HEAD" {
-			t.Fatalf("POST %s = %#v", name, got)
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, publicRequest(http.MethodPost, "/users/instagram/"+name))
+		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" {
+			t.Fatalf("POST %s = %d %v", name, w.Code, w.Header())
 		}
 	}
 }

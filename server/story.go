@@ -20,7 +20,7 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 	}
 	username = strings.ToLower(username)
 	return a.stories.get(ctx, username+"/"+id, meta, func(fetchCtx context.Context) (Story, time.Duration, bool, *AppError) {
-		story, err := a.externalHelperStory(fetchCtx, username, id)
+		story, err := externalHelperStoryImpl(a, fetchCtx, username, id)
 		return story, cacheTTLFromURLs(story.ProfilePic, story.Media.URL, story.Media.Thumbnail), true, err
 	})
 }
@@ -42,10 +42,9 @@ func (a *App) storyAvatarURL(baseURL string, story Story) string {
 	return a.offloadSigner.url(baseURL, path, false)
 }
 
-func (a *App) handleStory(req *http.Request, username, id string) resp {
+func (a *App) handleStory(req *http.Request, username, id string, gallery bool) resp {
 	origin := storyOriginURL(username, id)
 	baseURL := a.publicBaseURL(req)
-	gallery := galleryRequested(req.URL.Query())
 	meta := &fetchMeta{}
 	story, err := a.getStory(req.Context(), username, id, meta)
 	if err != nil {

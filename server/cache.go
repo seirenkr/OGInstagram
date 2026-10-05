@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -189,46 +190,35 @@ func (c *cache[V]) persistentGet(ctx context.Context, key string) (*cacheEntry[V
 		return nil, false
 	}
 	if err != nil {
-		c.logError(ctx, "get", "storage", 0, err)
-		return nil, false
-	}
-	if len(body) > maxCacheValueBytes || !expiresAt.After(time.Now()) {
+		c.logError(ctx, "get", "storage", err)
 		return nil, false
 	}
 	var payload cachePayload[V]
 	if err := json.Unmarshal(body, &payload); err != nil {
-		c.logError(ctx, "get", "decode", 0, err)
+		c.logError(ctx, "get", "decode", err)
 		return nil, false
 	}
 	value, valid := cloneAndValidateCacheValue(key, payload.Value)
 	if !valid {
-		c.logError(ctx, "get", "invalid_value", 0, nil)
+		c.logError(ctx, "get", "invalid_value", nil)
 		return nil, false
 	}
 	return &cacheEntry[V]{value: value, expiresAt: expiresAt}, true
 }
 
-func (c *cache[V]) persistentPut(ctx context.Context, key string, entry *cacheEntry[V]) bool {
+func (c *cache[V]) persistentPut(ctx context.Context, key string, entry *cacheEntry[V]) {
 	body, err := json.Marshal(cachePayload[V]{Value: entry.value})
 	if err != nil {
-		c.logError(ctx, "put", "encode", 0, err)
-		return false
-	}
-	if c.store == nil || len(body) > maxCacheValueBytes {
-		return false
+		c.logError(ctx, "put", "encode", err)
+		return
 	}
 	if err = c.store.putModel(ctx, c.storeKind, key, body, entry.expiresAt); err != nil {
-		c.logError(ctx, "put", "storage", 0, err)
-		return false
+		c.logError(ctx, "put", "storage", err)
 	}
-	return true
 }
 
-func (c *cache[V]) logError(ctx context.Context, operation, errorType string, status int, err error) {
+func (c *cache[V]) logError(ctx context.Context, operation, errorType string, err error) {
 	attrs := []any{"operation", operation, "cache_kind", c.storeKind, "error_type", errorType}
-	if status != 0 {
-		attrs = append(attrs, "status", status)
-	}
 	if err != nil {
 		attrs = append(attrs, "error", err)
 	}
@@ -259,16 +249,9 @@ func (c *cache[V]) localGet(key string) (*cacheEntry[V], bool) {
 
 func (c *cache[V]) removeLocalLocked(key string, entry *cacheEntry[V]) {
 	delete(c.entries, key)
-	c.usedBytes -= entry.size
-	if c.usedBytes < 0 {
-		c.usedBytes = 0
-	}
-	for i, orderedKey := range c.order {
-		if orderedKey == key {
-			copy(c.order[i:], c.order[i+1:])
-			c.order = c.order[:len(c.order)-1]
-			return
-		}
+	c.usedBytes = max(c.usedBytes-entry.size, 0)
+	if i := slices.Index(c.order, key); i >= 0 {
+		c.order = slices.Delete(c.order, i, i+1)
 	}
 }
 
