@@ -3,8 +3,11 @@ package main
 import (
 	"cmp"
 	"crypto/rand"
+	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,37 +23,51 @@ const (
 	proxyCountry      = "us"
 	proxySessionCount = 10
 
-	defaultProxyHourlyLimit = 1000
+	defaultProxyHourlyLimit       = 1000
+	proxyByteLeaseSize      int64 = 1 << 20
 
-	transientErrorCacheSeconds = 300
+	// Bound durable budget grants; errors stop proxy traffic until retry.
+	budgetRequestTimeout    = time.Second
+	budgetBackendRetryDelay = time.Second
+
+	transientErrorCacheSeconds = 60
 	permanentErrorCacheSeconds = 3600
 
-	ewmaAlpha    = 0.3
-	fetchTimeout = 4500 * time.Millisecond
+	requestTimeout = 4 * time.Second
 
-	fetchHedgeDelay = 1500 * time.Millisecond
+	ewmaAlpha = 0.3
 
-	headProbeTimeout = 1500 * time.Millisecond
+	postHedgeDelay           = time.Second
+	profileHedgeDelay        = time.Second
+	externalHelperHedgeDelay = 2 * time.Second
+	oembedHedgeDelay         = 2500 * time.Millisecond
+	// A ready oEmbed card ends a still-running staged race this early, so the
+	// degraded card is served instead of a timeout.
+	oembedFallbackAt = requestTimeout - 500*time.Millisecond
 
-	rotateCooldown       = 3 * time.Second
-	maxCacheEntries      = 5000
-	maxConcurrentFetches = 6
+	rotateCooldown = 3 * time.Second
+	// Keep origin work bounded on the single small Vultr instance.
+	maxConcurrentFetches = 48
+
+	localPostCacheBytes    = 16 << 20
+	localProfileCacheBytes = 4 << 20
+	localStoryCacheBytes   = 4 << 20
 
 	maxResponseBytes = 1 << 20
 
-	maxInlineVideoBytes = 200 << 20
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 10 * time.Second
+	writeTimeout      = 10 * time.Second
+	idleTimeout       = 120 * time.Second // > cloudflared keepAliveTimeout (90s), so the proxy closes idle conns first
+	shutdownTimeout   = 30 * time.Second
+	maxHeaderBytes    = 32 << 10
 
-	edgeCacheSeconds = 86400
-	serviceName      = "oginstagram"
+	serviceName = "oginstagram"
 
 	brandName  = "OGInstagram"
 	brandColor = "#ff0069"
-	supportURL = "https://ko-fi.com/seirenkr"
 
 	defaultAvatarPath = "/default-avatar.jpg"
-
-	budgetTitle       = "Hourly limit reached"
-	budgetDescription = "This service has reached its hourly request limit. Please try again later."
 
 	instagramAppUA = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
 	instagramWebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
@@ -59,20 +76,101 @@ const (
 	instagramAsbdID = "129477"
 )
 
+func env(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
 func configFromEnv() Config {
 	port := 8080
-	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("PORT"))); err == nil && v > 0 {
-		port = v
+	if raw := env("PORT"); raw != "" {
+		port, _ = strconv.Atoi(raw)
+	}
+	baseURL := cmp.Or(env("BASE_URL"), "https://oginstagram.com")
+	hosts := envList("ALLOWED_HOSTS")
+	if len(hosts) == 0 {
+		if base, err := url.Parse(baseURL); err == nil && base.Hostname() != "" {
+			h := base.Hostname()
+			hosts = []string{h, "www." + h, "d." + h, "www.d." + h, "g." + h, "www.g." + h}
+		}
+	}
+	var proxies []netip.Prefix
+	for _, raw := range envList("TRUSTED_PROXIES") {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			if addr, addrErr := netip.ParseAddr(raw); addrErr == nil {
+				p = netip.PrefixFrom(addr, addr.BitLen())
+			}
+		}
+		// Keep invalid entries so validation rejects a misspelled trust boundary.
+		proxies = append(proxies, p)
 	}
 	return Config{
-		Port:          port,
-		Version:       cmp.Or(strings.TrimSpace(os.Getenv("OG_VERSION")), "dev"),
-		ProxyUser:     strings.TrimSpace(os.Getenv("PROXY_USERNAME")),
-		ProxyPass:     strings.TrimSpace(os.Getenv("PROXY_PASSWORD")),
-		BaseURL:       strings.TrimSpace(os.Getenv("BASE_URL")),
-		ModelCacheURL: strings.TrimSpace(os.Getenv("MODEL_CACHE_URL")),
-		BudgetURL:     strings.TrimSpace(os.Getenv("BUDGET_URL")),
+		Port:               port,
+		Version:            cmp.Or(env("OG_VERSION"), "dev"),
+		ProxyUser:          env("PROXY_USERNAME"),
+		ProxyPass:          env("PROXY_PASSWORD"),
+		BaseURL:            strings.TrimRight(baseURL, "/"),
+		OffloadSigningKeys: env("OFFLOAD_SIGNING_KEYS"),
+		WorkerHubSignKey:   env("WORKERHUB_SIGN_KEY"),
+		WorkerHubSignTS:    env("WORKERHUB_SIGN_TS"),
+		DataDir:            cmp.Or(env("DATA_DIR"), "./data"),
+		AssetsDir:          cmp.Or(env("ASSETS_DIR"), "../web/dist"),
+		BudgetStartDate:    env("PROXY_BUDGET_START_DATE"),
+		AllowedHosts:       hosts,
+		TrustedProxies:     proxies,
+		TurnstileSiteKey:   env("TURNSTILE_SITE_KEY"),
+		TurnstileSecretKey: env("TURNSTILE_SECRET_KEY"),
+		AdminPurgeToken:    env("ADMIN_PURGE_TOKEN"),
+		Development:        env("DEVELOPMENT") == "true",
 	}
+}
+
+func envList(key string) []string {
+	var values []string
+	for _, value := range strings.Split(env(key), ",") {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func (cfg Config) validate() error {
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") ||
+		(base.Scheme != "https" && !(cfg.Development && base.Scheme == "http")) {
+		return fmt.Errorf("BASE_URL must be an HTTPS origin (HTTP is allowed in development)")
+	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("PORT must be between 1 and 65535")
+	}
+	if len(cfg.AllowedHosts) == 0 {
+		return fmt.Errorf("ALLOWED_HOSTS is required")
+	}
+	for _, host := range cfg.AllowedHosts {
+		if strings.ContainsAny(host, "/:@?# ") || host == "" || strings.IndexFunc(host, func(r rune) bool { return r <= 32 || r == 92 }) >= 0 {
+			return fmt.Errorf("ALLOWED_HOSTS must contain hostnames without ports")
+		}
+	}
+	for _, proxy := range cfg.TrustedProxies {
+		if !proxy.IsValid() || proxy.Bits() == 0 {
+			return fmt.Errorf("TRUSTED_PROXIES must contain explicit IP addresses or bounded CIDRs")
+		}
+	}
+	if _, err := time.Parse("2006-01-02", cfg.BudgetStartDate); err != nil {
+		return fmt.Errorf("PROXY_BUDGET_START_DATE is required in YYYY-MM-DD UTC format")
+	}
+	if (cfg.ProxyUser == "") != (cfg.ProxyPass == "") {
+		return fmt.Errorf("PROXY_USERNAME and PROXY_PASSWORD must be set together")
+	}
+	if !cfg.Development && cfg.ProxyUser == "" {
+		return fmt.Errorf("production requires PROXY_USERNAME and PROXY_PASSWORD")
+	}
+	if !cfg.Development && (len(cfg.TrustedProxies) == 0 || cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "" || cfg.AdminPurgeToken == "") {
+		return fmt.Errorf("production requires TRUSTED_PROXIES, Turnstile keys and ADMIN_PURGE_TOKEN")
+	}
+	if !cfg.Development && (base.Port() != "" || !slices.Contains(cfg.AllowedHosts, strings.ToLower(base.Hostname()))) {
+		return fmt.Errorf("production BASE_URL host must be listed in ALLOWED_HOSTS, without a port")
+	}
+	return nil
 }
 
 func proxyURL(user, pass, sessionID string) string {

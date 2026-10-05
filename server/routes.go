@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/url"
 	"regexp"
 	"strings"
 )
@@ -57,18 +56,8 @@ func parseEmbedSegments(segments []string) *EmbedRoute {
 }
 
 func splitPath(path string) []string {
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return nil
+	if trimmed := strings.Trim(path, "/"); trimmed != "" {
+		return strings.Split(trimmed, "/")
 	}
-	parts := strings.Split(trimmed, "/")
-	out := make([]string, len(parts))
-	for i, seg := range parts {
-		if dec, err := url.PathUnescape(seg); err == nil {
-			out[i] = dec
-		} else {
-			out[i] = seg
-		}
-	}
-	return out
+	return nil
 }

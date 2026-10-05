@@ -32,22 +32,24 @@ func shortcodeTime(shortcode string) time.Time {
 	return t
 }
 
-func postAvatarURL(baseURL string, post Post) string {
+func (a *App) postAvatarURL(baseURL string, post Post) string {
 	if post.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
 	}
-	return baseURL + "/offload/" + url.PathEscape(post.Shortcode) + "/avatar"
+	return a.offloadSigner.url(baseURL, "/offload/"+url.PathEscape(post.Shortcode)+"/avatar", false)
 }
 
-func profileAvatarURL(baseURL string, p Profile) string {
+func (a *App) profileAvatarURL(baseURL string, p Profile) string {
 	if p.ProfilePic == "" {
 		return baseURL + defaultAvatarPath
 	}
-	return baseURL + "/offload/@" + url.PathEscape(p.Username) + "/avatar"
+	path := "/offload/@" + url.PathEscape(strings.ToLower(p.Username)) + "/avatar"
+	return a.offloadSigner.url(baseURL, path, false)
 }
 
-func profileMediaOffloadURL(baseURL, username string, index int) string {
-	return baseURL + "/offload/@" + url.PathEscape(username) + "/" + strconv.Itoa(index+1)
+func (a *App) profileMediaOffloadURL(baseURL, username string, index int) string {
+	path := "/offload/@" + url.PathEscape(strings.ToLower(username)) + "/" + strconv.Itoa(index+1)
+	return a.offloadSigner.url(baseURL, path, false)
 }
 
 func jsonBytes(v any) []byte {
@@ -75,22 +77,10 @@ func fmtCount(value int) string {
 		value = 0
 	}
 	s := strconv.Itoa(value)
-	n := len(s)
-	if n <= 3 {
-		return s
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
 	}
-	var b strings.Builder
-	pre := n % 3
-	if pre > 0 {
-		b.WriteString(s[:pre])
-	}
-	for i := pre; i < n; i += 3 {
-		if b.Len() > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(s[i : i+3])
-	}
-	return b.String()
+	return s
 }
 
 func truncateFlat(text string, limit int) string {
@@ -101,7 +91,7 @@ func truncateFlat(text string, limit int) string {
 		}
 	}
 	flat := strings.Join(lines, " ")
-	// ponytail: assumes limit > 3; the sole caller passes 420.
+
 	r := []rune(flat)
 	if len(r) <= limit {
 		return flat
@@ -160,23 +150,22 @@ func cdnExpiry(rawURL string) (time.Time, bool) {
 }
 
 func cacheTTLFromURLs(urls ...string) time.Duration {
-	var earliest time.Time
+	ttl := cdnFallbackTTL
 	for _, u := range urls {
-		if t, ok := cdnExpiry(u); ok && (earliest.IsZero() || t.Before(earliest)) {
-			earliest = t
+		if u == "" {
+			continue
+		}
+		if expiry, ok := cdnExpiry(u); ok {
+			candidate := time.Until(expiry) - cdnTTLMargin
+			if candidate < time.Minute {
+				candidate = time.Minute
+			}
+			if candidate < ttl {
+				ttl = candidate
+			}
 		}
 	}
-	if earliest.IsZero() {
-		return cdnFallbackTTL
-	}
-	if ttl := time.Until(earliest) - cdnTTLMargin; ttl > time.Minute {
-		return ttl
-	}
-	return time.Minute
-}
-
-func cdnEdgeSeconds(urls ...string) int {
-	return int(cacheTTLFromURLs(urls...) / time.Second)
+	return ttl
 }
 
 func mediaIndexFor(post Post, requested int) int {
@@ -201,12 +190,9 @@ func instagramPostURL(postType, shortcode string, mediaIndex int, specified bool
 	return target
 }
 
-func offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
-	suffix := ""
-	if thumbnail {
-		suffix = "?thumbnail=1"
-	}
-	return baseURL + "/offload/" + url.PathEscape(shortcode) + "/" + strconv.Itoa(index+1) + suffix
+func (a *App) offloadURL(baseURL, shortcode string, index int, thumbnail bool) string {
+	path := "/offload/" + url.PathEscape(shortcode) + "/" + strconv.Itoa(index+1)
+	return a.offloadSigner.url(baseURL, path, thumbnail)
 }
 
 func videoDisplaySize(att Attachment) (int, int) {

@@ -9,12 +9,6 @@ func parseCanonicalDecimal(raw string) (int, bool) {
 	if raw == "" || (raw != "0" && raw[0] == '0') {
 		return 0, false
 	}
-	for i := range len(raw) {
-		if raw[i] < '0' || raw[i] > '9' {
-			return 0, false
-		}
-	}
-	// bitSize 53 mirrors Number.isSafeInteger in shared/routes.ts.
 	n, err := strconv.ParseUint(raw, 10, 53)
 	if err != nil {
 		return 0, false
@@ -39,18 +33,22 @@ func queryInt(values url.Values, key string) (int, bool) {
 
 func mediaSelection(values url.Values, pathIndex int) (index int, specified bool) {
 	if pathIndex >= 0 {
-		return max(0, pathIndex-1), true
+		return boundedMediaIndex(pathIndex - 1), true
 	}
 	if n, ok := queryInt(values, "img_index"); ok {
-		return max(0, n-1), true
+		return boundedMediaIndex(n - 1), true
 	}
 	if n, ok := queryInt(values, "index"); ok {
-		return n, true
+		return boundedMediaIndex(n), true
 	}
 	if n, ok := queryInt(values, "order"); ok {
-		return n, true
+		return boundedMediaIndex(n), true
 	}
 	return 0, false
+}
+
+func boundedMediaIndex(index int) int {
+	return min(maxCachedMediaItems-1, max(0, index))
 }
 
 func galleryRequested(values url.Values) bool { return values.Get("__gallery") == "1" }

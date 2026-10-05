@@ -1,0 +1,77 @@
+name: oginstagram
+
+services:
+  app:
+    image: ${OG_IMAGE:-oginstagram:local}
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      ASSETS_DIR: /app/web
+      GOMEMLIMIT: 256MiB
+      GOMAXPROCS: "1"
+    user: "65532:65532"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    mem_limit: 512m
+    cpus: 1
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 40s
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    volumes:
+      - ./data:/data
+    networks:
+      origin:
+        ipv4_address: 172.30.0.2
+    healthcheck:
+      test: [CMD, /app/server, --healthcheck]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:?Set a tested cloudflared image tag or digest in .env}
+    command: [tunnel, --no-autoupdate, run, --token-file, /run/secrets/tunnel_token]
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    secrets:
+      - tunnel_token
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      origin:
+        ipv4_address: 172.30.0.3
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  origin:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+secrets:
+  tunnel_token:
+    file: ./secrets/tunnel-token

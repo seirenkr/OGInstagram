@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -28,16 +30,74 @@ type SessionPool struct {
 	sessions []*Session
 	cfg      Config
 	mu       sync.Mutex
-	budget   *http.Client
+
+	budgetLeaseExpires   time.Time
+	budgetLeaseRemaining int64
+	budgetExhaustedUntil time.Time
+	budgetBackendRetryAt time.Time
+}
+
+type proxyBudgetError struct {
+	code string
+}
+
+func (e *proxyBudgetError) Error() string {
+	if e.code == errorCodeBudgetExhausted {
+		return "daily proxy bandwidth budget reached"
+	}
+	return "proxy bandwidth budget is temporarily unavailable"
+}
+
+func proxyBudgetErrorCode(err error) string {
+	var budgetErr *proxyBudgetError
+	if errors.As(err, &budgetErr) {
+		return budgetErr.code
+	}
+	return ""
+}
+
+type budgetedConn struct {
+	net.Conn
+	pool *SessionPool
+}
+
+func (c *budgetedConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return c.Conn.Read(p)
+	}
+	leaseExpires, code := c.pool.reserveProxyBytes(int64(len(p)))
+	if code != "" {
+		_ = c.Conn.Close()
+		return 0, &proxyBudgetError{code: code}
+	}
+	n, err := c.Conn.Read(p)
+	c.pool.refundProxyBytes(int64(len(p)-n), leaseExpires)
+	return n, err
+}
+
+func (c *budgetedConn) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return c.Conn.Write(p)
+	}
+	leaseExpires, code := c.pool.reserveProxyBytes(int64(len(p)))
+	if code != "" {
+		_ = c.Conn.Close()
+		return 0, &proxyBudgetError{code: code}
+	}
+	n, err := c.Conn.Write(p)
+	c.pool.refundProxyBytes(int64(len(p)-n), leaseExpires)
+	return n, err
 }
 
 func newSessionPool(cfg Config) *SessionPool {
-	pool := &SessionPool{cfg: cfg, budget: &http.Client{Timeout: time.Second}}
+	pool := &SessionPool{
+		cfg: cfg,
+	}
 	now := time.Now()
 	add := func(s *Session) {
-		client, err := buildSessionClient(s.proxyURL)
+		client, err := buildSessionClient(s.proxyURL, pool)
 		if err != nil {
-			slog.Warn("skipped proxy session", "name", s.name, "err", err.Error())
+			slog.Warn("proxy session skipped: invalid proxy configuration", "session", s.name, "error", err)
 			return
 		}
 		s.client = client
@@ -62,35 +122,44 @@ func newSessionPool(cfg Config) *SessionPool {
 	return pool
 }
 
-func buildSessionClient(proxyURL string) (*http.Client, error) {
+func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error) {
 	parsed, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, err
 	}
+	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyURL(parsed),
-		ForceAttemptHTTP2:     true,
+		Proxy: http.ProxyURL(parsed),
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return &budgetedConn{Conn: conn, pool: pool}, nil
+		},
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 3 * time.Second,
+		// Close a silent tunnel instead of letting requests hang on it.
+		HTTP2:                 &http.HTTP2Config{SendPingTimeout: 5 * time.Second, PingTimeout: 2 * time.Second},
 		MaxIdleConns:          8,
 		MaxIdleConnsPerHost:   4,
-		MaxConnsPerHost:       maxConcurrentFetches,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   fetchTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
 	return &http.Client{Transport: transport}, nil
 }
 
-func (p *SessionPool) pick(ctx context.Context, exclude *Session) (*Session, string) {
+func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, errorCodeConnection
+	}
 	now := time.Now()
 
 	var picked *Session
 	bestRank := 0.0
 	for _, s := range p.sessions {
-		if s == exclude {
-			continue
-		}
 		s.mu.Lock()
 		s.resetBucketWindowLocked(now)
 		ok := !s.cooldownUntil.After(now) && s.used < defaultProxyHourlyLimit
@@ -105,8 +174,11 @@ func (p *SessionPool) pick(ctx context.Context, exclude *Session) (*Session, str
 	}
 
 	if picked != nil {
-		if reason := p.reserveBudget(ctx); reason != "" {
-			return nil, reason
+		if errorCode := p.ensureBudgetBytesLocked(ctx, now, 1); errorCode != "" {
+			return nil, errorCode
+		}
+		if ctx.Err() != nil {
+			return nil, errorCodeConnection
 		}
 		picked.mu.Lock()
 		picked.used++
@@ -115,27 +187,86 @@ func (p *SessionPool) pick(ctx context.Context, exclude *Session) (*Session, str
 	return picked, ""
 }
 
-func (p *SessionPool) reserveBudget(ctx context.Context) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.BudgetURL, nil)
-	if err != nil {
-		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "request", "error", err.Error())
-		return reasonBudgetBackend
+func (p *SessionPool) ensureBudgetBytesLocked(ctx context.Context, now time.Time, required int64) string {
+	if !now.Before(p.budgetLeaseExpires) {
+		p.budgetLeaseRemaining = 0
+		p.budgetLeaseExpires = time.Time{}
 	}
-	resp, err := p.budget.Do(req)
-	if err != nil {
-		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "connection", "error", err.Error())
-		return reasonBudgetBackend
-	}
-	resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusNoContent:
+	if p.budgetLeaseRemaining >= required {
 		return ""
-	case http.StatusTooManyRequests:
-		return reasonBudgetExceeded
-	default:
-		logger(ctx).ErrorContext(ctx, "proxy budget request failed", "event", "proxy_budget_error", "reason", "status", "status", resp.StatusCode)
-		return reasonBudgetBackend
 	}
+	if now.Before(p.budgetExhaustedUntil) {
+		return errorCodeBudgetExhausted
+	}
+	p.budgetExhaustedUntil = time.Time{}
+	if now.Before(p.budgetBackendRetryAt) {
+		return errorCodeBudgetBackend
+	}
+	p.budgetBackendRetryAt = time.Time{}
+
+	for p.budgetLeaseRemaining < required {
+		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetRequestTimeout)
+		granted, expires, err := p.cfg.Store.takeBudget(requestCtx, time.Now())
+		cancel()
+		if err != nil {
+			p.logBudgetFailure(ctx, "storage", 0, err)
+			p.memoizeBudgetBackendFailureLocked()
+			return errorCodeBudgetBackend
+		}
+		if granted == 0 {
+			p.budgetExhaustedUntil = expires
+			return errorCodeBudgetExhausted
+		}
+		// A grant can finish across UTC midnight while waiting for SQLite. Its
+		// old-day charge remains durable, but only a live lease may send bytes.
+		if !expires.After(time.Now()) {
+			p.budgetLeaseRemaining = 0
+			p.budgetLeaseExpires = time.Time{}
+			continue
+		}
+		if !p.budgetLeaseExpires.IsZero() && !p.budgetLeaseExpires.Equal(expires) {
+			p.budgetLeaseRemaining = 0
+		}
+		p.budgetLeaseRemaining += granted
+		p.budgetLeaseExpires = expires
+	}
+	return ""
+}
+
+func (p *SessionPool) reserveProxyBytes(bytes int64) (time.Time, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if code := p.ensureBudgetBytesLocked(context.Background(), time.Now(), bytes); code != "" {
+		return time.Time{}, code
+	}
+	p.budgetLeaseRemaining -= bytes
+	return p.budgetLeaseExpires, ""
+}
+
+func (p *SessionPool) refundProxyBytes(bytes int64, leaseExpires time.Time) {
+	if bytes <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.budgetLeaseExpires.Equal(leaseExpires) && time.Now().Before(leaseExpires) {
+		p.budgetLeaseRemaining += bytes
+	}
+	p.mu.Unlock()
+}
+
+func (p *SessionPool) memoizeBudgetBackendFailureLocked() {
+	p.budgetBackendRetryAt = time.Now().Add(budgetBackendRetryDelay)
+}
+
+func (p *SessionPool) logBudgetFailure(ctx context.Context, failure string, status int, err error) {
+	attrs := []any{"error_type", "budget_" + failure}
+	if status != 0 {
+		attrs = append(attrs, "status", status)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	logger(ctx).ErrorContext(ctx, "proxy budget request failed", attrs...)
 }
 
 func (p *SessionPool) recordLatency(s *Session, d time.Duration) {
@@ -157,7 +288,7 @@ func (s *Session) getClient() *http.Client {
 	return c
 }
 
-func (p *SessionPool) fail(ctx context.Context, s *Session, reason string) {
+func (p *SessionPool) fail(s *Session) {
 	p.rotate(s)
 	until := time.Now().Add(rotateCooldown)
 	s.mu.Lock()
@@ -165,7 +296,6 @@ func (p *SessionPool) fail(ctx context.Context, s *Session, reason string) {
 		s.cooldownUntil = until
 	}
 	s.mu.Unlock()
-	logger(ctx).InfoContext(ctx, "rotated proxy session", "session", s.name, "reason", reason)
 }
 
 func (p *SessionPool) rotate(s *Session) {
@@ -177,7 +307,7 @@ func (p *SessionPool) rotate(s *Session) {
 	proxyURL := s.proxyURL
 	s.mu.Unlock()
 
-	client, err := buildSessionClient(proxyURL)
+	client, err := buildSessionClient(proxyURL, p)
 	if err != nil {
 		return
 	}

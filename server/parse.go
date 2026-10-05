@@ -15,15 +15,15 @@ func parseInstagramPost(body string) (Post, *AppError) {
 		return parseV1(it)
 	}
 	if data.Exists() {
-		return Post{}, igErr(404, reasonMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
+		return Post{}, igErr(404, errorCodeMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
 	}
-	return Post{}, igErr(502, reasonGraphql, "Instagram response did not include media")
+	return Post{}, igErr(502, errorCodeGraphQL, "Instagram response did not include media")
 }
 
 func parseV1(item gjson.Result) (Post, *AppError) {
 	user := item.Get("user")
 	if !user.Exists() {
-		return Post{}, igErr(502, reasonClientError, "missing user")
+		return Post{}, igErr(502, errorCodeUpstream, "missing user")
 	}
 	username := user.Get("username").String()
 	fullName := user.Get("full_name").String()
@@ -44,7 +44,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		attachments = append(attachments, att)
 	}
 	if len(attachments) == 0 {
-		return Post{}, igErr(502, reasonClientError, "v1 media had no usable attachments")
+		return Post{}, igErr(502, errorCodeUpstream, "v1 media had no usable attachments")
 	}
 
 	created := item.Get("taken_at").Int()
@@ -60,7 +60,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		Username:    username,
 		OwnerID:     cmp.Or(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
-		ProfilePic:  normalizeCDNHost(user.Get("profile_pic_url").String()),
+		ProfilePic:  user.Get("profile_pic_url").String(),
 		Caption:     caption,
 		StatsLine:   v1StatsPrefix(item) + "❤️ " + fmtCount(uintOf(item, "like_count")) + "  \U0001f4ac " + fmtCount(uintOf(item, "comment_count")),
 		Attachments: attachments,
@@ -74,14 +74,13 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 		return Attachment{}, false
 	}
 	w, h := mediaWidth(item), mediaHeight(item)
-	thumbnail = normalizeCDNHost(thumbnail)
 	id := cmp.Or(item.Get("pk").String(), item.Get("id").String())
 	if uintOf(item, "media_type") == 2 {
 		u := bestVideoURL(item)
 		if u == "" {
 			u = thumbnail
 		}
-		return Attachment{ID: id, Kind: "video", URL: normalizeCDNHost(u), Thumbnail: thumbnail, Width: w, Height: h}, true
+		return Attachment{ID: id, Kind: "video", URL: u, Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
 	return Attachment{ID: id, Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
 }
@@ -183,12 +182,11 @@ func candidateHeight(value gjson.Result) int {
 }
 
 func v1StatsPrefix(item gjson.Result) string {
-	play := uintOf(item, "play_count")
-	for _, k := range []string{"video_play_count", "view_count", "video_view_count", "ig_play_count", "fb_play_count"} {
-		if play > 0 {
+	play := 0
+	for _, k := range []string{"play_count", "video_play_count", "view_count", "video_view_count", "ig_play_count", "fb_play_count"} {
+		if play = uintOf(item, k); play > 0 {
 			break
 		}
-		play = uintOf(item, k)
 	}
 	if play > 0 {
 		return "▶️ " + fmtCount(play) + "  "

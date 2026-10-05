@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func wrapEmbed(inner string) string {
@@ -46,16 +47,6 @@ func TestParseEmbedPostVideoBlocked(t *testing.T) {
 		t.Fatal("expected blocked-video error, got nil")
 	}
 }
-
-const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
-	`<div class="Embed" data-media-type="GraphImage" data-media-id="3928250036051888465" data-owner-id="25025320" data-permalink="https://www.instagram.com/p/DaD8phTyclR/?utm_source=ig_embed">` +
-	`<a class="Avatar InsideRing" href="https://www.instagram.com/instagram/?utm_source=ig_embed"><img src="https://cdn/avatar.jpg?oe=1" alt="instagram" /></a>` +
-	`<span class="UsernameText">instagram</span>` +
-	`<div class="Content EmbedFrame" style="padding-bottom: 133.33%;">` +
-	`<img class="EmbeddedMediaImage" alt="x" src="https://cdn/small.jpg?oe=1" srcset="https://cdn/big.jpg?oe=1 3072w,https://cdn/small.jpg?oe=1 640w" /></div>` +
-	`<div class="SocialProof"><a href="/x">4,809 likes</a></div>` +
-	`<div class="Caption"><a class="CaptionUsername" href="/x">instagram</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
-	`<div class="CaptionComments"><a href="/x">View all 19 comments</a></div></div>`
 
 func TestParseEmbedSimpleImage(t *testing.T) {
 	post, err := parseEmbedPost(simpleEmbedImagePage)
@@ -120,7 +111,7 @@ func TestParseEmbedProfile(t *testing.T) {
 	inner := `{"context":{"username":"nasa","full_name":"NASA","owner_id":"99",` +
 		`"profile_pic_url":"https://cdn/p.jpg","followers_count":104389387,"posts_count":4833,` +
 		`"graphql_media":[` +
-		`{"shortcode_media":{"id":"m1","shortcode":"S1","display_url":"https://cdn/m1.jpg","dimensions":{"width":100,"height":100}}},` +
+		`{"shortcode_media":{"id":"m1","shortcode":"S1","display_url":"https://cdn/m1.jpg","dimensions":{"width":100,"height":100},"taken_at_timestamp":1790870385}},` +
 		`{"shortcode_media":{"id":"m2","shortcode":"S2","display_url":"https://cdn/m2.jpg","dimensions":{"width":100,"height":100}}}` +
 		`]}}`
 	p, err := parseEmbedProfile(wrapEmbed(inner))
@@ -132,5 +123,22 @@ func TestParseEmbedProfile(t *testing.T) {
 	}
 	if len(p.RecentMedia) != 2 || p.RecentMedia[0].Thumbnail != "https://cdn/m1.jpg" {
 		t.Fatalf("bad recent media: %+v", p.RecentMedia)
+	}
+	if !p.RecentMedia[0].TakenAt.Equal(time.Unix(1790870385, 0)) || !p.RecentMedia[1].TakenAt.IsZero() {
+		t.Fatalf("taken_at not read: %+v", p.RecentMedia)
+	}
+}
+
+// Logged-out GraphQL no longer returns play counts; the rich embed still does.
+func TestParseEmbedPostVideoPlayCount(t *testing.T) {
+	inner := `{"context":{"shortcode":"V"},"gql_data":{"shortcode_media":{"__typename":"GraphVideo","id":"1","shortcode":"V","is_video":true,` +
+		`"video_url":"https://cdn/v.mp4","display_url":"https://cdn/v.jpg","dimensions":{"width":720,"height":1280},"video_view_count":22850111,` +
+		`"owner":{"id":"1","username":"u"},"edge_liked_by":{"count":489864},"edge_media_to_comment":{"count":10994}}}}`
+	post, err := parseEmbedPost(wrapEmbed(inner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "▶️ 22,850,111  ❤️ 489,864  💬 10,994"; post.StatsLine != want {
+		t.Fatalf("StatsLine = %q, want %q", post.StatsLine, want)
 	}
 }

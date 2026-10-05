@@ -51,7 +51,7 @@ func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
 			t.Fatalf("%s collection = status %d, body %s", name, res.status, res.body)
 		}
 		post := httptest.NewRequest(http.MethodPost, req.URL.String(), nil)
-		if got := a.handleActivityCollection(post, "instagram", name); got.status != http.StatusMethodNotAllowed || got.headers["Allow"] != "GET" {
+		if got := a.route(post); got.status != http.StatusMethodNotAllowed || got.headers["Allow"] != "GET, HEAD" {
 			t.Fatalf("POST %s = %#v", name, got)
 		}
 	}
@@ -98,7 +98,7 @@ func TestActivityStatusLinkifiesCaptionAndCapsImages(t *testing.T) {
 		Content    string            `json:"content"`
 		Attachment []json.RawMessage `json:"attachment"`
 	}
-	if err := json.Unmarshal((&App{}).buildActivityStatus("https://oginstagram.com", post, "p", 0, false, false), &note); err != nil {
+	if err := json.Unmarshal((&App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}).buildActivityStatus("https://oginstagram.com", post, "p", 0, false, false), &note); err != nil {
 		t.Fatal(err)
 	}
 	if len(note.Attachment) != activityMaxImages {

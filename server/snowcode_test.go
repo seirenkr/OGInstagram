@@ -63,7 +63,7 @@ func TestProfileSnowcodeRoundTrip(t *testing.T) {
 
 func TestStorySnowcodeRoundTrip(t *testing.T) {
 	for _, gallery := range []bool{false, true} {
-		want := snowPost{Username: "some_user", Shortcode: "12345", Story: true, Gallery: gallery}
+		want := snowcodePost{Username: "some_user", Shortcode: "12345", Story: true, Gallery: gallery}
 		if got := parseStatusSnowcode(storyStatusSnowcode(want.Username, want.Shortcode, gallery)); got != want {
 			t.Fatalf("parsed=%#v, want %#v", got, want)
 		}

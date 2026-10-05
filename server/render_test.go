@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -9,17 +8,18 @@ import (
 	"time"
 )
 
-func TestPublicBaseURLUsesRequestOrigin(t *testing.T) {
+func TestPublicBaseURLUsesValidatedHost(t *testing.T) {
 	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
-	req := httptest.NewRequest("GET", "http://container.internal/p/CODE", nil)
-	req.Header.Set("OG-Public-Origin", "https://fresh-tunnel.trycloudflare.com")
-	if got := a.publicBaseURL(req); got != "https://fresh-tunnel.trycloudflare.com" {
-		t.Fatalf("publicBaseURL = %q", got)
+	for host, want := range map[string]string{"test.oginstagram.com": "https://test.oginstagram.com", "localhost:8080": "http://localhost:8080"} {
+		req := httptest.NewRequest("GET", "http://"+host+"/p/CODE", nil)
+		if got := a.publicBaseURL(req); got != want {
+			t.Fatalf("publicBaseURL(%s) = %q, want %q", host, got, want)
+		}
 	}
 }
 
 func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	post := Post{
 		Shortcode:  "CODE",
 		Username:   "user",
@@ -32,18 +32,18 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		}},
 	}
 
-	normal := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
+	normal := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false)
 	if !strings.Contains(normal, "property=\"og:description\" content=\"stats\n\ncaption\"") {
 		t.Fatalf("normal embed description missing: %s", normal)
 	}
 	if !strings.Contains(normal, `href="https://oginstagram.com/favicon-64.png" rel="icon" sizes="64x64" type="image/png"`) {
 		t.Error("service favicon missing from embed")
 	}
-	if !strings.Contains(normal, `rel="apple-touch-icon" href="https://oginstagram.com/offload/CODE/avatar"`) {
+	if !strings.Contains(normal, `rel="apple-touch-icon" href="https://oginstagram.com/offload/CODE/avatar?`) {
 		t.Error("author avatar must remain separate from the service favicon")
 	}
 
-	gallery := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, true)
+	gallery := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, true)
 	for _, tag := range []string{
 		`name="description" content=""`,
 		`property="og:description" content=""`,
@@ -96,14 +96,14 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 }
 
 func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	story := Story{
 		ID: "12345", Username: "user", FullName: "User", Caption: "story caption",
 		Media: Attachment{Kind: "image", Width: 1080, Height: 1920},
 	}
 	baseURL := "https://g.oginstagram.com"
 	wantStatus := storyStatusURL(baseURL, story.Username, story.ID, true)
-	html := a.buildStoryEmbedHTML(baseURL, "Discordbot", storyOriginURL(story.Username, story.ID), story,
+	html := a.buildStoryEmbedHTML(baseURL, storyOriginURL(story.Username, story.ID), story,
 		baseURL+"/media", baseURL+"/thumb", wantStatus, true)
 	if !strings.Contains(html, `property="og:description" content=""`) || strings.Contains(html, "story caption") {
 		t.Fatalf("gallery story exposed caption: %s", html)
@@ -127,7 +127,7 @@ func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
 }
 
 func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	post := Post{
 		Shortcode: "CODE", Username: "user", FullName: "User", StatsLine: "stats",
 		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080}},
@@ -163,16 +163,16 @@ func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
 	}
 
 	wantPreview := "https://oginstagram.com/offload/CODE/1?thumbnail=1"
-	if m["preview_url"] != wantPreview {
+	if p, _ := m["preview_url"].(string); !strings.HasPrefix(p, wantPreview+"&") {
 		t.Errorf("preview_url = %v, want %v", m["preview_url"], wantPreview)
 	}
-	if m["url"] != "https://oginstagram.com/offload/CODE/1" {
+	if u, _ := m["url"].(string); !strings.HasPrefix(u, "https://oginstagram.com/offload/CODE/1?") {
 		t.Errorf("url = %v, want playable offload", m["url"])
 	}
 }
 
 func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	post := Post{
 		Shortcode: "CODE",
 		Username:  "user",
@@ -238,7 +238,7 @@ func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
 }
 
 func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	taken := time.Date(2026, 4, 23, 10, 1, 13, 0, time.UTC)
 	p := Profile{
 		Username:       "user",
@@ -272,7 +272,7 @@ func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
 	if acct["followers_count"] != float64(7) || acct["following_count"] != float64(3) || acct["statuses_count"] != float64(11) {
 		t.Errorf("account counts wrong: %#v", acct)
 	}
-	if acct["note"] == nil || acct["avatar"] != "https://oginstagram.com/offload/@user/avatar" {
+	if acct["note"] == nil || !strings.HasPrefix(acct["avatar"].(string), "https://oginstagram.com/offload/@user/avatar?") {
 		t.Errorf("known profile fields missing: %#v", acct)
 	}
 }
@@ -330,12 +330,12 @@ func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
 }
 
 func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
-	a := &App{cfg: Config{}}
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	post := Post{
 		Shortcode: "CODE", Username: "user", FullName: "User",
-		Attachments: []Attachment{{Kind: "video", Width: 2160, Height: 3840}},
+		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Width: 2160, Height: 3840}},
 	}
-	html := a.buildEmbedHTML(context.Background(), "https://oginstagram.com", "Discordbot", post, "p", 0, false, false)
+	html := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false)
 	for _, tag := range []string{
 		`property="og:video:width" content="1080"`,
 		`property="og:video:height" content="1920"`,
