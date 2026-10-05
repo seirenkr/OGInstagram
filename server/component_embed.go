@@ -145,10 +145,10 @@ func discordLink(label, target string) string {
 	if label == target && (strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "http://")) {
 		return "<" + target + ">" // A bare URL needs no label; <> bounds the auto-link.
 	}
-	// Link labels have their own formatting parser and strip invisible Unicode
-	// characters. Use raw labels only when both steps preserve the original.
-	unsafe := strings.ContainsAny(label, "\\[]*~`<>") || strings.Contains(label, "||") || strings.Contains(label, "://") ||
-		strings.Contains(label, "__") || discordUnderscoreCanOpen(label) ||
+	// Formatting inside a label is fine; only what breaks the link itself
+	// counts: brackets and backslashes, URL-looking labels (Discord refuses
+	// those), and characters Discord strips from labels.
+	unsafe := strings.ContainsAny(label, "\\[]") || strings.Contains(label, "://") ||
 		strings.ContainsAny(label, "\u034f\u17b4\u17b5\u1160\u3164\uffa0") ||
 		strings.IndexFunc(label, func(r rune) bool {
 			return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || (unicode.IsSpace(r) && r != ' ')
@@ -159,31 +159,6 @@ func discordLink(label, target string) string {
 		return discordText(label) + " [↗](" + target + ")"
 	}
 	return "[" + label + "](" + target + ")"
-}
-
-// Discord italicizes _x_ only when an underscore after a non-word character
-// pairs with the next underscore before a non-word character (or the end).
-// A lone or in-word underscore (alice_photos, a._b) stays literal.
-func discordUnderscoreCanOpen(label string) bool {
-	open := -1
-	for i := 0; i < len(label); i++ {
-		if label[i] != '_' {
-			continue
-		}
-		if open >= 0 && i > open+1 && (i == len(label)-1 || !isWordByte(label[i+1])) {
-			return true
-		}
-		open = -1
-		if i == 0 || !isWordByte(label[i-1]) {
-			open = i
-		}
-	}
-	return false
-}
-
-// A JavaScript regex \w character, which is what Discord's \b boundaries use.
-func isWordByte(c byte) bool {
-	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // Find links in the original caption before fitting it to the byte budget. A
