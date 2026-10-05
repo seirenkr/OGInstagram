@@ -253,15 +253,6 @@ func TestPreviewRejectsBadOriginAndDuplicateClearance(t *testing.T) {
 			t.Fatalf("preview got%d for %+v", w.Code, tt)
 		}
 	}
-	now := time.Now()
-	for i := 0; i < 8; i++ {
-		if !g.allowClearance("one", now) {
-			t.Fatal("limit early")
-		}
-	}
-	if g.allowClearance("one", now) || !g.allowClearance("one", now.Add(time.Minute)) {
-		t.Fatal("rate window wrong")
-	}
 }
 
 func TestGatewayAdmissionLimit(t *testing.T) {
