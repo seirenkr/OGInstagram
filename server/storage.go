@@ -423,6 +423,9 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 // Each database has its own consistent snapshot; cache and budget have no shared
 // transaction. The destination must be new. ExhaustBudget is required on restore.
 func (s *localStore) Backup(ctx context.Context, destinationDir string) error {
+	if err := os.MkdirAll(filepath.Dir(destinationDir), 0700); err != nil {
+		return err
+	}
 	if err := os.Mkdir(destinationDir, 0700); err != nil {
 		return err
 	}

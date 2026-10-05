@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/tidwall/gjson v1.20.0
-	golang.org/x/image v0.46.0
 	modernc.org/sqlite v1.60.1
 )
 

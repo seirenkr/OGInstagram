@@ -191,18 +191,30 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route.offload && !g.app.offloadSigner.authorize(r.URL, time.Now()) {
+		// A link that fails verification never becomes valid; let the edge keep the 404.
+		w.Header().Set("Cloudflare-CDN-Cache-Control", "max-age=86400")
 		g.problem(w, r, 404, "not found")
 		return
 	}
 	started := time.Now()
 	result := g.render(r, route)
+	if route.offload && result.status == http.StatusFound {
+		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, result.headers["Location"], time.Now()))
+	}
 	elapsed := time.Since(started)
 	g.recordMetric(r, route, result, elapsed)
 	w.Header().Set("Server-Timing", "origin;dur="+strconv.FormatFloat(float64(elapsed.Microseconds())/1000, 'f', 2, 64))
-	if route.offload && result.status == http.StatusFound && proxyOffloadMedia(w, r, result) {
-		return
-	}
 	g.writeResult(w, r, result)
+}
+
+// offloadEdgeTTL lets Cloudflare answer repeat hits on a signed link until the
+// CDN URL it redirects to nears expiry, and never past the link's own expiry.
+func offloadEdgeTTL(link *url.URL, location string, now time.Time) int {
+	ttl := cacheTTLFromURLs(location)
+	if exp, err := strconv.ParseInt(link.Query().Get("exp"), 10, 64); err == nil {
+		ttl = min(ttl, time.Unix(exp, 0).Sub(now))
+	}
+	return max(int(ttl/time.Second), 0)
 }
 
 func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
@@ -613,7 +625,6 @@ func (g *Gateway) servePurge(w http.ResponseWriter, r *http.Request) {
 	g.app.posts.clear()
 	g.app.profiles.clear()
 	g.app.stories.clear()
-	previewCache.clear()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

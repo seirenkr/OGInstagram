@@ -120,8 +120,7 @@ const TwemojiText = React.memo(function TwemojiText({ children }: { children: st
 function previewMediaUrl(
   raw: string,
   serviceHost: string,
-  video = false,
-  variant: "media" | "avatar" = "media"
+  video = false
 ): string | undefined {
   if (!raw) return undefined;
   let url: URL;
@@ -134,9 +133,10 @@ function previewMediaUrl(
   } else if (url.hostname.endsWith(".fbcdn.net") || url.hostname.endsWith(".cdninstagram.com")) {
     url.hostname = "scontent.cdninstagram.com";
   }
-  if (url.origin === location.origin && url.pathname.startsWith("/offload/")) {
-    url.searchParams.set("preview", variant === "avatar" ? "avatar" : "1");
-    if (video) url.searchParams.set("thumbnail", "1");
+  // The browser follows /offload's redirect to Instagram's CDN, which allows
+  // cross-origin images; a video shows its thumbnail.
+  if (video && url.origin === location.origin && url.pathname.startsWith("/offload/")) {
+    url.searchParams.set("thumbnail", "1");
   }
   return url.href;
 }
@@ -205,7 +205,7 @@ async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHos
   return {
     profileUrl: typeof account?.url === "string" ? safeHref(account.url) ?? undefined : undefined,
     authorIconUrl: typeof account?.avatar === "string"
-      ? previewMediaUrl(account.avatar, serviceHost, false, "avatar")
+      ? previewMediaUrl(account.avatar, serviceHost, false)
       : undefined,
     captionNodes: captionNodes.length ? captionNodes : undefined,
     media: media.length ? media : undefined,
@@ -233,9 +233,7 @@ async function parseHTMLPreview(doc: Document, signal: AbortSignal, serviceHost:
   const image = previewMediaUrl(meta("og:image"), serviceHost, isVideo);
   const authorIcon = previewMediaUrl(
     doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "",
-    serviceHost,
-    false,
-    "avatar"
+    serviceHost
   ) || (isProfile && image ? image : "");
   const fallbackMedia = image && !image.includes("/favicon-")
     ? [{ url: image, kind: isVideo ? "video" : "image" } satisfies PreviewMedia]

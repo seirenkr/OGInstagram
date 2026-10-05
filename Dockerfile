@@ -7,7 +7,8 @@ COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/server .
+    go build -trimpath -ldflags="-s -w" -o /out/server . \
+    && mkdir /out/data
 
 # Build the frontend away from the 1 GB production VM.
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
@@ -19,18 +20,11 @@ COPY shared/ shared/
 COPY tools/build-home.mjs tools/build-home.mjs
 RUN pnpm run build
 
-# Negotiated WebP/AVIF previews need ffmpeg.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS app
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
-    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libwebp ' \
-    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libaom-av1 ' \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /data \
-    && chown 65532:65532 /data
+# The server is one static binary: no shell, package manager, or root user.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS app
+COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build /out/server /app/server
 COPY --from=web /src/web/dist /app/web
-# Declared late so a new version does not invalidate the ffmpeg layer.
 ARG OG_VERSION=dev
 ARG OG_REVISION=unknown
 # OCI image annotations: https://github.com/opencontainers/image-spec/blob/main/annotations.md

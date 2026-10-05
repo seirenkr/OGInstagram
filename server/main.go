@@ -58,6 +58,9 @@ func main() {
 			err = store.ExhaustBudget(ctx)
 		} else {
 			err = store.Backup(ctx, *backup)
+			if err == nil {
+				err = backupOffloadKeys(cfg.DataDir, *backup)
+			}
 		}
 		if err != nil {
 			slog.Error("storage maintenance failed", "error", err)
