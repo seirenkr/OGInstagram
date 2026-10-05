@@ -15,8 +15,8 @@ docker compose stop cloudflared proxy app
 docker compose up -d --wait --wait-timeout 90
 current=$(docker compose ps --format '{{.Image}}' app)
 # Keep the running and previous app images for rollback (set OG_IMAGE back and
-# rerun this script); remove every other unused image.
-docker image prune -af --filter 'label!=org.opencontainers.image.title=oginstagram'
+# rerun this script); remove dangling layers and older app images only.
+docker image prune -f
 docker images --format '{{.Repository}}:{{.Tag}}' oginstagram | while read -r image; do
   case "$image" in "$current"|"$previous") ;; *) docker rmi "$image" ;; esac
 done
