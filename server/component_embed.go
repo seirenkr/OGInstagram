@@ -297,8 +297,12 @@ func componentEmbedScript(card discordCard) string {
 	if card.verified && card.verifiedEmoji != "" {
 		author += " " + card.verifiedEmoji
 	}
-	if card.username != "" {
-		author += "\n" + discordLink("@"+truncateFlat(card.username, 30), card.authorURL)
+	// Instagram handles are [A-Za-z0-9._]{1,30}: nothing in them can break a
+	// masked link, so a valid handle is linked as is.
+	if validUsername(card.username) {
+		author += "\n[@" + card.username + "](" + card.authorURL + ")"
+	} else if card.username != "" {
+		author += "\n" + discordText("@"+truncateFlat(card.username, 30))
 	}
 	if !card.gallery && card.stats != "" {
 		// A third line fills the fixed-size avatar thumbnail's height.
