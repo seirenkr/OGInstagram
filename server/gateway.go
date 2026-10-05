@@ -40,6 +40,8 @@ type Gateway struct {
 	rates  map[string]clearanceLimit
 	client *http.Client
 
+	accessLog *accessLog // nil disables access logging (tests)
+
 	statusMu   sync.Mutex
 	statusBody []byte
 	statusAt   time.Time
@@ -90,6 +92,18 @@ func (g *Gateway) publicOrigin(r *http.Request) (string, bool) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Like nginx's `access_log off` on a health location: Docker's loopback
+	// probes every 30 seconds would drown the log.
+	if g.accessLog == nil || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		g.serve(w, r)
+		return
+	}
+	started, lw := time.Now(), &loggingWriter{ResponseWriter: w}
+	defer func() { g.accessLog.write(r, g.clientAddress(r), started, lw) }()
+	g.serve(lw, r)
+}
+
+func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 	setPublicSecurityHeaders(w.Header())
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
