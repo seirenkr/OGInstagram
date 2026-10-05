@@ -41,21 +41,30 @@ type offloadSigningConfig struct {
 // DATA_DIR, so issued links stay valid across restarts and deploys.
 func loadOrCreateOffloadKeys(dataDir string) (string, error) {
 	path := filepath.Join(dataDir, "offload-signing-keys.json")
+	if b, err := os.ReadFile(path); !errors.Is(err, fs.ErrNotExist) {
+		return string(b), err
+	}
 	key := make([]byte, offloadSigningKeySize)
 	rand.Read(key)
 	raw := `{"active":"local","keys":{"local":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		b, err := os.ReadFile(path)
-		return string(b), err
-	}
+	// Write a complete 0600 temp file, then link it into place: a crash never
+	// leaves a partial keyring, and a concurrent creator's keyring wins intact.
+	tmp, err := os.CreateTemp(dataDir, ".offload-signing-keys-*")
 	if err != nil {
 		return "", err
 	}
-	if _, err = f.WriteString(raw); err == nil {
-		err = f.Sync()
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.WriteString(raw); err == nil {
+		err = tmp.Sync()
 	}
-	return raw, errors.Join(err, f.Close())
+	if err = errors.Join(err, tmp.Close()); err != nil {
+		return "", err
+	}
+	if err = os.Link(tmp.Name(), path); errors.Is(err, fs.ErrExist) {
+		b, err := os.ReadFile(path)
+		return string(b), err
+	}
+	return raw, err
 }
 
 func parseOffloadSigner(raw string) (offloadSigner, error) {
