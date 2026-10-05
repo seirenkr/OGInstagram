@@ -1,25 +1,19 @@
 node_modules/
-.wrangler/
-/worker-configuration.d.ts
 server/oginstagram
-server/server
 web/dist/
-*.test
-.env
-.env.*
+.env*
 !.env.example
-.dev.vars
-npm-debug.log*
+.dev.vars*
 .DS_Store
 .claude/
-.agents/
 skills-lock.json
-.reference/
 web/public/PPMori-*.woff2
 
-server/external_helper.go
-server/external_helper_test.go
-tools/external-helper-signer.mjs
-
-# local Cloudflare API credentials
-cf-global-api-key*
+server/external_helper_private.go
+server/external_helper_private_test.go
+data/
+backups/
+output/
+tmp/
+secrets/
+.local-data/

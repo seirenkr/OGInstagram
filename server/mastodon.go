@@ -83,7 +83,7 @@ func mastodonMediaObject(id, kind, mediaURL, previewURL string, width, height in
 	}
 }
 
-func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
+func (a *App) mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
 	id := att.ID
 	if id == "" {
 		if pk := shortcodePK(shortcode); pk != nil {
@@ -91,8 +91,8 @@ func mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[str
 		}
 	}
 	return mastodonMediaObject(id, att.Kind,
-		offloadURL(baseURL, shortcode, index, false),
-		offloadURL(baseURL, shortcode, index, att.Kind == "video"),
+		a.offloadURL(baseURL, shortcode, index, false),
+		a.offloadURL(baseURL, shortcode, index, att.Kind == "video"),
 		att.Width, att.Height)
 }
 
@@ -102,38 +102,27 @@ type mastodonAccountData struct {
 	FullName       string
 	Avatar         string
 	Note           string
-	CreatedAt      time.Time
 	LastStatusAt   time.Time
 	FollowersCount int
 	FollowingCount int
 	StatusesCount  int
 }
 
-func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[string]any {
-	username := data.Username
-	display := data.FullName
-	if display == "" {
-		display = username
-	}
-	accountID := data.ID
-	if accountID == "" {
-		accountID = username
-	}
-	avatar := data.Avatar
+func mastodonAccount(data mastodonAccountData) map[string]any {
 	var note any
 	if data.Note != "" {
 		note = data.Note
 	}
 	return map[string]any{
-		"id":                 accountID,
-		"username":           username,
-		"acct":               username,
-		"url":                profileURL(username),
-		"uri":                profileURL(username),
-		"display_name":       display,
+		"id":                 cmp.Or(data.ID, data.Username),
+		"username":           data.Username,
+		"acct":               data.Username,
+		"url":                profileURL(data.Username),
+		"uri":                profileURL(data.Username),
+		"display_name":       cmp.Or(data.FullName, data.Username),
 		"note":               note,
-		"avatar":             avatar,
-		"avatar_static":      avatar,
+		"avatar":             data.Avatar,
+		"avatar_static":      data.Avatar,
 		"avatar_description": nil,
 		"header":             nil,
 		"header_static":      nil,
@@ -143,7 +132,7 @@ func (a *App) mastodonAccount(baseURL string, data mastodonAccountData) map[stri
 		"group":              false,
 		"discoverable":       nil,
 		"indexable":          false,
-		"created_at":         mastodonTime(data.CreatedAt),
+		"created_at":         nil,
 		"last_status_at":     mastodonDate(data.LastStatusAt),
 		"followers_count":    data.FollowersCount,
 		"following_count":    data.FollowingCount,
@@ -168,10 +157,10 @@ func profileMastodonMedia(m ProfileMedia, index int, mediaURL string) map[string
 }
 
 func (a *App) buildStoryMastodonStatus(baseURL string, story Story, gallery bool) []byte {
-	account := a.mastodonAccount(baseURL, mastodonAccountData{
+	account := mastodonAccount(mastodonAccountData{
 		Username:     story.Username,
 		FullName:     story.FullName,
-		Avatar:       storyAvatarURL(baseURL, story),
+		Avatar:       a.storyAvatarURL(baseURL, story),
 		LastStatusAt: story.CreatedAt,
 	})
 	return mastodonStatusJSON(
@@ -180,27 +169,27 @@ func (a *App) buildStoryMastodonStatus(baseURL string, story Story, gallery bool
 		storyOriginURL(story.Username, story.ID),
 		statusContent("", story.Caption, gallery), story.CreatedAt, account,
 		[]any{mastodonMediaObject(cmp.Or(story.Media.ID, story.ID), story.Media.Kind,
-			storyOffloadURL(baseURL, story.Username, story.ID, false),
-			storyOffloadURL(baseURL, story.Username, story.ID, story.Media.Kind == "video"),
+			a.storyOffloadURL(baseURL, story.Username, story.ID, false),
+			a.storyOffloadURL(baseURL, story.Username, story.ID, story.Media.Kind == "video"),
 			story.Media.Width, story.Media.Height)})
 }
 
 func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 	media := make([]any, 0, len(p.RecentMedia))
 	for i, m := range p.RecentMedia {
-		media = append(media, profileMastodonMedia(m, i, profileMediaOffloadURL(baseURL, p.Username, i)))
+		media = append(media, profileMastodonMedia(m, i, a.profileMediaOffloadURL(baseURL, p.Username, i)))
 	}
 
 	var created time.Time
 	if len(p.RecentMedia) > 0 && !p.RecentMedia[0].TakenAt.IsZero() {
 		created = p.RecentMedia[0].TakenAt
 	}
-	account := a.mastodonAccount(baseURL, mastodonAccountData{
+	account := mastodonAccount(mastodonAccountData{
 		ID:             p.UserID,
 		Username:       p.Username,
 		FullName:       p.FullName,
-		Avatar:         profileAvatarURL(baseURL, p),
-		Note:           profileBioHTML(p),
+		Avatar:         a.profileAvatarURL(baseURL, p),
+		Note:           captionParagraphHTML(p.Biography),
 		LastStatusAt:   created,
 		FollowersCount: p.FollowerCount,
 		FollowingCount: p.FollowingCount,
@@ -217,14 +206,14 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 	selection := selectActivityAttachments(post, mediaIndex, specified)
 	media := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
-		media = append(media, mastodonMedia(baseURL, post.Shortcode, it.att, it.index))
+		media = append(media, a.mastodonMedia(baseURL, post.Shortcode, it.att, it.index))
 	}
 
-	account := a.mastodonAccount(baseURL, mastodonAccountData{
+	account := mastodonAccount(mastodonAccountData{
 		ID:           post.OwnerID,
 		Username:     post.Username,
 		FullName:     post.FullName,
-		Avatar:       postAvatarURL(baseURL, post),
+		Avatar:       a.postAvatarURL(baseURL, post),
 		LastStatusAt: post.CreatedAt,
 	})
 	return mastodonStatusJSON(

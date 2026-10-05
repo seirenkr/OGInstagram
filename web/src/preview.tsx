@@ -4,10 +4,8 @@ import { Input } from "@cloudflare/kumo/components/input";
 import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { PlayIcon as Play } from "@phosphor-icons/react/Play";
 import { parse as parseEmoji } from "@twemoji/parser";
-import { delay } from "motion";
-import { AnimatePresence, useAnimate } from "motion/react";
-import * as m from "motion/react-m";
-import { validEmbedPath } from "../../shared/routes.ts";
+import { canonicalServiceHost, instagramEmbedPath, mastodonStatusPathFromAlternate } from "../../shared/routes.ts";
+import { continueCurrentAttempt, requestPreview } from "./preview-request.ts";
 
 export type PreviewCopy = {
   line1: string;
@@ -40,6 +38,7 @@ declare global {
       }) => string;
       execute: (widgetId: string) => void;
       reset: (widgetId: string) => void;
+      remove: (widgetId: string) => void;
     };
     onloadTurnstileCallback?: () => void;
   }
@@ -70,17 +69,11 @@ type PreviewProps = {
   copy: PreviewCopy;
   turnstileSiteKey: string;
   reduceMotion: boolean;
-  pulseComposer: boolean;
 };
 
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onloadTurnstileCallback";
 const STATS_EMOJI_RE = /❤️|💬|📝|👤|▶️/;
-const TWEMOJI_BASE = "/twemoji/";
-const EASE = [0.16, 1, 0.3, 1] as const;
-const windowDot = {
-  rest: { scale: 1 },
-  hover: (index: number) => ({ scale: 1.2, transition: { duration: 0.15, delay: index * 0.045 } }),
-};
+const TWEMOJI_BASE = "/twemoji/v15.0.0/";
 let turnstileReady: Promise<void> | null = null;
 
 function loadTurnstile(): Promise<void> {
@@ -107,13 +100,24 @@ function loadTurnstile(): Promise<void> {
   return turnstileReady;
 }
 
+// Callers pass an already-canonicalized service host (see app.tsx).
 export function HighlightedHost({ host }: { host: string }) {
   if (!host.toLowerCase().startsWith("og")) return host;
   return <><strong className="text-kumo-brand">{host.slice(0, 2)}</strong>{host.slice(2)}</>;
 }
 
-function TwemojiText({ children }: { children: string }) {
-  const emojis = parseEmoji(children, { buildUrl: (codepoints) => codepoints ? `${TWEMOJI_BASE}${codepoints}.svg` : "" });
+function TwemojiImage({ text, url }: { text: string; url: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return text;
+  return <img className="inline-block h-[1.1em] w-[1.1em] align-[-0.18em]" src={url}
+    alt={text} draggable={false} width={20} height={20} loading="lazy" decoding="async"
+    onError={() => setFailed(true)} />;
+}
+
+const TwemojiText = React.memo(function TwemojiText({ children }: { children: string }) {
+  const emojis = useMemo(() => parseEmoji(children, {
+    buildUrl: (codepoints) => codepoints ? `${TWEMOJI_BASE}${codepoints}.svg` : "",
+  }), [children]);
   if (!emojis.length) return children;
   const parts: React.ReactNode[] = [];
   let cursor = 0;
@@ -121,8 +125,7 @@ function TwemojiText({ children }: { children: string }) {
     const [start, end] = emoji.indices;
     if (start > cursor) parts.push(children.slice(cursor, start));
     if (emoji.url) {
-      parts.push(<img key={`${start}-${emoji.text}`} className="inline-block h-[1.1em] w-[1.1em] align-[-0.18em]" src={emoji.url}
-        alt={emoji.text} draggable={false} width={20} height={20} />);
+      parts.push(<TwemojiImage key={`${start}-${emoji.text}`} text={emoji.text} url={emoji.url} />);
     } else {
       parts.push(emoji.text);
     }
@@ -130,29 +133,15 @@ function TwemojiText({ children }: { children: string }) {
   }
   if (cursor < children.length) parts.push(children.slice(cursor));
   return <>{parts}</>;
-}
+});
 
-function parseInstagramLink(raw: string): string | null {
-  let value = raw.trim();
-  if (!value) return null;
-  if (!/^https?:\/\//i.test(value)) value = `https://${value}`;
-  let url: URL;
-  try { url = new URL(value); } catch { return null; }
-  const hostname = url.hostname.toLowerCase();
-  if (hostname !== "instagram.com" && !hostname.endsWith(".instagram.com")) return null;
-  const parts = url.pathname.split("/").filter(Boolean);
-  if (!parts.length) return null;
-  const path = `/${parts.join("/")}`;
-  return validEmbedPath(path) ? path : null;
-}
-
-function normalizePreviewURL(raw: string, serviceHost: string): string | undefined {
+function normalizePreviewUrl(raw: string, serviceHost: string): string | undefined {
   if (!raw) return undefined;
   let url: URL;
   try { url = new URL(raw, location.origin); } catch { return undefined; }
   if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-  const localHost = serviceHost.toLowerCase().replace(/^www\./, "").split(":")[0];
-  const urlHost = url.hostname.toLowerCase().replace(/^www\./, "");
+  const localHost = serviceHost.toLowerCase().split(":")[0];
+  const urlHost = canonicalServiceHost(url.hostname.toLowerCase());
   if (localHost && urlHost === localHost) {
     url = new URL(`${url.pathname}${url.search}`, location.origin);
   } else if (url.hostname.endsWith(".fbcdn.net") || url.hostname.endsWith(".cdninstagram.com")) {
@@ -161,12 +150,17 @@ function normalizePreviewURL(raw: string, serviceHost: string): string | undefin
   return url.href;
 }
 
-function previewMediaURL(raw: string, serviceHost: string, video = false): string | undefined {
-  const normalized = normalizePreviewURL(raw, serviceHost);
+function previewMediaUrl(
+  raw: string,
+  serviceHost: string,
+  video = false,
+  variant: "media" | "avatar" = "media"
+): string | undefined {
+  const normalized = normalizePreviewUrl(raw, serviceHost);
   if (!normalized) return undefined;
   const url = new URL(normalized);
   if (url.origin === location.origin && url.pathname.startsWith("/offload/")) {
-    url.searchParams.set("preview", "1");
+    url.searchParams.set("preview", variant === "avatar" ? "avatar" : "1");
     if (video) url.searchParams.set("thumbnail", "1");
   }
   return url.href;
@@ -175,7 +169,7 @@ function previewMediaURL(raw: string, serviceHost: string, video = false): strin
 function safeHref(raw: string): string | null {
   try {
     const url = new URL(raw);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:" ? url.toString() : null;
   } catch { return null; }
 }
 
@@ -205,88 +199,96 @@ function renderStatusContent(input: string): React.ReactNode[] {
 
 async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
   const href = doc.querySelector('link[rel="alternate"][type="application/activity+json"]')?.getAttribute("href");
-  const id = href?.split("/").filter(Boolean).pop();
-  if (!id) return {};
-  try {
-    const response = await fetch(`/api/v1/statuses/${encodeURIComponent(id)}`, { signal });
-    if (!response.ok) return {};
-    const status = await response.json() as {
-      content?: unknown;
-      created_at?: unknown;
-      media_attachments?: unknown;
-      account?: { url?: unknown; avatar?: unknown };
-    };
-    let captionNodes: React.ReactNode[] | undefined;
-    if (typeof status.content === "string" && status.content) {
-      const nodes = renderStatusContent(status.content);
-      if (nodes.length) captionNodes = nodes;
-    }
-    const media = Array.isArray(status.media_attachments) ? status.media_attachments.flatMap((raw): PreviewMedia[] => {
-      if (!raw || typeof raw !== "object") return [];
-      const item = raw as Record<string, unknown>;
-      const kind = item.type === "image" ? "image" : item.type === "video" || item.type === "gifv" ? "video" : null;
-      if (!kind || typeof item.url !== "string") return [];
-      const mediaURL = previewMediaURL(item.url, serviceHost, kind === "video");
-      if (!mediaURL) return [];
-      const original = (item.meta as Record<string, unknown> | undefined)?.original as Record<string, unknown> | undefined;
-      return [{
-        url: mediaURL,
-        kind,
-        width: typeof original?.width === "number" && original.width > 0 ? original.width : undefined,
-        height: typeof original?.height === "number" && original.height > 0 ? original.height : undefined,
-      }];
-    }).slice(0, 4) : [];
-    const account = status.account;
-    const created = typeof status.created_at === "string" ? new Date(status.created_at) : undefined;
-    return {
-      profileUrl: typeof account?.url === "string" ? account.url : undefined,
-      authorIconUrl: typeof account?.avatar === "string" ? normalizePreviewURL(account.avatar, serviceHost) : undefined,
-      captionNodes,
-      media: media.length ? media : undefined,
-      date: created && !Number.isNaN(created.getTime()) ? dateFormatter.format(created) : undefined,
-    };
-  } catch (error) {
-    if (signal.aborted) throw error;
-    return {};
+  const statusPath = href ? mastodonStatusPathFromAlternate(href, location.origin) : null;
+  if (!statusPath) throw new Error("missing Mastodon status metadata");
+  const response = await fetch(statusPath, { signal });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const status = await response.json() as {
+    content?: unknown;
+    created_at?: unknown;
+    media_attachments?: unknown;
+    account?: { url?: unknown; avatar?: unknown };
+  };
+  if (typeof status.content !== "string") throw new Error("invalid Mastodon status");
+  let captionNodes: React.ReactNode[] | undefined;
+  if (status.content) {
+    const nodes = renderStatusContent(status.content);
+    if (nodes.length) captionNodes = nodes;
   }
+  const media = Array.isArray(status.media_attachments) ? status.media_attachments.flatMap((raw): PreviewMedia[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Record<string, unknown>;
+    const kind = item.type === "image" ? "image" : item.type === "video" || item.type === "gifv" ? "video" : null;
+    if (!kind || typeof item.url !== "string") return [];
+    const mediaUrl = previewMediaUrl(item.url, serviceHost, kind === "video");
+    if (!mediaUrl) return [];
+    const original = (item.meta as Record<string, unknown> | undefined)?.original as Record<string, unknown> | undefined;
+    return [{
+      url: mediaUrl,
+      kind,
+      width: typeof original?.width === "number" && original.width > 0 ? original.width : undefined,
+      height: typeof original?.height === "number" && original.height > 0 ? original.height : undefined,
+    }];
+  }).slice(0, 4) : [];
+  const account = status.account;
+  return {
+    profileUrl: typeof account?.url === "string" ? safeHref(account.url) ?? undefined : undefined,
+    authorIconUrl: typeof account?.avatar === "string"
+      ? previewMediaUrl(account.avatar, serviceHost, false, "avatar")
+      : undefined,
+    captionNodes,
+    media: media.length ? media : undefined,
+    date: previewDate(status.created_at, dateFormatter),
+  };
 }
 
-async function fetchPreview(path: string, token: string, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
-  const response = await fetch("/api/embed", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ path, token }),
-    signal,
-  });
-  if (response.status === 429) throw new Error("rate-limited");
-  if (!response.ok) throw new Error(`status ${response.status}`);
-  const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+function previewDate(raw: unknown, dateFormatter: Intl.DateTimeFormat): string | undefined {
+  if (typeof raw !== "string" || !raw) return undefined;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? undefined : dateFormatter.format(date);
+}
+
+async function parseHTMLPreview(doc: Document, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
   const meta = (key: string) => doc.querySelector(`meta[property="${key}"], meta[name="${key}"]`)?.getAttribute("content") ?? "";
   const title = meta("og:title");
   if (!title) throw new Error("no embed metadata");
-  const status = await fetchStatusPreview(doc, signal, serviceHost, dateFormatter);
+  const status = await fetchStatusPreview(doc, signal, serviceHost, dateFormatter)
+    .catch((error: unknown): Partial<PreviewPost> => { if (signal.aborted) throw error; return {}; });
   const description = meta("og:description");
   const [firstBlock = "", ...restBlocks] = description.split("\n\n");
   const hasStats = STATS_EMOJI_RE.test(firstBlock);
   const isProfile = meta("og:type") === "profile";
   const isVideo = Boolean(meta("og:video"));
-  const image = previewMediaURL(meta("og:image"), serviceHost, isVideo);
-  const published = meta("article:published_time");
-  const publishedDate = published ? new Date(published) : new Date();
-  const authorIcon = normalizePreviewURL(doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "", serviceHost) || (isProfile && image ? image : "");
+  const image = previewMediaUrl(meta("og:image"), serviceHost, isVideo);
+  const authorIcon = previewMediaUrl(
+    doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "",
+    serviceHost,
+    false,
+    "avatar"
+  ) || (isProfile && image ? image : "");
   const fallbackMedia = image && !image.includes("/favicon-")
     ? [{ url: image, kind: isVideo ? "video" : "image" } satisfies PreviewMedia]
     : undefined;
   return {
     title,
-    profileUrl: status.profileUrl ?? (meta("article:author") || undefined),
+    profileUrl: status.profileUrl ?? (safeHref(meta("article:author")) ?? undefined),
     authorIconUrl: status.authorIconUrl ?? (authorIcon || undefined),
     statsText: status.captionNodes ? undefined : (hasStats ? firstBlock : undefined),
     captionNodes: status.captionNodes,
     caption: status.captionNodes ? undefined : (hasStats ? restBlocks.join("\n\n") : description) || undefined,
     media: status.media ?? fallbackMedia,
-    date: status.date ?? dateFormatter.format(Number.isNaN(publishedDate.getTime()) ? new Date() : publishedDate),
+    date: status.date ?? previewDate(meta("article:published_time"), dateFormatter),
   };
+}
+
+async function fetchPreview(path: string, token: string | undefined, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
+  const response = await requestPreview(path, token, signal);
+  if (response.status === 429) throw new Error("rate-limited");
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("text/html")) throw new Error("invalid preview response");
+  const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+  return parseHTMLPreview(doc, signal, serviceHost, dateFormatter);
 }
 
 function PreviewMediaGrid({ items = [], videoUnavailable }: { items?: PreviewMedia[]; videoUnavailable: string }) {
@@ -314,7 +316,7 @@ function PreviewMediaGrid({ items = [], videoUnavailable }: { items?: PreviewMed
   </div>;
 }
 
-export default function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion, pulseComposer }: PreviewProps) {
+function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: PreviewProps) {
   const baseHost = host.toLowerCase().startsWith("og") ? host.slice(2) : host;
   const timeFormatter = useMemo(() => new Intl.DateTimeFormat(lang, { hour: "numeric", minute: "numeric" }), [lang]);
   const dateFormatter = useMemo(() => new Intl.DateTimeFormat(lang, { year: "numeric", month: "numeric", day: "numeric" }), [lang]);
@@ -332,35 +334,52 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
     date: dateFormatter.format(new Date()),
   }), [dateFormatter, timeFormatter]);
   const [post, setPost] = useState<PreviewPost | null>(null);
-  const postID = post?.id;
+  const postId = post?.id;
   const [stage, setStage] = useState<"sent" | "morph" | "embed">("sent");
   const [previewActive, setPreviewActive] = useState(true);
   const [inputValue, setInputValue] = useState("");
   const [typewriterState, setTypewriterState] = useState<"typing" | "paused" | "done">("typing");
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [composerScope, animateComposer] = useAnimate();
+  const composer = useRef<HTMLDivElement>(null);
+  const typewriterText = useRef<HTMLSpanElement>(null);
+  const typewriterCaret = useRef<HTMLSpanElement>(null);
   const nextPostId = useRef(1);
   const previewAbort = useRef<AbortController | null>(null);
   const turnstileHost = useRef<HTMLDivElement>(null);
   const turnstileWidget = useRef<string | null>(null);
   const pendingPath = useRef<string | null>(null);
+  const verificationAttempt = useRef(0);
 
   useEffect(() => {
     if (turnstileSiteKey) void loadTurnstile().catch(() => {});
   }, [turnstileSiteKey]);
 
   useEffect(() => () => {
+    verificationAttempt.current++;
     pendingPath.current = null;
     previewAbort.current?.abort();
+    if (turnstileWidget.current !== null) {
+      window.turnstile?.remove(turnstileWidget.current);
+      turnstileWidget.current = null;
+    }
   }, []);
 
-  function failVerification() {
-    const path = pendingPath.current;
+  function cancelPreviewWork() {
+    verificationAttempt.current++;
+    const hadPendingVerification = pendingPath.current !== null;
     pendingPath.current = null;
-    if (!path) return;
-    if (turnstileWidget.current) window.turnstile?.reset(turnstileWidget.current);
-    setVerifying(false);
+    if (hadPendingVerification && turnstileWidget.current !== null) {
+      window.turnstile?.reset(turnstileWidget.current);
+    }
+    if (hadPendingVerification) setVerifying(false);
+    previewAbort.current?.abort();
+    previewAbort.current = null;
+  }
+
+  function failVerification() {
+    if (pendingPath.current === null) return;
+    cancelPreviewWork();
     setError(copy.fetchError);
   }
 
@@ -377,11 +396,12 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
         "response-field": false,
         callback: (token) => {
           const path = pendingPath.current;
-          pendingPath.current = null;
           if (!path) return;
-          if (turnstileWidget.current) window.turnstile?.reset(turnstileWidget.current);
-          setVerifying(false);
-          runPreview(path, token);
+          void runPreview(path, token).finally(() => {
+            pendingPath.current = null;
+            if (turnstileWidget.current !== null) window.turnstile?.reset(turnstileWidget.current);
+            setVerifying(false);
+          });
         },
         "error-callback": failVerification,
         "expired-callback": failVerification,
@@ -394,39 +414,48 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
   useEffect(() => {
     if (!previewActive || reduceMotion) return;
     const source = `https://${baseHost}${samplePost.path}`;
-    let cursor = 0;
-    let cancelled = false;
-    let cancel = () => {};
-    const typeNext = () => {
-      if (cancelled) return;
-      cancel = delay(() => {
-        cursor += 1;
-        setInputValue(source.slice(0, cursor));
-        if (cursor < source.length) typeNext();
-        else {
-          setTypewriterState("paused");
-          cancel = delay(() => {
-            setInputValue("");
-            setTypewriterState("done");
-            setPost(samplePost);
-          }, 0.8);
-        }
-      }, 0.03);
-    };
-    typeNext();
+    const text = typewriterText.current;
+    const caret = typewriterCaret.current;
+    if (!text || !caret) return;
+    const duration = source.length * 30;
+    const easing = `steps(${source.length}, end)`;
+    const width = Math.max(0, text.getBoundingClientRect().width - 2);
+    const textAnimation = text.animate(
+      [{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0% 0 0)" }],
+      { duration, easing, fill: "forwards" }
+    );
+    const caretAnimation = caret.animate(
+      [{ transform: "translateX(0)" }, { transform: `translateX(${width}px)` }],
+      { duration, easing, fill: "forwards" }
+    );
+    const pauseTimer = window.setTimeout(() => {
+      setTypewriterState("paused");
+      postTimer = window.setTimeout(() => {
+        setTypewriterState("done");
+        setPost(samplePost);
+      }, 800);
+    }, duration);
+    let postTimer: number | undefined;
     return () => {
-      cancelled = true;
-      cancel();
+      textAnimation.cancel();
+      caretAnimation.cancel();
+      window.clearTimeout(pauseTimer);
+      window.clearTimeout(postTimer);
     };
   }, [baseHost, previewActive, reduceMotion, samplePost]);
 
   useEffect(() => {
-    if (postID === undefined || reduceMotion) return;
-    const cancel = [delay(() => setStage("morph"), 0.9), delay(() => setStage("embed"), 1.65)];
-    return () => cancel.forEach((stop) => stop());
-  }, [postID, reduceMotion]);
+    if (postId === undefined || reduceMotion) return;
+    const morphTimer = window.setTimeout(() => setStage("morph"), 900);
+    const embedTimer = window.setTimeout(() => setStage("embed"), 1650);
+    return () => {
+      window.clearTimeout(morphTimer);
+      window.clearTimeout(embedTimer);
+    };
+  }, [postId, reduceMotion]);
 
-  function runPreview(path: string, token: string) {
+  async function runPreview(path: string, token?: string): Promise<void> {
+    previewAbort.current?.abort();
     const id = nextPostId.current++;
     const controller = new AbortController();
     previewAbort.current = controller;
@@ -434,34 +463,46 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
     setInputValue("");
     setStage("sent");
     setPost({ id, author: copy.you, avatar: "/preview/v1/avatar-3.svg", time: timeFormatter.format(new Date()), path });
-    fetchPreview(path, token, controller.signal, host, dateFormatter)
-      .then((live) => {
-        if (!controller.signal.aborted) setPost((current) => current && current.id === id ? { ...current, ...live } : current);
-      })
-      .catch((reason: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(reason instanceof Error && reason.message === "rate-limited" ? copy.rateLimited : copy.fetchError);
-      })
-      .finally(() => {
-        if (previewAbort.current === controller) previewAbort.current = null;
-      });
+    try {
+      const live = await fetchPreview(path, token, controller.signal, host, dateFormatter);
+      if (!controller.signal.aborted) setPost((current) => current && current.id === id ? { ...current, ...live } : current);
+    } catch (reason: unknown) {
+      if (controller.signal.aborted) return;
+      if (token === undefined && reason instanceof Error && reason.message === "cloudflare-challenge") {
+        const attempt = ++verificationAttempt.current;
+        pendingPath.current = path;
+        setVerifying(true);
+        void continueCurrentAttempt(
+          loadTurnstile(),
+          () => verificationAttempt.current === attempt && pendingPath.current === path,
+          executeTurnstile,
+          failVerification,
+        );
+        return;
+      }
+      setError(reason instanceof Error && reason.message === "rate-limited" ? copy.rateLimited : copy.fetchError);
+    } finally {
+      if (previewAbort.current === controller) previewAbort.current = null;
+    }
   }
 
   function submitLink(event: React.FormEvent) {
     event.preventDefault();
     if (pendingPath.current) return;
+    cancelPreviewWork();
     setPreviewActive(false);
-    const path = parseInstagramLink(inputValue);
+    const path = instagramEmbedPath(inputValue);
     if (!path) {
       setError(copy.invalid);
-      if (!reduceMotion && composerScope.current) animateComposer(composerScope.current, { x: [0, -7, 7, -5, 5, 0] }, { duration: 0.36 });
+      if (!reduceMotion) {
+        composer.current?.animate(
+          { transform: ["translateX(0)", "translateX(-7px)", "translateX(7px)", "translateX(-5px)", "translateX(5px)", "translateX(0)"] },
+          { duration: 360, easing: "ease-out" }
+        );
+      }
       return;
     }
-    previewAbort.current?.abort();
-    pendingPath.current = path;
-    setError(null);
-    setVerifying(true);
-    void loadTurnstile().then(executeTurnstile).catch(failVerification);
+    void runPreview(path);
   }
 
   const visiblePost = post ?? (previewActive && reduceMotion ? samplePost : null);
@@ -469,29 +510,25 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
   return <figure className="m-0 w-full">
     <figcaption className="sr-only">{copy.previewDesc}</figcaption>
     <div className="flex h-[32rem] flex-col overflow-hidden rounded-[14px] border border-kumo-hairline bg-kumo-elevated text-kumo-default shadow-[0_30px_80px_-48px_var(--color-kumo-shadow-drop)] [contain:layout_paint]">
-      <m.div className="flex h-[2.4rem] flex-none items-center gap-3 border-b border-[color-mix(in_srgb,var(--color-kumo-hairline)_86%,transparent)] bg-[linear-gradient(180deg,color-mix(in_srgb,var(--color-kumo-base)_62%,var(--color-kumo-elevated)),color-mix(in_srgb,var(--color-kumo-recessed)_72%,var(--color-kumo-elevated)))] px-3.5 max-sm:h-[2.125rem] max-sm:px-3"
-        aria-hidden="true" initial="rest" whileHover="hover">
+      <div className="preview-titlebar flex h-[2.4rem] flex-none items-center gap-3 border-b border-[color-mix(in_srgb,var(--color-kumo-hairline)_86%,transparent)] bg-[linear-gradient(180deg,color-mix(in_srgb,var(--color-kumo-base)_62%,var(--color-kumo-elevated)),color-mix(in_srgb,var(--color-kumo-recessed)_72%,var(--color-kumo-elevated)))] px-3.5 max-sm:h-[2.125rem] max-sm:px-3"
+        aria-hidden="true">
         <div className="flex gap-[0.44rem]">
-          {["bg-[#ff5f57]", "bg-[#febc2e]", "bg-[#28c840]"].map((color, index) => <m.span key={color} custom={index} variants={windowDot}
-            className={`h-2.5 w-2.5 rounded-full border border-black/15 shadow-[inset_0_1px_0_rgb(255_255_255/0.28),0_0.5px_0_rgb(0_0_0/0.08)] ${color}`} />)}
+          {["bg-[#ff5f57]", "bg-[#febc2e]", "bg-[#28c840]"].map((color) => <span key={color}
+            className={`preview-window-dot h-2.5 w-2.5 rounded-full border border-black/15 shadow-[inset_0_1px_0_rgb(255_255_255/0.28),0_0.5px_0_rgb(0_0_0/0.08)] ${color}`} />)}
         </div>
         <span className="text-xs font-semibold text-kumo-subtle" translate="no">{copy.channel}</span>
-      </m.div>
-      <div className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 [scrollbar-width:thin]" aria-live="polite">
-        <AnimatePresence mode="wait" initial={false}>
-          {visiblePost ? <m.div key={visiblePost.id} className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-3 max-sm:grid-cols-[2rem_minmax(0,1fr)] max-sm:gap-2.5"
-            initial={reduceMotion ? false : { opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }}
-            exit={reduceMotion ? undefined : { opacity: 0, y: -10, transition: { duration: 0.16 } }} transition={{ type: "spring", stiffness: 320, damping: 26 }}>
+      </div>
+      <div className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 [scrollbar-width:thin]" aria-live={previewActive ? "off" : "polite"}>
+          {visiblePost ? <div key={visiblePost.id} className="hero-item grid grid-cols-[2.25rem_minmax(0,1fr)] gap-3 max-sm:grid-cols-[2rem_minmax(0,1fr)] max-sm:gap-2.5">
             <img className="h-9 w-9 rounded-full border border-[color-mix(in_srgb,var(--color-kumo-brand)_20%,var(--color-kumo-hairline))] bg-[color-mix(in_srgb,var(--color-kumo-brand)_9%,var(--color-kumo-base))] object-cover max-sm:h-8 max-sm:w-8"
               src={visiblePost.avatar} alt="" width={36} height={36} aria-hidden="true" />
             <div className="min-w-0">
               <div className="flex items-baseline gap-2 leading-tight"><strong className="text-sm font-semibold text-kumo-default" translate="no">{visiblePost.author}</strong><span className="text-[0.67rem] text-kumo-subtle">{visiblePost.time}</span></div>
               <div className="relative mt-1.5 h-[1.4rem] overflow-hidden text-[0.8rem] leading-[1.4rem] max-sm:text-xs" translate="no">
-                <m.div className="absolute inset-0 truncate text-kumo-subtle" initial={false} animate={{ opacity: visibleStage === "sent" ? 1 : 0, y: visibleStage === "sent" ? 0 : -7 }} transition={{ duration: 0.4, ease: EASE }}>https://{baseHost}{visiblePost.path}</m.div>
-                <m.div className="absolute inset-0 truncate text-kumo-default" initial={false} animate={{ opacity: visibleStage === "sent" ? 0 : 1, y: visibleStage === "sent" ? 7 : 0 }} transition={{ duration: 0.45, ease: EASE }}><span>https://</span><HighlightedHost host={host} /><span>{visiblePost.path}</span></m.div>
+                <div className={`preview-url-source absolute inset-0 truncate text-kumo-subtle ${visibleStage === "sent" ? "" : "preview-url-hidden"}`}>https://{baseHost}{visiblePost.path}</div>
+                <div className={`preview-url-target absolute inset-0 truncate text-kumo-default ${visibleStage === "sent" ? "" : "preview-url-visible"}`}><span>https://</span><HighlightedHost host={host} /><span>{visiblePost.path}</span></div>
               </div>
-              {visibleStage === "embed" && visiblePost.title ? <m.article className="mt-3 rounded border-l-4 border-kumo-brand bg-kumo-base py-2 pr-4 pb-4 pl-3 [overflow-wrap:anywhere] max-sm:pr-3"
-                initial={reduceMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ type: "spring", stiffness: 260, damping: 26 }}>
+              {visibleStage === "embed" && visiblePost.title ? <article className="hero-item mt-3 rounded border-l-4 border-kumo-brand bg-kumo-base py-2 pr-4 pb-4 pl-3 [overflow-wrap:anywhere] max-sm:pr-3">
                 <div className="mt-2 flex items-center gap-2">
                   <img className="h-6 w-6 rounded-full object-cover" src={visiblePost.authorIconUrl ?? visiblePost.avatar} alt="" width={24} height={24} />
                   {visiblePost.profileUrl ? <a className="text-sm font-semibold text-kumo-default no-underline hover:underline" href={visiblePost.profileUrl} target="_blank" rel="noreferrer noopener" translate="no">{visiblePost.title}</a> : <span className="text-sm font-semibold text-kumo-default" translate="no">{visiblePost.title}</span>}
@@ -502,27 +539,39 @@ export default function Preview({ brand, host, lang, copy, turnstileSiteKey, red
                 </div> : null}
                 <PreviewMediaGrid items={visiblePost.media} videoUnavailable={copy.videoUnavailable} />
                 <div className="mt-2.5 flex items-center gap-2"><img className="h-5 w-5 rounded-full object-cover" src="/favicon-64.png" alt="" width={20} height={20} /><span className="text-[0.7rem] leading-tight text-kumo-subtle" translate="no">{brand}{visiblePost.date ? <><i className="mx-1 not-italic">•</i>{visiblePost.date}</> : null}</span></div>
-              </m.article> : null}
+              </article> : null}
             </div>
-          </m.div> : null}
-        </AnimatePresence>
+          </div> : null}
       </div>
       <form className="flex flex-none flex-wrap items-start gap-2 border-t border-[color-mix(in_srgb,var(--color-kumo-hairline)_86%,transparent)] bg-[color-mix(in_srgb,var(--color-kumo-recessed)_55%,var(--color-kumo-elevated))] p-3 pb-3.5" onSubmit={submitLink}>
-        <m.div ref={composerScope} className="relative min-w-0 flex-1 rounded-lg [&_label]:hidden"
-          initial={pulseComposer ? { boxShadow: "0 0 0 0 rgb(255 0 105 / 0.3)" } : false} animate={pulseComposer ? { boxShadow: "0 0 0 12px rgb(255 0 105 / 0)" } : undefined} transition={{ duration: 1.1, ease: "easeOut", repeat: 1 }}>
+        <div ref={composer} className="composer-pulse relative min-w-0 flex-1 rounded-lg [&_label]:hidden">
           <Input className={`w-full ${previewActive && !reduceMotion && typewriterState !== "done" ? "text-transparent caret-transparent placeholder:text-transparent" : ""}`}
-            value={inputValue} onChange={(event) => { setInputValue(event.target.value); setPreviewActive(false); if (error) setError(null); }}
-            onFocus={() => { if (previewActive) { setPreviewActive(false); setInputValue(""); } }} placeholder={copy.placeholder}
-            aria-label="Instagram URL" error={error ?? undefined} translate="no" passwordManagerIgnore autoComplete="off" spellCheck={false} inputMode="url" enterKeyHint="go" />
+            value={inputValue} onChange={(event) => {
+              cancelPreviewWork();
+              setInputValue(event.target.value);
+              setPreviewActive(false);
+              if (error) setError(null);
+            }}
+            onFocus={() => {
+              if (previewActive) {
+                cancelPreviewWork();
+                setPreviewActive(false);
+                setInputValue("");
+              }
+            }} placeholder={previewActive && !reduceMotion && typewriterState !== "done" ? "" : copy.placeholder}
+            aria-label={copy.placeholder} error={error ?? undefined} disabled={verifying} translate="no" passwordManagerIgnore autoComplete="off" spellCheck={false} inputMode="url" enterKeyHint="go" />
           {previewActive && !reduceMotion && typewriterState !== "done" ? <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-3 right-3 flex items-center overflow-hidden whitespace-pre text-base text-kumo-default">
-            <span className="truncate">{inputValue}</span>
-            <m.span className="relative top-[0.1em] left-[0.2em] inline-block h-[1em] w-[2px] shrink-0 bg-kumo-brand" initial={false}
-              animate={typewriterState === "paused" ? { opacity: [1, 1, 0, 0] } : { opacity: 1 }} transition={typewriterState === "paused" ? { duration: 0.5, times: [0, 0.5, 0.5, 1], ease: "linear", repeat: Infinity, repeatType: "reverse" } : { duration: 0 }} />
+            <span className="relative inline-block max-w-full">
+              <span ref={typewriterText} className="typewriter-text block truncate">{`https://${baseHost}${samplePost.path}`}</span>
+              <span ref={typewriterCaret} className={`typewriter-caret absolute top-[0.1em] left-[0.2em] inline-block h-[1em] w-[2px] bg-kumo-brand ${typewriterState === "paused" ? "typewriter-caret-blink" : ""}`} />
+            </span>
           </span> : null}
-        </m.div>
+        </div>
         <Button type="submit" variant="primary" shape="square" icon={PaperPlaneRight} aria-label={copy.submit} disabled={!turnstileSiteKey || verifying} />
         <div ref={turnstileHost} className="basis-full empty:hidden" />
       </form>
     </div>
   </figure>;
 }
+
+export default React.memo(Preview);

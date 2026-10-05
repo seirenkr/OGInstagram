@@ -69,10 +69,7 @@ func statusContent(prefix, caption string, gallery bool) string {
 	if gallery {
 		return ""
 	}
-	if caption = normalizeCaption(caption); caption != "" {
-		prefix += "<p>" + captionHTML(caption) + "</p>"
-	}
-	return prefix
+	return prefix + captionParagraphHTML(caption)
 }
 
 func (a *App) buildActivityStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
@@ -86,7 +83,7 @@ func (a *App) buildActivityStatus(baseURL string, post Post, postType string, me
 
 	attachment := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
-		attachment = append(attachment, activityAttachment(offloadURL(baseURL, post.Shortcode, it.index, false), it.att))
+		attachment = append(attachment, activityAttachment(a.offloadURL(baseURL, post.Shortcode, it.index, false), it.att))
 	}
 
 	return noteObject(id, actorURL(baseURL, post.Username), content, postURL, isoTime(post.CreatedAt), attachment)
@@ -126,7 +123,7 @@ func storyStatusURL(baseURL, username, id string, gallery bool) string {
 }
 
 func (a *App) buildStoryActivityStatus(baseURL string, story Story, gallery bool) []byte {
-	media := activityAttachment(storyOffloadURL(baseURL, story.Username, story.ID, false), story.Media)
+	media := activityAttachment(a.storyOffloadURL(baseURL, story.Username, story.ID, false), story.Media)
 
 	return noteObject(storyStatusURL(baseURL, story.Username, story.ID, gallery), actorURL(baseURL, story.Username),
 		statusContent("", story.Caption, gallery), storyOriginURL(story.Username, story.ID), isoTime(story.CreatedAt), []any{media})
@@ -134,7 +131,7 @@ func (a *App) buildStoryActivityStatus(baseURL string, story Story, gallery bool
 
 func profileDigestContent(p Profile) string {
 	content := "<p><b>" + html.EscapeString(profileStatsLine(p)) + "</b></p>"
-	if bio := profileBioHTML(p); bio != "" {
+	if bio := captionParagraphHTML(p.Biography); bio != "" {
 		content += bio
 	}
 	if p.IsPrivate {
@@ -146,13 +143,12 @@ func profileDigestContent(p Profile) string {
 func (a *App) buildProfileActivityStatus(baseURL string, p Profile) []byte {
 	attachment := make([]any, 0, len(p.RecentMedia))
 	for i, m := range p.RecentMedia {
-		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), profileMediaOffloadURL(baseURL, p.Username, i), m.Width, m.Height))
+		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), a.profileMediaOffloadURL(baseURL, p.Username, i), m.Width, m.Height))
 	}
 	return noteObject(profileStatusURL(baseURL, p.Username), actorURL(baseURL, p.Username),
 		profileDigestContent(p), baseURL+"/"+url.PathEscape(p.Username), "", attachment)
 }
 
-// username is already validated by the router (validUsername).
 func (a *App) buildFallbackAccount(baseURL, username string) []byte {
 	actor := actorURL(baseURL, username)
 	return jsonBytes(map[string]any{
@@ -164,7 +160,5 @@ func (a *App) buildFallbackAccount(baseURL, username string) []byte {
 		"url":               actor,
 		"inbox":             actor + "/inbox",
 		"outbox":            actor + "/outbox",
-		"followers":         actor + "/followers",
-		"following":         actor + "/following",
 	})
 }

@@ -3,40 +3,30 @@ package main
 import (
 	"context"
 	"net/http"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type App struct {
-	cfg  Config
-	pool *SessionPool
+	cfg           Config
+	pool          *SessionPool
+	offloadSigner offloadSigner
 
-	direct *http.Client
-
-	posts      *cache[Post]
-	profiles   *cache[Profile]
-	stories    *cache[Story]
-	videoSizes *cache[int64]
+	posts    *cache[Post]
+	profiles *cache[Profile]
+	stories  *cache[Story]
 }
 
-func newApp(cfg Config, pool *SessionPool) *App {
+func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 	fetchSlots := make(chan struct{}, maxConcurrentFetches)
 	return &App{
-		cfg:  cfg,
-		pool: pool,
-		direct: &http.Client{
-			Transport: &http.Transport{
-				MaxIdleConns:        4,
-				MaxIdleConnsPerHost: 2,
-				MaxConnsPerHost:     maxConcurrentFetches,
-				IdleConnTimeout:     90 * time.Second,
-				ForceAttemptHTTP2:   true,
-			},
-		},
-		posts:      newPersistentCache[Post](cfg.ModelCacheURL, "post", fetchSlots),
-		profiles:   newPersistentCache[Profile](cfg.ModelCacheURL, "profile", fetchSlots),
-		stories:    newPersistentCache[Story](cfg.ModelCacheURL, "story", fetchSlots),
-		videoSizes: newCache[int64](maxCacheEntries, fetchSlots),
+		cfg:           cfg,
+		pool:          pool,
+		offloadSigner: signer,
+		posts:         newPersistentCache[Post](cfg.Store, "post", fetchSlots, localPostCacheBytes),
+		profiles:      newPersistentCache[Profile](cfg.Store, "profile", fetchSlots, localProfileCacheBytes),
+		stories:       newPersistentCache[Story](cfg.Store, "story", fetchSlots, localStoryCacheBytes),
 	}
 }
 
@@ -44,94 +34,99 @@ type fetchMeta struct{ fetched bool }
 
 func (a *App) getPost(ctx context.Context, shortcode string, meta *fetchMeta) (Post, *AppError) {
 	if !validShortcode(shortcode) {
-		return Post{}, igErr(404, reasonNotFound, "invalid shortcode")
+		return Post{}, igErr(404, errorCodeNotFound, "invalid shortcode")
 	}
-	return a.posts.get(ctx, shortcode, meta, func() (Post, time.Duration, *AppError) {
-		post, err := a.fetchPost(ctx, shortcode)
-		urls := make([]string, 0, len(post.Attachments)*2)
+	return a.posts.get(ctx, shortcode, meta, func(fetchCtx context.Context) (Post, time.Duration, bool, *AppError) {
+		post, persist, degraded, err := a.fetchPost(fetchCtx, shortcode)
+		urls := []string{post.ProfilePic}
 		for _, att := range post.Attachments {
 			urls = append(urls, att.URL, att.Thumbnail)
 		}
-		return post, cacheTTLFromURLs(urls...), err
+		ttl := cacheTTLFromURLs(urls...)
+		if degraded {
+			ttl = min(ttl, transientErrorCacheSeconds*time.Second)
+		}
+		return post, ttl, persist, err
 	})
 }
 
-func (a *App) fetchPost(ctx context.Context, shortcode string) (Post, *AppError) {
-	post, err := a.fetchPostEmbed(ctx, shortcode)
-	if err != nil {
-		body, gqlErr := a.raceFetch(ctx, webLoggedOutSpec(shortcode))
-		if gqlErr == nil {
-			post, gqlErr = parseInstagramPost(body)
-		}
-		err = gqlErr
-	}
-	if err != nil {
-
-		oembedErr := *err
-		var ok bool
-		post, ok = concurrentPostFallbacks(ctx,
-			func(ctx context.Context) (Post, bool) {
-				if externalHelperPostFallbackFn == nil {
-					return Post{}, false
+// degraded reports an oEmbed card served because the full sources were still
+// running; it is cached briefly so a later full fetch replaces it.
+func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persist, degraded bool, err *AppError) {
+	oembedCtx, cancelOembed := context.WithCancel(ctx)
+	defer cancelOembed()
+	stagedCtx, cancelStaged := context.WithCancel(ctx)
+	defer cancelStaged()
+	started := time.Now()
+	var cutEarly atomic.Bool
+	oembedCh := make(chan oembedOutcome, 1)
+	var oembedOnce sync.Once
+	startOembed := func() {
+		oembedOnce.Do(func() {
+			go func() {
+				outcome := a.fetchOembed(oembedCtx, shortcode)
+				oembedCh <- outcome
+				if _, verr := oembedVerdict(outcome, shortcode, AppError{}); verr != nil {
+					return
 				}
-				return externalHelperPostFallbackFn(a, ctx, shortcode)
-			},
-			func(ctx context.Context) (Post, bool) { return a.oembedFallback(ctx, shortcode, &oembedErr) },
-		)
-		if !ok {
-			return Post{}, &oembedErr
+				// A usable degraded card is ready: end the staged race in time to serve it.
+				select {
+				case <-time.After(time.Until(started.Add(oembedFallbackAt))):
+					cutEarly.Store(true)
+					cancelStaged()
+				case <-stagedCtx.Done():
+				}
+			}()
+		})
+	}
+	valid := validSourceModel[Post](shortcode)
+	oembedTimer := time.AfterFunc(oembedHedgeDelay, startOembed)
+	defer oembedTimer.Stop()
+
+	post, persist, err = stagedFetch(stagedCtx,
+		stagedSource[Post]{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
+			return valid(a.fetchPostEmbed(ctx, shortcode))
+		}},
+		stagedSource[Post]{name: "post_graphql", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+			_, body, gqlErr := a.fetchViaProxy(ctx, webLoggedOutSpec(shortcode))
+			if gqlErr != nil {
+				return Post{}, gqlErr
+			}
+			return valid(parseInstagramPost(body))
+		}},
+		stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+			helperPost, ok := a.externalHelperPost(ctx, shortcode)
+			if !ok {
+				return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
+			}
+			return valid(helperPost, nil)
+		}},
+	)
+	if err != nil {
+		startOembed()
+		var outcome oembedOutcome
+		// A finished oEmbed wins over an expired ctx: at the deadline both
+		// channels are ready, and select would discard the answer half the time.
+		select {
+		case outcome = <-oembedCh:
+		default:
+			select {
+			case outcome = <-oembedCh:
+			case <-ctx.Done():
+			}
 		}
+		enriched, enrichedErr := oembedVerdict(outcome, shortcode, *err)
+		if enriched.Shortcode == "" {
+			return Post{}, false, false, enrichedErr
+		}
+		post, err = enriched, nil
+		// After a total failure the proxied oEmbed answer is worth keeping; a card
+		// taken while full sources were still running is only a stopgap.
+		degraded = cutEarly.Load()
+		persist = !degraded
 	}
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	return post, nil
-}
-
-func concurrentPostFallbacks(parent context.Context, preferred, backup func(context.Context) (Post, bool)) (Post, bool) {
-	type result struct {
-		post Post
-		ok   bool
-	}
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	backupResult := make(chan result, 1)
-	go func() {
-		post, ok := backup(ctx)
-		backupResult <- result{post, ok}
-	}()
-	if post, ok := preferred(ctx); ok {
-		return post, true
-	}
-	r := <-backupResult
-	return r.post, r.ok
-}
-
-func (a *App) contentLength(parent context.Context, target, rawURL string) int64 {
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(parent, headProbeTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
-	if err != nil {
-		return -1
-	}
-	req.Header.Set("User-Agent", instagramAppUA)
-	resp, err := a.direct.Do(req)
-	if err != nil {
-		logOutbound(ctx, "videosize", target, "direct", http.MethodHead, rawURL, started, 502, 0, igErr(502, reasonConnection, err.Error()))
-		return -1
-	}
-	resp.Body.Close()
-	logOutbound(ctx, "videosize", target, "direct", http.MethodHead, rawURL, started, resp.StatusCode, int(resp.ContentLength), nil)
-	if resp.StatusCode != 200 {
-		return -1
-	}
-	return resp.ContentLength
-}
-
-func (a *App) cachedContentLength(ctx context.Context, target, rawURL string) int64 {
-	size, _ := a.videoSizes.get(ctx, strings.Clone(rawURL), nil, func() (int64, time.Duration, *AppError) {
-		return a.contentLength(ctx, target, rawURL), cacheTTLFromURLs(rawURL), nil
-	})
-	return size
+	return post, persist, degraded, nil
 }

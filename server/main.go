@@ -2,66 +2,163 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 func main() {
-
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if len(groups) == 0 {
-				switch a.Key {
-				case slog.TimeKey:
-					return slog.Attr{}
-				case slog.MessageKey:
-					a.Key = "message"
-				case slog.LevelKey:
-					a.Value = slog.StringValue(strings.ToLower(a.Value.String()))
-				}
-			}
-			return a
-		},
-	})))
-
+	healthcheck := flag.Bool("healthcheck", false, "check the local server readiness")
+	backup := flag.String("backup", "", "write SQLite backups into a new destination directory")
+	exhaustBudget := flag.Bool("exhaust-budget", false, "exhaust today's proxy budget after restoring a backup")
+	flag.Parse()
 	cfg := configFromEnv()
-	if cfg.BudgetURL == "" {
-		slog.Error("invalid configuration", "error", "BUDGET_URL is required")
+	if *healthcheck {
+		client := &http.Client{Timeout: 2 * time.Second}
+		r, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", cfg.Port))
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		return
+	}
+	// JSON lines on stderr; the Docker log driver stores and rotates them.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
+	if err := cfg.validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
-	app := newApp(cfg, newSessionPool(cfg))
+	store, err := openLocalStore(cfg.DataDir, cfg.BudgetStartDate)
+	if err != nil {
+		slog.Error("cannot open local storage", "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	cfg.Store = store
+	if *backup != "" || *exhaustBudget {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if *exhaustBudget {
+			err = store.ExhaustBudget(ctx)
+		} else {
+			err = store.Backup(ctx, *backup)
+		}
+		if err != nil {
+			slog.Error("storage maintenance failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	home, err := loadHomeTemplates(cfg.AssetsDir)
+	if err != nil {
+		slog.Error("frontend assets unavailable", "error", err)
+		os.Exit(1)
+	}
+	if cfg.WorkerHubSignKey != "" || cfg.WorkerHubSignTS != "" {
+		if !seedSignCreds(cfg.WorkerHubSignKey, cfg.WorkerHubSignTS) {
+			slog.Warn("ignoring invalid WORKERHUB_SIGN_KEY/WORKERHUB_SIGN_TS override")
+		}
+	}
+	signer, err := parseOffloadSigner(cfg.OffloadSigningKeys)
+	if err != nil {
+		slog.Error("invalid OFFLOAD_SIGNING_KEYS", "error", err)
+		os.Exit(1)
+	}
+	app := newApp(cfg, newSessionPool(cfg), signer)
 
-	slog.Info("container started", "service", serviceName, "version", cfg.Version,
+	slog.Info("server started", "service", serviceName, "version", cfg.Version,
 		"proxies", len(app.pool.sessions), "port", cfg.Port)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", app.handle)
+	srv := &http.Server{
+		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
+		Handler:           newGateway(cfg, app, store, home),
+		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 
-	if err := http.ListenAndServe("0.0.0.0:"+strconv.Itoa(cfg.Port), mux); err != nil {
-		slog.Error("server exited", "err", err.Error())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	if err := serveHTTP(ctx, srv); err != nil {
+		slog.Error("server exited", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("server stopped")
+}
+
+func serveHTTP(ctx context.Context, srv *http.Server) error {
+	errC := make(chan error, 1)
+	go func() {
+		errC <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errC:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = srv.Close()
+	}
+	serveErr := <-errC
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	return shutdownErr
+}
+
+// The localized home pages are immutable build output, so they are read once.
+func loadHomeTemplates(directory string) (map[string]string, error) {
+	pages := make(map[string]string, len(homeLocales))
+	for locale := range homeLocales {
+		name := filepath.Join(directory, "home", locale+".html")
+		body, err := os.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+		if len(body) == 0 {
+			return nil, fmt.Errorf("%s: empty home template", name)
+		}
+		pages[locale] = string(body)
+	}
+	return pages, nil
 }
 
 type resp struct {
 	status  int
 	headers map[string]string
 	body    []byte
-}
 
-func (a *App) write(w http.ResponseWriter, r resp) {
-	for k, v := range r.headers {
-		w.Header().Set(k, v)
-	}
-	w.WriteHeader(r.status)
-	if r.body != nil {
-		_, _ = w.Write(r.body)
-	}
+	// Read by the gateway for metrics and preview status; never sent to clients.
+	originStatus int
+	errorType    string
+	cacheHit     bool
 }
 
 func htmlResp(status int, body string) resp {
@@ -80,24 +177,9 @@ func redirectResp(location string, status int) resp {
 	return resp{status: status, headers: map[string]string{"Location": location, "Content-Type": "text/plain; charset=utf-8"}}
 }
 
-func cacheable(r resp, seconds int) resp {
-	r.headers["Cache-Control"] = "public, s-maxage=" + strconv.Itoa(seconds)
-	return r
-}
 func tagFetch(r resp, meta *fetchMeta) resp {
-	if meta.fetched {
-		r.headers["og-cache"] = "miss"
-	} else {
-		r.headers["og-cache"] = "hit"
-	}
+	r.cacheHit = !meta.fetched
 	return r
-}
-
-func (a *App) handle(w http.ResponseWriter, req *http.Request) {
-	if id := strings.TrimSpace(req.Header.Get("OG-Request-ID")); id != "" && len(id) <= 128 {
-		req = req.WithContext(context.WithValue(req.Context(), requestIDKey{}, id))
-	}
-	a.write(w, a.route(req))
 }
 
 type requestIDKey struct{}
@@ -110,16 +192,24 @@ func logger(ctx context.Context) *slog.Logger {
 }
 
 func (a *App) route(req *http.Request) resp {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return resp{
+			status:  http.StatusMethodNotAllowed,
+			headers: map[string]string{"Allow": "GET, HEAD"},
+		}
+	}
 	path := req.URL.Path
 
 	if path == "/.well-known/webfinger" {
 		return a.handleWebFinger(req)
 	}
 	segments := splitPath(path)
-	if len(segments) == 5 && segments[0] == "offload" && segments[1] == "story" && segments[4] == "avatar" {
+	if len(segments) == 5 && segments[0] == "offload" && segments[1] == "story" &&
+		validUsername(segments[2]) && validStoryID(segments[3]) && segments[4] == "avatar" {
 		return a.handleStoryOffload(req, segments[2], segments[3], true)
 	}
-	if len(segments) == 4 && segments[0] == "offload" && segments[1] == "story" {
+	if len(segments) == 4 && segments[0] == "offload" && segments[1] == "story" &&
+		validUsername(segments[2]) && validStoryID(segments[3]) {
 		return a.handleStoryOffload(req, segments[2], segments[3], false)
 	}
 	if (len(segments) == 2 || len(segments) == 3) && segments[0] == "offload" {
@@ -142,7 +232,7 @@ func (a *App) route(req *http.Request) resp {
 		return a.handleUserAccount(req, segments[1])
 	}
 	if route := parseEmbedSegments(segments); route != nil {
-		return a.handleEmbed(req, route.PostType, route.Shortcode, route.PathIndex)
+		return a.handlePost(req, route.PostType, route.Shortcode, route.PathIndex)
 	}
 	if len(segments) == 1 && validUsername(segments[0]) {
 		return a.handleProfile(req, segments[0])
@@ -152,13 +242,10 @@ func (a *App) route(req *http.Request) resp {
 
 func (a *App) handleUserAccount(req *http.Request, username string) resp {
 	baseURL := a.publicBaseURL(req)
-	return cacheable(activityJSONResp(200, a.buildFallbackAccount(baseURL, username)), edgeCacheSeconds)
+	return activityJSONResp(200, a.buildFallbackAccount(baseURL, username))
 }
 
 func (a *App) handleWebFinger(req *http.Request) resp {
-	if req.Method != http.MethodGet {
-		return resp{status: http.StatusMethodNotAllowed, headers: map[string]string{"Allow": "GET"}}
-	}
 	resource := req.URL.Query().Get("resource")
 	account, ok := strings.CutPrefix(resource, "acct:")
 	at := strings.LastIndexByte(account, '@')
@@ -177,22 +264,19 @@ func (a *App) handleWebFinger(req *http.Request) resp {
 	if len(rels) == 0 || slices.Contains(rels, "self") {
 		links = append(links, map[string]any{"rel": "self", "type": "application/activity+json", "href": actor})
 	}
-	r := cacheable(jsonResp(http.StatusOK, jsonBytes(map[string]any{
+	r := jsonResp(http.StatusOK, jsonBytes(map[string]any{
 		"subject": "acct:" + username + "@" + base.Host,
 		"aliases": []any{actor},
 		"links":   links,
-	})), edgeCacheSeconds)
+	}))
 	r.headers["Content-Type"] = "application/jrd+json"
 	r.headers["Access-Control-Allow-Origin"] = "*"
 	return r
 }
 
 func (a *App) handleActivityCollection(req *http.Request, username, name string) resp {
-	if req.Method != http.MethodGet {
-		return resp{status: http.StatusMethodNotAllowed, headers: map[string]string{"Allow": "GET"}}
-	}
 	id := actorURL(a.publicBaseURL(req), username) + "/" + name
-	return cacheable(activityJSONResp(http.StatusOK, emptyOrderedCollection(id)), edgeCacheSeconds)
+	return activityJSONResp(http.StatusOK, emptyOrderedCollection(id))
 }
 
 func (a *App) handleActivity(req *http.Request, _, code string) resp {
@@ -201,23 +285,23 @@ func (a *App) handleActivity(req *http.Request, _, code string) resp {
 	if sp.Story {
 		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
 		if err != nil {
-			return textResp(err.Status, err.Message)
+			return textResp(err.Status, err.PublicMessage)
 		}
-		return cacheable(activityJSONResp(200, a.buildStoryActivityStatus(baseURL, story, sp.Gallery)), edgeCacheSeconds)
+		return activityJSONResp(200, a.buildStoryActivityStatus(baseURL, story, sp.Gallery))
 	}
 	if sp.Username != "" {
 		p, err := a.getProfile(req.Context(), sp.Username, nil)
 		if err != nil {
-			return textResp(err.Status, err.Message)
+			return textResp(err.Status, err.PublicMessage)
 		}
-		return cacheable(activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p)), cdnEdgeSeconds(profileCDNURLs(p)...))
+		return activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p))
 	}
 	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
 	if err != nil {
-		return textResp(err.Status, err.Message)
+		return textResp(err.Status, err.PublicMessage)
 	}
 	body := a.buildActivityStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
-	return cacheable(activityJSONResp(200, body), edgeCacheSeconds)
+	return activityJSONResp(200, body)
 }
 
 func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
@@ -226,31 +310,30 @@ func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
 	if sp.Story {
 		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
 		if err != nil {
-			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
+			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
 		}
-		return cacheable(jsonResp(200, a.buildStoryMastodonStatus(baseURL, story, sp.Gallery)), edgeCacheSeconds)
+		return jsonResp(200, a.buildStoryMastodonStatus(baseURL, story, sp.Gallery))
 	}
 	if sp.Username != "" {
 		p, err := a.getProfile(req.Context(), sp.Username, nil)
 		if err != nil {
-			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
+			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
 		}
-		return cacheable(jsonResp(200, a.buildMastodonProfileStatus(baseURL, p)), cdnEdgeSeconds(profileCDNURLs(p)...))
+		return jsonResp(200, a.buildMastodonProfileStatus(baseURL, p))
 	}
-	// getPost validates too, but the Mastodon API's spec'd 404 body is
-	// {"error":"Record not found"}, so answer with that exact shape here.
+
 	if !validShortcode(sp.Shortcode) {
 		return jsonResp(404, jsonBytes(map[string]any{"error": "Record not found"}))
 	}
 	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
 	if err != nil {
-		return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.Message}))
+		return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
 	}
 	body := a.buildMastodonStatus(baseURL, post, sp.PostType, snowMediaIndex(sp), sp.Specified, sp.Gallery)
-	return cacheable(jsonResp(200, body), edgeCacheSeconds)
+	return jsonResp(200, body)
 }
 
-func snowMediaIndex(sp snowPost) int {
+func snowMediaIndex(sp snowcodePost) int {
 	if sp.Specified {
 		return sp.MediaIndex
 	}
@@ -264,20 +347,13 @@ func (a *App) handleProfile(req *http.Request, username string) resp {
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
 	if err != nil {
-		title, desc := profileErrorCard(err.Reason, supportURL)
-		embed := a.buildStatusEmbedHTML(baseURL, origin, title, desc)
-		r := htmlResp(200, embed)
-		r.headers["og-status"] = strconv.Itoa(err.Status)
-		if err.Reason != "" {
-			r.headers["og-reason"] = err.Reason
-		}
-		r = cacheable(r, errorCacheSeconds(err.Reason))
-		return tagFetch(r, meta)
+		title, desc := errorCard("profile", err.Code)
+		return a.errorCardResp(baseURL, origin, title, desc, err.Code, err, meta)
 	}
-	return tagFetch(cacheable(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, gallery)), cdnEdgeSeconds(profileCDNURLs(p)...)), meta)
+	return tagFetch(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, gallery)), meta)
 }
 
-func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathIndex int) resp {
+func (a *App) handlePost(req *http.Request, postType, shortcode string, pathIndex int) resp {
 	values := req.URL.Query()
 	mediaIndex, specified := mediaSelection(values, pathIndex)
 	gallery := galleryRequested(values)
@@ -287,36 +363,43 @@ func (a *App) handleEmbed(req *http.Request, postType, shortcode string, pathInd
 	meta := &fetchMeta{}
 	post, err := a.getPost(req.Context(), shortcode, meta)
 	if err != nil {
-		reason := err.Reason
-		title, desc := postErrorCard(reason, supportURL)
+		errorCode := err.Code
+		title, desc := errorCard("post", errorCode)
 		if err.CardTitle != "" {
-			reason, title, desc = err.CardReason, err.CardTitle, err.CardDesc
+			errorCode, title, desc = err.CardCode, err.CardTitle, err.CardDesc
 		}
-		embed := a.buildStatusEmbedHTML(baseURL, origin, title, desc)
-		r := htmlResp(200, embed)
-		r.headers["og-status"] = strconv.Itoa(err.Status)
-		if reason != "" {
-			r.headers["og-reason"] = reason
-		}
-		r = cacheable(r, errorCacheSeconds(err.Reason))
-		return tagFetch(r, meta)
+		return a.errorCardResp(baseURL, origin, title, desc, errorCode, err, meta)
 	}
-	html := a.buildEmbedHTML(req.Context(), baseURL, req.Header.Get("User-Agent"), post, postType, mediaIndex, specified, gallery)
-	return tagFetch(cacheable(htmlResp(200, html), edgeCacheSeconds), meta)
+	html := a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery)
+	return tagFetch(htmlResp(200, html), meta)
+}
+
+func (a *App) errorCardResp(baseURL, origin, title, desc, headerCode string, err *AppError, meta *fetchMeta) resp {
+	r := htmlResp(200, a.buildStatusEmbedHTML(baseURL, origin, title, desc))
+	r.originStatus, r.errorType = err.Status, headerCode
+	return tagFetch(r, meta)
 }
 
 func offloadErrorResp(err *AppError, fallbackURL string) resp {
 	r := redirectResp(fallbackURL, 302)
-	if !isTransient(err.Reason) {
-		r = textResp(err.Status, err.Message)
+	if !isTransient(err.Code) {
+		r = textResp(err.Status, err.PublicMessage)
 	}
-	r.headers["og-status"] = strconv.Itoa(err.Status)
-	r.headers["og-reason"] = err.Reason
+	r.originStatus, r.errorType = err.Status, err.Code
 	return r
 }
 
-func allowOffloadFetch(req *http.Request) bool {
-	return req.Header.Get("OG-Allow-Offload-Fetch") == "1"
+func invalidOffloadResp() resp {
+	return resp{status: http.StatusNotFound, headers: map[string]string{}}
+}
+
+func offloadMediaIndex(segment string) (int, bool) {
+	raw := strings.TrimSuffix(segment, ".mp4")
+	n, ok := parseCanonicalDecimal(raw)
+	if !ok || n < 1 || n > maxCachedMediaItems {
+		return 0, false
+	}
+	return n - 1, true
 }
 
 func (a *App) handleOffload(req *http.Request, segments []string) resp {
@@ -324,14 +407,15 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 		return a.handleProfileOffload(req, username, segments)
 	}
 	shortcode := segments[1]
-	if !allowOffloadFetch(req) && !a.posts.known(req.Context(), shortcode) {
-		return resp{status: 404, headers: map[string]string{}}
+	if !validShortcode(shortcode) {
+		return invalidOffloadResp()
 	}
 	index := 0
-	if len(segments) == 3 {
-		seg := strings.TrimSuffix(segments[2], ".mp4")
-		if n, err := strconv.Atoi(seg); err == nil && n > 0 {
-			index = n - 1
+	if len(segments) == 3 && segments[2] != "avatar" {
+		var ok bool
+		index, ok = offloadMediaIndex(segments[2])
+		if !ok {
+			return invalidOffloadResp()
 		}
 	}
 	thumbnail := req.URL.Query().Has("thumbnail")
@@ -344,21 +428,27 @@ func (a *App) handleOffload(req *http.Request, segments []string) resp {
 	if len(segments) == 3 && segments[2] == "avatar" {
 		target = post.ProfilePic
 	} else {
-		att := post.Attachments[mediaIndexFor(post, index)]
-		target = att.URL
-		if thumbnail && att.Thumbnail != "" {
-			target = att.Thumbnail
+		media := post.Attachments[mediaIndexFor(post, index)]
+		target = media.URL
+		if thumbnail && media.Thumbnail != "" {
+			target = media.Thumbnail
 		}
 	}
 	if target == "" {
 		target = a.publicBaseURL(req) + defaultAvatarPath
 	}
-	return tagFetch(cacheable(redirectResp(target, 302), cdnEdgeSeconds(target)), meta)
+	return tagFetch(redirectResp(target, 302), meta)
 }
 
 func (a *App) handleProfileOffload(req *http.Request, username string, segments []string) resp {
-	if !allowOffloadFetch(req) && !a.profiles.known(req.Context(), username) {
-		return resp{status: 404, headers: map[string]string{}}
+	if !validUsername(username) {
+		return invalidOffloadResp()
+	}
+	username = strings.ToLower(username)
+	if len(segments) == 3 && segments[2] != "avatar" {
+		if n, ok := parseCanonicalDecimal(segments[2]); !ok || n < 1 || n > profileGalleryMax {
+			return invalidOffloadResp()
+		}
 	}
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
@@ -367,34 +457,27 @@ func (a *App) handleProfileOffload(req *http.Request, username string, segments 
 	}
 	target := p.ProfilePic
 	if len(segments) == 3 && segments[2] != "avatar" {
-		n, atoiErr := strconv.Atoi(segments[2])
-		if atoiErr != nil || n < 1 || n > len(p.RecentMedia) {
-			return resp{status: 404, headers: map[string]string{}}
+		n, _ := parseCanonicalDecimal(segments[2])
+		if n > len(p.RecentMedia) {
+			return invalidOffloadResp()
 		}
 		target = p.RecentMedia[n-1].Thumbnail
 	}
 	if target == "" {
 		target = a.publicBaseURL(req) + defaultAvatarPath
 	}
-	return tagFetch(cacheable(redirectResp(target, 302), cdnEdgeSeconds(target)), meta)
+	return tagFetch(redirectResp(target, 302), meta)
 }
 
+// The gateway has already matched Host against ALLOWED_HOSTS (or development
+// localhost), so it is the request's public origin.
 func (a *App) publicBaseURL(req *http.Request) string {
-	if origin := strings.TrimSpace(req.Header.Get("OG-Public-Origin")); origin != "" {
-		return strings.TrimRight(origin, "/")
-	}
-	if a.cfg.BaseURL != "" {
-		return a.cfg.BaseURL
-	}
 	host := req.Host
-	if host == "" {
-		host = "localhost:" + strconv.Itoa(a.cfg.Port)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
 	}
-	if proto := strings.TrimSpace(strings.SplitN(req.Header.Get("X-Forwarded-Proto"), ",", 2)[0]); proto != "" {
-		return proto + "://" + host
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return "http://" + req.Host
 	}
-	if strings.HasPrefix(host, "localhost") || strings.HasPrefix(host, "127.0.0.1") {
-		return "http://" + host
-	}
-	return "https://" + host
+	return "https://" + req.Host
 }

@@ -2,12 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
 )
 
-type snowPost struct {
+const (
+	maxSnowcodeDigits     = 256
+	maxSnowcodeMediaIndex = 100
+)
+
+type snowcodePost struct {
 	Username   string
 	Shortcode  string
 	PostType   string
@@ -47,36 +53,47 @@ func statusSnowcode(postType, shortcode string, mediaIndex int, specified, galle
 	return encodeSnowcodePayload(payload)
 }
 
-func parseStatusSnowcode(code string) snowPost {
+func parseStatusSnowcode(code string) snowcodePost {
 	if data, ok := decodeSnowcode(code); ok {
 		if id, isStr := data["si"].(string); isStr && id != "" {
 			su, _ := data["su"].(string)
 			g, _ := data["g"].(float64)
-			return snowPost{Username: su, Shortcode: id, Story: true, Gallery: g == 1}
+			if validUsername(su) && validStoryID(id) {
+				return snowcodePost{Username: su, Shortcode: id, Story: true, Gallery: g == 1}
+			}
+			return snowcodePost{}
 		}
 		if u, isStr := data["u"].(string); isStr && u != "" {
-			return snowPost{Username: u}
+			if validUsername(u) {
+				return snowcodePost{Username: u}
+			}
+			return snowcodePost{}
 		}
 		if i, isStr := data["i"].(string); isStr && i != "" {
-			p := snowPost{Shortcode: i, PostType: "p"}
+			if !validShortcode(i) {
+				return snowcodePost{}
+			}
+			p := snowcodePost{Shortcode: i, PostType: "p"}
 			if pt, isStr := data["p"].(string); isStr {
+				if !isPostRouteType(pt) {
+					return snowcodePost{}
+				}
 				p.PostType = normalizePostType(pt)
 			}
 			if n, isNum := data["n"].(float64); isNum {
-				idx := int(n) - 1
-				if idx < 0 {
-					idx = 0
+				if math.Trunc(n) != n || n < 1 || n > maxSnowcodeMediaIndex {
+					return snowcodePost{}
 				}
+				idx := int(n) - 1
 				p.MediaIndex = idx
 				p.Specified = true
 			}
-			if g, isNum := data["g"].(float64); isNum && g == 1 {
-				p.Gallery = true
-			}
+			g, _ := data["g"].(float64)
+			p.Gallery = g == 1
 			return p
 		}
 	}
-	return snowPost{Shortcode: code, PostType: "p", MediaIndex: 0}
+	return snowcodePost{Shortcode: code, PostType: "p"}
 }
 
 func encodeSnowcodePayload(payload string) string {
@@ -84,7 +101,8 @@ func encodeSnowcodePayload(payload string) string {
 }
 
 func decodeSnowcode(code string) (map[string]any, bool) {
-	if code == "" || strings.Trim(code, "0123456789") != "" {
+	if len(code) > maxSnowcodeDigits || (len(code) > 1 && code[0] == '0') ||
+		strings.Trim(code, "0123456789") != "" {
 		return nil, false
 	}
 	n, ok := new(big.Int).SetString(code, 10)

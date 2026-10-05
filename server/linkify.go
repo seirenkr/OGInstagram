@@ -104,6 +104,8 @@ func hasKnownTLD(candidate string) bool {
 	return ok
 }
 
+var closingToOpening = map[rune]rune{')': '(', ']': '[', '}': '{'}
+
 func trimURLEnd(text string, start, end int) int {
 	const trail = ".,;:!?'\"”’»…"
 	for end > start {
@@ -112,7 +114,7 @@ func trimURLEnd(text string, start, end int) int {
 		case strings.ContainsRune(trail, r):
 			end -= size
 		case r == ')' || r == ']' || r == '}':
-			open := map[rune]rune{')': '(', ']': '[', '}': '{'}[r]
+			open := closingToOpening[r]
 			if strings.Count(text[start:end], string(open)) >= strings.Count(text[start:end], string(r)) {
 				return end
 			}

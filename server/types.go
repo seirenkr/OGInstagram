@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 type Attachment struct {
 	ID        string
@@ -34,29 +37,22 @@ type Story struct {
 }
 
 type Config struct {
-	Port          int
-	Version       string
-	ProxyUser     string
-	ProxyPass     string
-	BaseURL       string
-	ModelCacheURL string
-	BudgetURL     string
-}
-
-type AppError struct {
-	Status  int
-	Message string
-	Reason  string
-
-	Ephemeral bool
-
-	CardReason, CardTitle, CardDesc string
-}
-
-func igErr(status int, reason, message string) *AppError {
-	return &AppError{Status: status, Message: message, Reason: reason}
-}
-
-func ephemeralErr(status int, reason, message string) *AppError {
-	return &AppError{Status: status, Message: message, Reason: reason, Ephemeral: true}
+	Port               int
+	Version            string
+	ProxyUser          string
+	ProxyPass          string
+	BaseURL            string
+	OffloadSigningKeys string
+	WorkerHubSignKey   string
+	WorkerHubSignTS    string
+	DataDir            string
+	AssetsDir          string
+	BudgetStartDate    string
+	AllowedHosts       []string
+	TrustedProxies     []netip.Prefix
+	TurnstileSiteKey   string
+	TurnstileSecretKey string
+	AdminPurgeToken    string
+	Development        bool
+	Store              *localStore
 }
