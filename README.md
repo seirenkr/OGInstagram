@@ -1,7 +1,5 @@
 # OGInstagram
 
-**English** | [한국어](README.ko.md)
-
 Instagram embed proxy for Discord, Telegram, and other link-preview bots.
 
 ## Usage
