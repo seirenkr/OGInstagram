@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/server . \
     && mkdir /out/data
 
-# Build the frontend away from the 1 GB production VM.
+# Build the frontend natively on the build platform; its output is arch-independent.
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

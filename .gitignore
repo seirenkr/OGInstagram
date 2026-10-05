@@ -16,5 +16,5 @@ Dockerfile.private
 data/
 secrets/
 .local-data/
-# Operator runbook (internal).
-docs/vultr-deployment.md
+# Local operator notes.
+docs/private/

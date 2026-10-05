@@ -12,7 +12,7 @@ The latter is displayed only when the Instagram response explicitly reports
 `is_verified: true`. It is our display of that source flag, not a native
 Discord verification status. The renderer never substitutes a Unicode check.
 
-Production registration (2026-10-05):
+Default emoji IDs (used when the variables are unset):
 
 | Name | Emoji ID |
 | --- | --- |

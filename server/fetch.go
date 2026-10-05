@@ -236,9 +236,8 @@ func logOutbound(ctx context.Context, operation, session, method, rawURL string,
 }
 
 // One proxied request: pick a session, run it, then hold that session
-// accountable. Blame is a single rule instead of a fail() call per branch —
-// Ephemeral errors are ours (deadline, budget), so only a non-ephemeral,
-// rotatable code marks the session bad.
+// accountable. Ephemeral errors (deadline, budget) are ours, so only a
+// non-ephemeral, rotatable code marks the session bad.
 func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, out string, ferr *AppError) {
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
