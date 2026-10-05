@@ -10,7 +10,7 @@ Replace `instagram.com` with `oginstagram.com`.
 |------|-----|--------|
 | Normal | `oginstagram.com`, `www.oginstagram.com` | The creator's profile, caption, stats, and media |
 | Gallery | `g.oginstagram.com`, `www.g.oginstagram.com` | The creator's profile and media only |
-| Direct | `d.oginstagram.com`, `www.d.oginstagram.com` | Only the direct media URL |
+| Direct | `d.oginstagram.com`, `www.d.oginstagram.com` | Only the direct media URL (posts, reels, stories; profiles get the normal embed) |
 
 Append `?img_index=N` (or `/N` after the shortcode) to pick a carousel item.
 
@@ -39,16 +39,18 @@ Discord / Telegram / browsers
 ```
 
 - **Edge:** browser navigations are sent to Instagram by Cloudflare Redirect
-  Rules before the WAF; unverified clients are challenged; only verified
-  bots reach the origin. The Go app keeps a minimal fallback for the same
+  Rules before the WAF; unverified clients are challenged on embed routes,
+  so only verified bots reach the origin's embed paths (the home page,
+  static assets, `/api/*` and `/offload/*` are exempt from that rule). The Go app keeps a minimal fallback for the same
   `Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document` signal.
   `www.d.` and `www.g.` are served by a stateless Cloudflare Worker that
   308-redirects to `d.` and `g.` (second-level hosts only get a free
   certificate through Workers Custom Domains).
 - **Posts:** the Instagram embed page (direct), then logged-out GraphQL and
   an external helper (through US residential proxies), with oEmbed as the
-  last resort. Results race on a schedule, are validated before they win,
-  and are cached in memory and SQLite.
+  last resort. Results race on a schedule and are validated before they
+  win. Winners are cached in memory; proxy-sourced winners (GraphQL, helper,
+  final oEmbed) are also persisted to SQLite.
 - **Profiles:** `web_profile_info` (proxy), then the profile embed page.
   **Stories:** external helper only.
 - **Media:** `/offload/*` links are HMAC-signed capabilities (14-day TTL)
@@ -87,15 +89,19 @@ needed to test the production image with its bundled Obscura and FFmpeg.
 
 ```bash
 pnpm install --frozen-lockfile
-cp .env.example .env   # set OFFLOAD_SIGNING_KEYS; proxy/helper credentials are optional
+cp .env.example .env   # set OFFLOAD_SIGNING_KEYS; without PROXY_* only direct embed pages work
 pnpm run dev           # build the frontend and serve the Go app on :8080
 pnpm run check         # lint, type checks, route/preview tests, Go tests
 ```
 
-`pnpm run dev` sets `DEVELOPMENT=true`, localhost hosts, a local data
-directory, Cloudflare's always-pass Turnstile test site key, and today's UTC
-date as the budget start. Restart it after frontend edits. `go run` alone
-does not provide the harvester or the WebP/AVIF encoders; the image does.
+`pnpm run dev` forces `DEVELOPMENT=true`, localhost hosts, a local data
+directory and an empty `TRUSTED_PROXIES`; unless `.env` sets them, it also
+uses Cloudflare's always-pass Turnstile test site key and today's UTC date
+as the budget start. Restart it after frontend edits. Without `PROXY_*`,
+GraphQL, oEmbed, the profile API and the external helper (so stories) are
+unavailable. `go run` cannot re-harvest helper keys (that needs the image's
+Obscura and harvester), and WebP/AVIF previews need an `ffmpeg` with libwebp
+and libaom-av1 on `PATH`, which the image bundles.
 
 ## Configuration
 
@@ -108,7 +114,8 @@ does not provide the harvester or the WebP/AVIF encoders; the image does.
 | `OG_IMAGE`, `CLOUDFLARED_IMAGE` | Image tags Compose runs |
 | `BASE_URL`, `ALLOWED_HOSTS` | Canonical home URL and accepted public hosts (the `BASE_URL` host must be listed) |
 | `TRUSTED_PROXIES` | Exact `cloudflared` address; every other peer is rejected |
-| `PROXY_USERNAME`, `PROXY_PASSWORD` | DataImpulse credentials, required together in production |
+| `DEVELOPMENT` | Keep `false` in production; `true` relaxes startup validation |
+| `PROXY_USERNAME`, `PROXY_PASSWORD` | DataImpulse credentials; set both or neither, required in production |
 | `PROXY_BUDGET_START_DATE` | First UTC day this deployment may use the proxy; never move it backward |
 | `OFFLOAD_SIGNING_KEYS` | JSON HMAC keyring for `/offload` links |
 | `WORKERHUB_SIGN_KEY`, `WORKERHUB_SIGN_TS` | External-helper signing override; rotate together |
@@ -124,13 +131,16 @@ keep a retired key for 14 days after rotating:
 ```
 
 Unsigned, malformed, or expired `/offload` links return 404 before any cache
-lookup. Dynamic responses are `no-store`, so Cloudflare caches only static
-assets. Logs are JSON lines on stderr, rotated by Docker.
+lookup. Embed, API, `/offload` redirect and error responses are `no-store`;
+the home page is `private, no-cache`, and home-preview images are
+browser-cacheable but carry `Cloudflare-CDN-Cache-Control: no-store`, so
+Cloudflare caches only static assets. Logs are JSON lines on stderr, rotated
+by Docker.
 
 The external helper and PP Mori fonts are closed-source. The tracked
 `server/external_helper.go` is the public fallback; a private implementation
-installs itself at init when present. System fonts replace absent PP Mori
-files; Pretendard comes from jsDelivr.
+installs itself at init when present. Without the PP Mori files the font
+stack falls back to Pretendard (loaded from jsDelivr) and then system fonts.
 
 ## Preview protection
 
@@ -139,8 +149,9 @@ The home page posts `POST /api/embed` without a token. When Cloudflare answers
 pre-clearance) and retries once with the token. The app Siteverifies the
 token, its action, and that its hostname matches the request host. The WAF
 rule `http.request.method eq "POST" and http.request.uri.path eq "/api/embed"`
-must stay a Managed Challenge. The `cf_clearance` hash is only a rate-limit
-key.
+must stay a Managed Challenge. The app requires one `cf_clearance` cookie
+but never treats it as proof of clearance; its SHA-256 hash only keys the
+8-per-minute preview rate limit (429).
 
 ## Acknowledgements
 

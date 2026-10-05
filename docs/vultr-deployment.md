@@ -14,7 +14,7 @@
                  /data/state.sqlite + budget.sqlite
 ```
 
-Compose는 앱 포트를 호스트에 공개하지 않습니다. cloudflared가 Compose 네트워크의 `app:8080`으로 연결하고, Readiness는 컨테이너 내부의 CLI로 확인합니다. 인터넷에서 접근하는 경로는 Tunnel 하나입니다. `cloudflared`는 네트워크 연결만 담당하며 앱·DB·캐시는 모두 VM의 Go와 SQLite에서 실행합니다. 외부 Instagram/helper 요청은 Vultr의 인터넷 연결로 나가며 DataImpulse 경로만 기존 US residential proxy를 사용합니다.
+Compose는 앱 포트를 호스트에 공개하지 않습니다. cloudflared가 Compose 네트워크의 `app:8080`으로 연결하고, Readiness는 컨테이너 내부의 CLI로 확인합니다. 인터넷에서 접근하는 경로는 Tunnel 하나입니다. `cloudflared`는 네트워크 연결만 담당하며 앱·DB·캐시는 모두 VM의 Go와 SQLite에서 실행합니다. Instagram embed 페이지와 helper 키 re-harvest(Obscura)는 Vultr의 인터넷 연결로 직접 나가고, logged-out GraphQL·oEmbed·web_profile_info·external helper(fastdl) API는 DataImpulse US residential proxy를 사용하며 일일 proxy budget에 포함됩니다. fastdl 앞단 Cloudflare가 데이터센터 IP를 rate limit(1015)하기 때문입니다.
 
 ## 1. 서버와 Docker 준비
 
@@ -64,7 +64,7 @@ pnpm run image:build   # 마지막 줄에 oginstagram:<8자리 해시> 출력
 docker save oginstagram:<해시> | gzip -1 | ssh linuxuser@<VM> 'gunzip | sudo docker load'
 ```
 
-이 이미지는 Go 서버, 빌드된 `web/dist`, Obscura, Node harvester, WebP/AVIF encoder가 있는 FFmpeg를 포함합니다. 공개 checkout에는 비공개 external helper가 없으므로 운영과 동일한 기능을 유지하려면 helper 파일을 포함한 checkout에서 빌드합니다. 빌드 컨텍스트에서 `.env`, `data`, `secrets`는 제외됩니다. cloudflared는 검증한 tag/digest를 고정하며, `.env.example`의 `2026.9.3`은 [공식 릴리스](https://github.com/cloudflare/cloudflared/releases/tag/2026.9.3) 기준 기본값입니다.
+이 이미지는 Go 서버, 빌드된 `web/dist`, Obscura, Node harvester, WebP/AVIF encoder가 있는 FFmpeg를 포함합니다. 공개 checkout에는 비공개 external helper(`server/external_helper_private.go`)와 PP Mori 폰트(`web/public/PPMori-*.woff2`)가 없으므로 운영과 동일한 이미지를 만들려면 두 파일을 포함한 checkout에서 빌드합니다. 빌드 컨텍스트에서 `.env`, `data`, `secrets`는 제외됩니다. cloudflared는 검증한 tag/digest를 고정하며, `.env.example`의 `2026.9.3`은 [공식 릴리스](https://github.com/cloudflare/cloudflared/releases/tag/2026.9.3) 기준 기본값입니다.
 
 ## 3. 배포 디렉터리와 비밀 값
 
@@ -180,7 +180,7 @@ Go(`gateway.go`)도 같은 기준(`Sec-Fetch-Mode`/`Sec-Fetch-Dest`)으로 사�
 
 ## 5. 중지 후 새 앱 배포
 
-1. 위 파일, 이미지 pull, Tunnel·WAF·Redirect 설정을 준비합니다. 다음 UTC 예산 시작일을 확인합니다.
+1. 위 파일, `docker load`로 적재한 앱 이미지, Tunnel·WAF·Redirect 설정을 준비합니다. 다음 UTC 예산 시작일을 확인합니다.
 2. 기존 Worker의 6개 custom domain/route를 중지하고 새 요청이 old Container로 들어가지 않는지 확인합니다. in-flight 요청 종료를 기다립니다. 신규 app과 old app이 각각 독립된 예산으로 같은 UTC 날짜에 proxy를 소비하게 하지 않습니다.
 3. 필요하면 zone cache를 purge합니다. 기존 앱 Worker의 Custom Domain을 해제하고 `www.d.`/`www.g.`는 리다이렉트 Worker에 연결합니다. 기존 Worker 스크립트·Container·KV·DO·Analytics Engine 데이터 삭제는 영구 삭제이므로 관리자가 직접 판단합니다.
 4. 먼저 신규 app만 시작해 readiness를 확인합니다.
@@ -188,7 +188,7 @@ Go(`gateway.go`)도 같은 기준(`Sec-Fetch-Mode`/`Sec-Fetch-Dest`)으로 사�
 ```bash
 cd /opt/oginstagram
 sudo docker compose config --quiet
-sudo docker compose pull app cloudflared
+sudo docker compose pull cloudflared   # app 이미지는 docker load로 적재(레지스트리 없음)
 sudo docker compose up -d --wait --wait-timeout 90 app
 sudo docker compose exec -T app /app/server --healthcheck
 ```
