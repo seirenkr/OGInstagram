@@ -132,6 +132,9 @@ func TestOptionalSettingsHaveSafeDefaults(t *testing.T) {
 	if _, err := parseOffloadSigner(first); err != nil {
 		t.Fatalf("generated keyring is invalid: %v", err)
 	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("temp keyring files were left behind: %v", entries)
+	}
 	if info, _ := os.Stat(filepath.Join(dir, "offload-signing-keys.json")); info.Mode().Perm() != 0o600 {
 		t.Errorf("keyring file mode = %v, want 0600", info.Mode().Perm())
 	}
