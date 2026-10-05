@@ -11,7 +11,7 @@ docker compose config --quiet
 docker compose pull cloudflared
 # One application instance owns the SQLite state and proxy budget.
 previous=$(docker compose ps -a --format '{{.Image}}' app 2>/dev/null || true)
-docker compose stop cloudflared app
+docker compose stop cloudflared proxy app
 docker compose up -d --wait --wait-timeout 90
 current=$(docker compose ps --format '{{.Image}}' app)
 # Keep the running and previous app images for rollback (set OG_IMAGE back and

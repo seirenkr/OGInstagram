@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,21 +35,13 @@ type Gateway struct {
 	app    *App
 	home   map[string]string // locale → home page template
 	slots  chan struct{}
-	rateMu sync.Mutex
-	rates  map[string]clearanceLimit
 	client *http.Client
 
-	accessLog *accessLog // nil disables access logging (tests)
-	metrics   chan metricEvent
+	metrics chan metricEvent
 
 	statusMu   sync.Mutex
 	statusBody []byte
 	statusAt   time.Time
-}
-
-type clearanceLimit struct {
-	start time.Time
-	count int
 }
 
 type metricEvent struct {
@@ -60,7 +51,7 @@ type metricEvent struct {
 }
 
 func newGateway(cfg Config, app *App, home map[string]string) *Gateway {
-	g := &Gateway{cfg: cfg, app: app, home: home, slots: make(chan struct{}, maxGatewayInFlight), rates: make(map[string]clearanceLimit),
+	g := &Gateway{cfg: cfg, app: app, home: home, slots: make(chan struct{}, maxGatewayInFlight),
 		client: &http.Client{Timeout: 10 * time.Second}, metrics: make(chan metricEvent, 256)}
 	go g.writeMetrics()
 	return g
@@ -113,18 +104,6 @@ func (g *Gateway) publicOrigin(r *http.Request) (string, bool) {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Like nginx's `access_log off` on a health location: Docker's loopback
-	// probes every 30 seconds would drown the log.
-	if g.accessLog == nil || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-		g.serve(w, r)
-		return
-	}
-	started, lw := time.Now(), &loggingWriter{ResponseWriter: w}
-	defer func() { g.accessLog.write(r, g.clientAddress(r), started, lw) }()
-	g.serve(lw, r)
-}
-
-func (g *Gateway) serve(w http.ResponseWriter, r *http.Request) {
 	setPublicSecurityHeaders(w.Header())
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
@@ -507,18 +486,10 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 		g.problem(w, r, 400, "invalid Instagram path")
 		return
 	}
-	key, ok := clearanceKey(r)
-	if !ok && g.cfg.Development && peerAddress(r).IsLoopback() {
-		key = "development"
-		ok = true
-	}
-	if !ok {
+	// nginx rate-limits previews per cf_clearance; a request without exactly one
+	// clearance has not passed the edge challenge.
+	if !hasClearance(r) && !(g.cfg.Development && peerAddress(r).IsLoopback()) {
 		g.problem(w, r, 403, "forbidden")
-		return
-	}
-	if !g.allowClearance(key, time.Now()) {
-		w.Header().Set("Retry-After", "60")
-		g.problem(w, r, 429, "rate limited")
 		return
 	}
 	if body.Token != nil {
@@ -544,45 +515,9 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 	g.writeResult(w, r, result)
 }
 
-func clearanceKey(r *http.Request) (string, bool) {
+func hasClearance(r *http.Request) bool {
 	values := r.CookiesNamed("cf_clearance")
-	if len(values) != 1 || values[0].Value == "" || len(values[0].Value) > 4096 {
-		return "", false
-	}
-	digest := sha256.Sum256([]byte(values[0].Value))
-	return hex.EncodeToString(digest[:]), true
-}
-
-func (g *Gateway) allowClearance(key string, now time.Time) bool {
-	g.rateMu.Lock()
-	defer g.rateMu.Unlock()
-	state := g.rates[key]
-	if !now.Before(state.start.Add(time.Minute)) {
-		state = clearanceLimit{start: now}
-	}
-	if state.count >= 8 {
-		return false
-	}
-	if len(g.rates) >= 4096 {
-		for k, v := range g.rates {
-			if !now.Before(v.start.Add(time.Minute)) {
-				delete(g.rates, k)
-			}
-		}
-		// Still full: evict the oldest window rather than lock out new visitors.
-		if _, exists := g.rates[key]; !exists && len(g.rates) >= 4096 {
-			oldest, oldestStart := "", now
-			for k, v := range g.rates {
-				if v.start.Before(oldestStart) {
-					oldest, oldestStart = k, v.start
-				}
-			}
-			delete(g.rates, oldest)
-		}
-	}
-	state.count++
-	g.rates[key] = state
-	return true
+	return len(values) == 1 && values[0].Value != "" && len(values[0].Value) <= 4096
 }
 
 func (g *Gateway) verifyTurnstile(r *http.Request, origin, token string) bool {

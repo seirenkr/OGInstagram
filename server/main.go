@@ -87,13 +87,9 @@ func main() {
 	slog.Info("server started", "service", serviceName, "version", cfg.Version,
 		"proxies", len(app.pool.sessions), "port", cfg.Port)
 
-	gateway := newGateway(cfg, app, home)
-	// Access log on stdout, application log (JSON) on stderr, like nginx's
-	// access.log and error.log.
-	gateway.accessLog = &accessLog{out: os.Stdout}
 	srv := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
-		Handler:           gateway,
+		Handler:           newGateway(cfg, app, home),
 		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
