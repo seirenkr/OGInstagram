@@ -129,7 +129,7 @@ func TestParseEmbedProfile(t *testing.T) {
 	}
 }
 
-// Logged-out GraphQL no longer returns play counts; the rich embed still does.
+// Logged-out GraphQL omits play counts; the rich embed has them.
 func TestParseEmbedPostVideoPlayCount(t *testing.T) {
 	inner := `{"context":{"shortcode":"V"},"gql_data":{"shortcode_media":{"__typename":"GraphVideo","id":"1","shortcode":"V","is_video":true,` +
 		`"video_url":"https://cdn/v.mp4","display_url":"https://cdn/v.jpg","dimensions":{"width":720,"height":1280},"video_view_count":22850111,` +

@@ -154,7 +154,7 @@ func parseCount(s string) int {
 	return n
 }
 
-// Find the literal first, preserving the old regexp's ASCII digits and whitespace.
+// Find the literal first; digits and whitespace are matched as ASCII only.
 func simpleCommentCount(page string) int {
 	for {
 		i := strings.Index(page, "comments")
