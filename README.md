@@ -1,5 +1,7 @@
 # OGInstagram
 
+**English** | [한국어](README.ko.md)
+
 Instagram embed proxy for Discord, Telegram, and other verified link-preview bots (Open Graph, plus the Mastodon/ActivityPub endpoints Discord uses) — with rich previews: media, caption, and stats.
 
 ## Usage
@@ -41,8 +43,9 @@ Discord / Telegram / browsers
 - **Edge:** browser navigations are sent to Instagram by Cloudflare Redirect
   Rules before the WAF; unverified clients are challenged on embed routes,
   so only verified bots reach the origin's embed paths (the home page,
-  static assets, `/api/*` and `/offload/*` are exempt from that rule). The Go app keeps a minimal fallback for the same
-  `Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document` signal.
+  static assets, `/api/*` and `/offload/*` are exempt from that rule). The
+  Go app keeps a minimal fallback for the same `Sec-Fetch-Mode: navigate` +
+  `Sec-Fetch-Dest: document` signal.
   `www.d.` and `www.g.` are served by a stateless Cloudflare Worker that
   308-redirects to `d.` and `g.` (second-level hosts only get a free
   certificate through Workers Custom Domains).
