@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"io"
 	"net/http"
 	"net/netip"
@@ -56,7 +57,6 @@ func (w *loggingWriter) ReadFrom(src io.Reader) (int64, error) {
 func (w *loggingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (l *accessLog) write(r *http.Request, clientIP string, started time.Time, w *loggingWriter) {
-	status := responseStatus(w.status)
 	var b strings.Builder
 	b.WriteString(logField(clientIP))
 	b.WriteString(" - - [")
@@ -64,7 +64,7 @@ func (l *accessLog) write(r *http.Request, clientIP string, started time.Time, w
 	b.WriteString(`] "`)
 	b.WriteString(logEscape(r.Method + " " + r.RequestURI + " " + r.Proto))
 	b.WriteString(`" `)
-	b.WriteString(strconv.Itoa(status))
+	b.WriteString(strconv.Itoa(cmp.Or(w.status, http.StatusOK))) // net/http sends 200 if nothing was written
 	b.WriteByte(' ')
 	b.WriteString(strconv.FormatInt(w.bytes, 10))
 	b.WriteString(` "`)
@@ -75,14 +75,6 @@ func (l *accessLog) write(r *http.Request, clientIP string, started time.Time, w
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, _ = io.WriteString(l.out, b.String())
-}
-
-// A handler that never writes still sends 200, as net/http does.
-func responseStatus(status int) int {
-	if status == 0 {
-		return http.StatusOK
-	}
-	return status
 }
 
 // nginx writes an empty variable as "-".
