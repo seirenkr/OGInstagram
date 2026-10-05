@@ -12,7 +12,7 @@
     "build": "vite build --config web/vite.config.ts && node tools/build-home.mjs",
     "lint": "eslint web/src",
     "check": "pnpm run lint && tsc -p web/tsconfig.json --noEmit && node --experimental-strip-types --test shared/routes.test.mjs web/src/preview-request.test.mjs && cd server && go test ./...",
-    "image:build": "v=$(git describe --always --dirty --abbrev=8) && docker buildx build --platform linux/amd64 --build-arg OG_VERSION=$v -t oginstagram:$v --load . && echo oginstagram:$v"
+    "image:build": "test -z \"$(git status --porcelain)\" || { echo 'commit first: the image tag and OG_VERSION are the 8-char commit hash' >&2; exit 1; } && v=$(git rev-parse --short=8 HEAD) && docker buildx build --platform linux/amd64 --build-arg OG_VERSION=$v -t oginstagram:$v --load . && echo oginstagram:$v"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.14.0",

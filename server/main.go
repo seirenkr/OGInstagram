@@ -288,7 +288,9 @@ func (a *App) handleProfile(req *http.Request, username string, gallery bool) re
 		title, desc := errorCard("profile", err.Code)
 		return a.errorCardResp(baseURL, origin, title, desc, err.Code, err, meta)
 	}
-	return tagFetch(htmlResp(200, a.buildProfileEmbedHTML(baseURL, p, gallery)), meta)
+	variant := discordRequestVariant(req)
+	html := a.buildProfileEmbedHTML(baseURL, p, gallery, variant)
+	return tagFetch(discordEmbedResponse(req, html, variant), meta)
 }
 
 func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaIndex int, specified, gallery bool) resp {
@@ -305,8 +307,9 @@ func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaInd
 		}
 		return a.errorCardResp(baseURL, origin, title, desc, errorCode, err, meta)
 	}
-	html := a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery)
-	return tagFetch(htmlResp(200, html), meta)
+	variant := discordRequestVariant(req)
+	html := a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, variant)
+	return tagFetch(discordEmbedResponse(req, html, variant), meta)
 }
 
 func (a *App) errorCardResp(baseURL, origin, title, desc, headerCode string, err *AppError, meta *fetchMeta) resp {

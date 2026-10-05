@@ -59,6 +59,38 @@ func TestConfigRejectsMalformedPortAndTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestDiscordEmojiConfiguration(t *testing.T) {
+	for _, key := range []string{"DISCORD_BRAND_EMOJI_ID", "DISCORD_VERIFIED_EMOJI_ID"} {
+		t.Run(key, func(t *testing.T) {
+			for _, value := range []string{"", "123456789012345678"} {
+				t.Setenv(key, value)
+				parsed := configFromEnv()
+				got := parsed.DiscordBrandEmojiID
+				if key == "DISCORD_VERIFIED_EMOJI_ID" {
+					got = parsed.DiscordVerifiedEmojiID
+				}
+				if got != value {
+					t.Fatalf("%s = %q; want %q", key, got, value)
+				}
+				cfg := validProductionConfig()
+				cfg.DiscordBrandEmojiID, cfg.DiscordVerifiedEmojiID = parsed.DiscordBrandEmojiID, parsed.DiscordVerifiedEmojiID
+				if err := cfg.validate(); err != nil {
+					t.Fatalf("optional emoji ID %q was rejected: %v", value, err)
+				}
+			}
+			for _, value := range []string{"0", "00000000000000000", "1234", "18446744073709551616", "+123456789012345678", "<:logo:123456789012345678>", "https://example.com/logo.png", "12345678901234567> @everyone"} {
+				t.Setenv(key, value)
+				parsed := configFromEnv()
+				cfg := validProductionConfig()
+				cfg.DiscordBrandEmojiID, cfg.DiscordVerifiedEmojiID = parsed.DiscordBrandEmojiID, parsed.DiscordVerifiedEmojiID
+				if err := cfg.validate(); err == nil {
+					t.Errorf("malformed emoji ID %q was accepted", value)
+				}
+			}
+		})
+	}
+}
+
 func TestLoadHomeTemplatesRequiresEveryLocale(t *testing.T) {
 	g := testHomeGateway(t)
 	if pages, err := loadHomeTemplates(g.cfg.AssetsDir); err != nil || len(pages) != len(homeLocales) {

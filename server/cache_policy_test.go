@@ -167,7 +167,7 @@ func TestFetchPostFallbacks(t *testing.T) {
 					}
 					return mediaTestResponse(r, 200, nil, []byte(tc.graphql)), nil
 				})}
-				pool := &SessionPool{sessions: []*Session{{client: proxy, windowStart: time.Now()}},
+				pool := &SessionPool{sessions: []*Session{{client: proxy}},
 					budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
 				a := newApp(Config{}, pool, offloadSigner{})
 				ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)

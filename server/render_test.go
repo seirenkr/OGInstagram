@@ -32,7 +32,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		}},
 	}
 
-	normal := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false)
+	normal := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, discordLegacy)
 	if !strings.Contains(normal, "property=\"og:description\" content=\"stats\n\ncaption\"") {
 		t.Fatalf("normal embed description missing: %s", normal)
 	}
@@ -43,7 +43,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		t.Error("author avatar must remain separate from the service favicon")
 	}
 
-	gallery := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, true)
+	gallery := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, true, discordLegacy)
 	for _, tag := range []string{
 		`name="description" content=""`,
 		`property="og:description" content=""`,
@@ -104,7 +104,7 @@ func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
 	baseURL := "https://g.oginstagram.com"
 	wantStatus := storyStatusURL(baseURL, story.Username, story.ID, true)
 	html := a.buildStoryEmbedHTML(baseURL, storyOriginURL(story.Username, story.ID), story,
-		baseURL+"/media", baseURL+"/thumb", wantStatus, true)
+		baseURL+"/media", baseURL+"/thumb", wantStatus, true, discordLegacy)
 	if !strings.Contains(html, `property="og:description" content=""`) || strings.Contains(html, "story caption") {
 		t.Fatalf("gallery story exposed caption: %s", html)
 	}
@@ -335,7 +335,7 @@ func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
 		Shortcode: "CODE", Username: "user", FullName: "User",
 		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Width: 2160, Height: 3840}},
 	}
-	html := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false)
+	html := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, discordLegacy)
 	for _, tag := range []string{
 		`property="og:video:width" content="1080"`,
 		`property="og:video:height" content="1920"`,

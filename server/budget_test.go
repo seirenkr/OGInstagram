@@ -28,33 +28,30 @@ func TestProxyByteRefundDoesNotCrossLeaseBoundary(t *testing.T) {
 	}
 }
 
-func TestProxySessionHourlyRequestLimit(t *testing.T) {
+func TestProxySessionContinuesPastFormerHourlyLimitAndHonorsCooldown(t *testing.T) {
 	now := time.Now()
-	session := &Session{windowStart: now}
+	session := &Session{}
 	pool := &SessionPool{
 		budgetLeaseExpires:   now.Add(24 * time.Hour),
 		budgetLeaseRemaining: proxyByteLeaseSize,
 		sessions:             []*Session{session},
 	}
-	for i := 0; i < defaultProxyHourlyLimit; i++ {
+	for i := 0; i < 2000; i++ {
 		if picked, reason := pool.pick(context.Background()); picked != session || reason != "" {
 			t.Fatalf("pick %d = (%v, %q), want session", i+1, picked, reason)
 		}
 	}
-	if picked, reason := pool.pick(context.Background()); picked != nil || reason != "" {
-		t.Fatalf("pick beyond hourly session limit = (%v, %q), want unavailable", picked, reason)
-	}
-
 	session.mu.Lock()
-	session.windowStart = now.Add(-time.Hour)
+	session.cooldownUntil = time.Now().Add(time.Minute)
+	session.mu.Unlock()
+	if picked, reason := pool.pick(context.Background()); picked != nil || reason != "" {
+		t.Fatalf("pick during cooldown = (%v, %q), want unavailable", picked, reason)
+	}
+	session.mu.Lock()
+	session.cooldownUntil = time.Now().Add(-time.Second)
 	session.mu.Unlock()
 	if picked, reason := pool.pick(context.Background()); picked != session || reason != "" {
-		t.Fatalf("pick after session window reset = (%v, %q), want session", picked, reason)
-	}
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if session.used != 1 {
-		t.Fatalf("session usage after reset = %d, want 1", session.used)
+		t.Fatalf("pick after cooldown = (%v, %q), want session", picked, reason)
 	}
 }
 
@@ -62,7 +59,7 @@ func TestProxyPickDoesNotReserveAfterWaitingContextIsCancelled(t *testing.T) {
 	pool := &SessionPool{
 		budgetLeaseExpires:   time.Now().Add(24 * time.Hour),
 		budgetLeaseRemaining: 1,
-		sessions:             []*Session{{windowStart: time.Now()}},
+		sessions:             []*Session{{}},
 	}
 	pool.mu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,9 +80,6 @@ func TestProxyPickDoesNotReserveAfterWaitingContextIsCancelled(t *testing.T) {
 	}
 	if pool.budgetLeaseRemaining != 1 {
 		t.Fatalf("cancelled pick changed lease to %d bytes", pool.budgetLeaseRemaining)
-	}
-	if got := pool.sessions[0].used; got != 0 {
-		t.Fatalf("cancelled pick consumed %d session requests", got)
 	}
 }
 

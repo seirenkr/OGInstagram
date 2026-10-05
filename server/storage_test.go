@@ -34,7 +34,7 @@ func newBudgetTestPool(t *testing.T, allowance int64) *SessionPool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &SessionPool{cfg: Config{Store: s}, sessions: []*Session{{windowStart: now}}}
+	return &SessionPool{cfg: Config{Store: s}, sessions: []*Session{{}}}
 }
 
 func remainingDailyBudget(t *testing.T, s *localStore) int64 {
@@ -284,12 +284,12 @@ func TestProxyBudgetExhaustionAndBackendFailuresFailClosed(t *testing.T) {
 		if store != nil {
 			_ = store.budget.Close()
 		}
-		p := &SessionPool{cfg: Config{Store: store}, sessions: []*Session{{windowStart: time.Now()}}}
+		p := &SessionPool{cfg: Config{Store: store}, sessions: []*Session{{}}}
 		if session, reason := p.pick(context.Background()); session != nil || reason != errorCodeBudgetBackend {
 			t.Fatalf("backend failure=%v,%s", session, reason)
 		}
-		if p.sessions[0].used != 0 || p.budgetBackendRetryAt.IsZero() {
-			t.Fatal("failed budget consumed a request or was not memoized")
+		if p.budgetBackendRetryAt.IsZero() {
+			t.Fatal("failed budget was not memoized")
 		}
 		p.cfg.Store = newTestStore(t)
 		if _, reason := p.reserveProxyBytes(1); reason != errorCodeBudgetBackend {
@@ -360,12 +360,12 @@ func TestBudgetedConnFailsClosedBeforeUnbudgetedWrite(t *testing.T) {
 func TestBudgetLeaseOutlivesCancelledLeaderWithoutChargingIt(t *testing.T) {
 	s := newTestStore(t)
 	// Occupy the sole connection, then release it after the leader cancels. Its
-	// durable grant completes for future callers without consuming session usage.
+	// durable grant completes for future callers without selecting a session.
 	connection, err := s.budget.Conn(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &SessionPool{cfg: Config{Store: s}, sessions: []*Session{{windowStart: time.Now()}}}
+	p := &SessionPool{cfg: Config{Store: s}, sessions: []*Session{{}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan string, 1)
 	go func() {
@@ -381,7 +381,7 @@ func TestBudgetLeaseOutlivesCancelledLeaderWithoutChargingIt(t *testing.T) {
 	if reason := <-done; reason != errorCodeConnection {
 		t.Fatalf("cancelled leader=%s", reason)
 	}
-	if p.budgetLeaseRemaining != proxyByteLeaseSize || p.sessions[0].used != 0 {
+	if p.budgetLeaseRemaining != proxyByteLeaseSize {
 		t.Fatal("cancelled leader consumed shared grant")
 	}
 	if session, reason := p.pick(context.Background()); session == nil || reason != "" {

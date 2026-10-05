@@ -19,8 +19,6 @@ type Session struct {
 
 	ewmaMs        float64
 	hasEWMA       bool
-	windowStart   time.Time
-	used          int
 	cooldownUntil time.Time
 }
 
@@ -140,8 +138,7 @@ func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
 	bestRank := 0.0
 	for _, s := range p.sessions {
 		s.mu.Lock()
-		s.resetBucketWindowLocked(now)
-		ok := !s.cooldownUntil.After(now) && s.used < defaultProxyHourlyLimit
+		ok := !s.cooldownUntil.After(now)
 		rank := s.ewmaMs
 		if !s.hasEWMA {
 			rank = -1
@@ -159,9 +156,6 @@ func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
 		if ctx.Err() != nil {
 			return nil, errorCodeConnection
 		}
-		picked.mu.Lock()
-		picked.used++
-		picked.mu.Unlock()
 	}
 	return picked, ""
 }
@@ -273,12 +267,5 @@ func (p *SessionPool) rotate(s *Session) {
 	s.mu.Unlock()
 	if old != nil {
 		old.CloseIdleConnections()
-	}
-}
-
-func (s *Session) resetBucketWindowLocked(now time.Time) {
-	if s.windowStart.IsZero() || now.Sub(s.windowStart) >= time.Hour {
-		s.windowStart = now
-		s.used = 0
 	}
 }

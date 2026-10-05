@@ -65,7 +65,7 @@ func (a *App) commonHead(baseURL, originURL, username, title, description, image
 	return h
 }
 
-func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) string {
+func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool, variant discordEmbedVariant) string {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 	first := post.Attachments[selectedIndex]
 	originURL := instagramPostURL(postType, post.Shortcode, selectedIndex, specified)
@@ -87,8 +87,12 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	thumbnailHref := a.offloadURL(baseURL, post.Shortcode, selectedIndex, true)
 	exposeVideo := first.Kind == "video" && first.URL != ""
 
+	component := ""
+	if variant != discordLegacy {
+		component = a.postComponentEmbed(baseURL, post, postType, mediaIndex, specified, gallery, variant == discordComponentsSupport)
+	}
 	activityHref := ""
-	if useActivity {
+	if useActivity && component == "" {
 		activityHref = statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	}
 
@@ -111,6 +115,9 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	if exposeVideo {
 		h = append(h, videoOGTags(mediaHref, first)...)
 	}
+	if component != "" {
+		h = append(h, component)
+	}
 
 	return embedDocument(h)
 }
@@ -132,7 +139,7 @@ const embedBanner = `<!--
 
 -->`
 
-func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool) string {
+func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool, variant discordEmbedVariant) string {
 	origin := profileURL(p.Username)
 	title := displayTitle(p.FullName, p.Username)
 
@@ -147,11 +154,22 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool) str
 		}
 	}
 
-	h := a.commonHead(baseURL, origin, p.Username, title, description, a.profileAvatarURL(baseURL, p), "summary", profileStatusURL(baseURL, p.Username))
+	component := ""
+	if variant != discordLegacy {
+		component = a.profileComponentEmbed(baseURL, p, gallery, variant == discordComponentsSupport)
+	}
+	activityHref := profileStatusURL(baseURL, p.Username)
+	if component != "" {
+		activityHref = ""
+	}
+	h := a.commonHead(baseURL, origin, p.Username, title, description, a.profileAvatarURL(baseURL, p), "summary", activityHref)
 	h = append(h,
 		`<meta property="og:type" content="profile">`,
 		`<meta property="profile:username" content="`+html.EscapeString(p.Username)+`">`,
 	)
+	if component != "" {
+		h = append(h, component)
+	}
 	return embedDocument(h)
 }
 

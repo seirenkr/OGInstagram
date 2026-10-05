@@ -44,6 +44,7 @@ type Profile struct {
 	FollowingCount int
 	MediaCount     int
 	IsPrivate      bool
+	IsVerified     bool
 	RecentMedia    []ProfileMedia
 }
 
@@ -114,6 +115,7 @@ func parseProfile(body string) (Profile, *AppError) {
 		FollowingCount: uintOf(u, "edge_follow.count"),
 		MediaCount:     uintOf(u, "edge_owner_to_timeline_media.count"),
 		IsPrivate:      u.Get("is_private").Bool(),
+		IsVerified:     u.Get("is_verified").Type == gjson.True,
 	}
 	if p.Username == "" {
 		return Profile{}, igErr(404, errorCodeMediaNotFound, "profile had no username")
