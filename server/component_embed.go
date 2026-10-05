@@ -161,19 +161,29 @@ func discordLink(label, target string) string {
 	return "[" + label + "](" + target + ")"
 }
 
-// Discord italicizes _x_ only from a word boundary, so snake_case labels stay
-// literal. An underscore after anything but an ASCII letter or digit may open.
+// Discord italicizes _x_ only when an underscore after a non-word character
+// pairs with the next underscore before a non-word character (or the end).
+// A lone or in-word underscore (alice_photos, a._b) stays literal.
 func discordUnderscoreCanOpen(label string) bool {
+	open := -1
 	for i := 0; i < len(label); i++ {
-		if label[i] == '_' && (i == 0 || !isASCIIAlnum(label[i-1])) {
+		if label[i] != '_' {
+			continue
+		}
+		if open >= 0 && i > open+1 && (i == len(label)-1 || !isWordByte(label[i+1])) {
 			return true
+		}
+		open = -1
+		if i == 0 || !isWordByte(label[i-1]) {
+			open = i
 		}
 	}
 	return false
 }
 
-func isASCIIAlnum(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+// A JavaScript regex \w character, which is what Discord's \b boundaries use.
+func isWordByte(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // Find links in the original caption before fitting it to the byte budget. A

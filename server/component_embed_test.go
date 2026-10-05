@@ -560,6 +560,7 @@ func TestComponentEmbedCaptionMarkdownLabels(t *testing.T) {
 		{"https://my-site.test/a?q=x&z=1", "<https://my-site.test/a?q=x&z=1>"},
 		{"https://my-site.test/a_b?q=x&z=1", "<https://my-site.test/a_b?q=x&z=1>"},
 		{"@alice_photos #food_tag", "[@alice_photos](https://www.instagram.com/alice_photos) [#food_tag](https://www.instagram.com/explore/search/keyword/?q=%23food_tag)"},
+		{"@favrit1._j.nyang2 @x_y_z", "[@favrit1._j.nyang2](https://www.instagram.com/favrit1._j.nyang2) [@x_y_z](https://www.instagram.com/x_y_z)"},
 		{"@_alice_ @a__b", "@\u200b\\_alice\\_ [↗](https://www.instagram.com/_alice_) @\u200ba\\_\\_b [↗](https://www.instagram.com/a__b)"},
 		{"https://example.com/||secret||", "<https://example.com/||secret||>"},
 		{`https://example.com/a\b`, `https\://example.com/a\\b [↗](https://example.com/a%5Cb)`},
