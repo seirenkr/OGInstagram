@@ -8,8 +8,13 @@ web/dist/
 skills-lock.json
 web/public/PPMori-*.woff2
 
-server/external_helper_private.go
-server/external_helper_private_test.go
+# Private extensions (external helper, key re-harvester) are not published.
+server/*_private.go
+server/*_private_test.go
+harvest/
+Dockerfile.private
 data/
 secrets/
 .local-data/
+# Operator runbook (internal).
+docs/vultr-deployment.md

@@ -113,6 +113,8 @@ func proxyOffloadMedia(w http.ResponseWriter, r *http.Request, redirect resp) bo
 			return true
 		}
 	}
+	// An uncached HEAD is answered from upstream headers, never by decoding.
+	transform = transform && r.Method != http.MethodHead
 	ctx, cancel := context.WithTimeout(r.Context(), mediaTransferTimeout)
 	defer cancel()
 	// At most one decoded image and one encoder process can exist on a 1 GiB VM.

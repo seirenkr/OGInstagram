@@ -42,6 +42,16 @@ func (w *loggingWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// ReadFrom keeps net/http's sendfile/splice path for streamed media.
+func (w *loggingWriter) ReadFrom(src io.Reader) (int64, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := io.Copy(w.ResponseWriter, src)
+	w.bytes += n
+	return n, err
+}
+
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *loggingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 

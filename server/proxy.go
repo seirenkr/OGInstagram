@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -82,14 +83,15 @@ func (c *budgetedConn) metered(p []byte, op func([]byte) (int, error)) (int, err
 func newSessionPool(cfg Config) *SessionPool {
 	pool := &SessionPool{cfg: cfg}
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
-		for range proxySessionCount {
-			id := newSessionID()
-			client, err := buildSessionClient(proxyURL(cfg.ProxyUser, cfg.ProxyPass, id), pool)
+		for i := range proxySessionCount {
+			// A stable slot label: rotation replaces the exit IP behind it.
+			name := "us-" + strconv.Itoa(i+1)
+			client, err := buildSessionClient(proxyURL(cfg.ProxyUser, cfg.ProxyPass, newSessionID()), pool)
 			if err != nil {
-				slog.Warn("proxy session skipped: invalid proxy configuration", "session", "us-"+id, "error", err)
+				slog.Warn("proxy session skipped: invalid proxy configuration", "session", name, "error", err)
 				continue
 			}
-			pool.sessions = append(pool.sessions, &Session{name: "us-" + id, client: client})
+			pool.sessions = append(pool.sessions, &Session{name: name, client: client})
 		}
 	}
 
@@ -259,6 +261,7 @@ func (p *SessionPool) fail(s *Session) {
 func (p *SessionPool) rotate(s *Session) {
 	client, err := buildSessionClient(proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), p)
 	if err != nil {
+		slog.Warn("proxy session rotation failed", "session", s.name, "error", err)
 		return
 	}
 	s.mu.Lock()

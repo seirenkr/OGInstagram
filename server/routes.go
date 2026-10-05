@@ -29,7 +29,10 @@ func isPostRouteType(value string) bool {
 // parseEmbedSegments accepts /p/X[/n] and /user/p/X[/n]. A shape match with a
 // non-canonical index rejects the path instead of trying the other shape.
 func parseEmbedSegments(segments []string) *EmbedRoute {
-	for _, s := range [][]string{segments, segments[min(1, len(segments)):]} {
+	for i, s := range [][]string{segments, segments[min(1, len(segments)):]} {
+		if i == 1 && !validUsername(segments[0]) {
+			continue
+		}
 		if len(s) < 2 || len(s) > 3 || !isPostRouteType(s[0]) || !validShortcode(s[1]) {
 			continue
 		}
