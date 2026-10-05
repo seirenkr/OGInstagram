@@ -672,7 +672,7 @@ func TestGatewayComponentEmbedNegotiationAndDirectRoutes(t *testing.T) {
 			component, support    bool
 		}{
 			{"Discordbot/2.0", "2", "component", true, false},
-			{"Discordbot/2.0", "8", "component", true, true},
+			{"Discordbot/2.0", "15", "component", true, true},
 			{"Discordbot/2.0", "0", "mastodon", false, false},
 			{"TelegramBot", "36", "", false, false},
 			{"OGInstagramPreviewBot/1.0", "36", "", false, false},
@@ -812,8 +812,8 @@ func TestGatewayComponentRolloutSharesTheModelCache(t *testing.T) {
 			t.Errorf("%d independent request ids did not yield a roughly even rollout: %v", requests, counts)
 		}
 	}
-	if supportCount < counts["component"]*40/100 || supportCount > counts["component"]*60/100 {
-		t.Errorf("support should appear on about half of component requests, got %d of %d", supportCount, counts["component"])
+	if supportCount < counts["component"]*14/100 || supportCount > counts["component"]*26/100 {
+		t.Errorf("support should appear on about 20%% of component requests, got %d of %d", supportCount, counts["component"])
 	}
 }
 

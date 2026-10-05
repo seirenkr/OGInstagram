@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -79,9 +80,10 @@ func discordRequestVariant(req *http.Request) discordEmbedVariant {
 	if digest[0]&1 != 0 {
 		return discordLegacy
 	}
-	// Use independent hash bytes for the 50% support-button sample within the
-	// Component Embed arm; fitting the payload must not reroll the choice.
-	if digest[1]&1 == 0 {
+	// Independent hash bytes pick the support button for 20% of the Component
+	// Embed arm (10% of Discordbot requests); fitting the payload must not
+	// reroll the choice.
+	if binary.BigEndian.Uint64(digest[1:9])%5 == 0 {
 		return discordComponentsSupport
 	}
 	return discordComponents
