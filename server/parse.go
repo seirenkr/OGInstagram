@@ -2,10 +2,15 @@ package main
 
 import (
 	"cmp"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
 )
+
+// GraphQL error code Instagram uses for per-client throttling.
+const graphQLRateLimitedCode = 1675004
 
 func parseInstagramPost(body string) (Post, *AppError) {
 	root := gjson.Parse(body)
@@ -13,6 +18,16 @@ func parseInstagramPost(body string) (Post, *AppError) {
 
 	if it := data.Get("xdt_api__v1__media__shortcode__web_info.items.0"); present(it) {
 		return parseV1(it)
+	}
+	// Errors arrive with data:null. field_exception (1675030) comes back for
+	// gated, hidden and missing posts alike, so it is not proof of absence.
+	if first := root.Get("errors.0"); first.Exists() {
+		code, msg := first.Get("code").Int(), first.Get("message").String()
+		cause := fmt.Errorf("graphql %d: %s", code, msg)
+		if code == graphQLRateLimitedCode || strings.Contains(msg, "Please wait") {
+			return Post{}, causedErr(429, errorCodeRateLimited, "Instagram rate limited the request", cause)
+		}
+		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", cause)
 	}
 	if data.Exists() {
 		return Post{}, igErr(404, errorCodeMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")

@@ -185,3 +185,94 @@ func TestFetchPostFallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestEmbedPausesAfterRateLimit(t *testing.T) {
+	var hits, status atomic.Int32
+	status.Store(http.StatusTooManyRequests)
+	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return mediaTestResponse(r, int(status.Load()), nil, []byte(simpleEmbedImagePage)), nil
+	}))
+	synctest.Test(t, func(t *testing.T) {
+		a := &App{}
+		ctx := context.Background()
+		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err == nil || err.Status != http.StatusTooManyRequests {
+			t.Fatalf("first call = %v, want 429", err)
+		}
+		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err == nil || hits.Load() != 1 {
+			t.Fatalf("paused embed still reached Instagram (%d hits, err %v)", hits.Load(), err)
+		}
+		time.Sleep(embedProbeInterval)
+		status.Store(http.StatusOK)
+		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err != nil || hits.Load() != 2 {
+			t.Fatalf("probe after the interval = %v with %d hits, want one successful probe", err, hits.Load())
+		}
+		if a.embedPausedUntil.Load() != 0 {
+			t.Fatal("a successful probe must clear the pause")
+		}
+	})
+}
+
+func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
+	const shortcode = "ABC123"
+	gqlError := `{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`
+	helperPost := Post{Shortcode: shortcode, Username: "dave",
+		Attachments: []Attachment{{Kind: "image", URL: "https://scontent.cdninstagram.com/x.jpg"}}}
+	for _, tc := range []struct {
+		name, ruling string
+		rulingStatus int
+		missing      bool
+	}{
+		{"ruling miss answers 404 at once", `{"message":"Media cannot be found","status":"fail"}`, http.StatusNotFound, true},
+		{"gated post still waits for the helper", `{"title":"This content isn't available to everyone","status":"ok"}`, http.StatusOK, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := externalHelperPostImpl
+			t.Cleanup(func() { externalHelperPostImpl = previous })
+			externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, bool) {
+				select {
+				case <-time.After(1500 * time.Millisecond):
+					return helperPost, true
+				case <-ctx.Done():
+					return Post{}, false
+				}
+			}
+			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+					return mediaTestResponse(r, tc.rulingStatus, nil, []byte(tc.ruling)), nil
+				}
+				return mediaTestResponse(r, http.StatusTooManyRequests, nil, nil), nil
+			}))
+			synctest.Test(t, func(t *testing.T) {
+				proxy := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/api/v1/oembed/" {
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					return mediaTestResponse(r, 200, nil, []byte(gqlError)), nil
+				})}
+				pool := &SessionPool{sessions: []*Session{{client: proxy}},
+					budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+				a := newApp(Config{}, pool, offloadSigner{})
+				ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+				defer cancel()
+				started := time.Now()
+				post, err := a.getPost(ctx, shortcode, nil)
+				if !tc.missing {
+					if err != nil || post.Username != "dave" {
+						t.Fatalf("getPost = %q, %v; want the helper's post", post.Username, err)
+					}
+					return
+				}
+				if err == nil || err.Code != errorCodeMediaNotFound || time.Since(started) >= time.Second {
+					t.Fatalf("getPost = %v after %s, want media_not_found within a second", err, time.Since(started))
+				}
+				time.Sleep(cacheSharedWorkTimeout)
+				synctest.Wait()
+				if entry, ok := a.posts.localGet(shortcode); !ok || entry.err != nil || entry.value.Username != "dave" {
+					t.Fatalf("background helper result did not replace the cached miss: %+v", entry)
+				}
+			})
+		})
+	}
+}

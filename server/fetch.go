@@ -194,6 +194,10 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 				return r.value, r.persist, nil
 			}
 			failures = append(failures, r.name+": "+r.err.errorType()+": "+r.err.logMessage())
+			if r.err.Final {
+				report("")
+				return zero, false, r.err
+			}
 			lastErr = preferredError(lastErr, r.err)
 			start()
 			arm()

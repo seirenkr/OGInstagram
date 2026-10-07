@@ -32,6 +32,38 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 	return
 }
 
+// mediaMissing asks Instagram's content-ruling endpoint (~200 B) whether a post
+// exists for logged-out viewers. Only a definite "Media cannot be found" counts;
+// gated posts, errors and timeouts all report false.
+func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
+	pk := shortcodePK(shortcode)
+	if pk == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, rulingTimeout)
+	defer cancel()
+	rawURL := instagramOrigin + "/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=" + pk.String()
+	started := time.Now()
+	status, out, ferr := fetchRequest(ctx, http.DefaultClient, fetchSpec{
+		operation: "ruling",
+		method:    http.MethodGet,
+		url:       rawURL,
+		subject:   "Instagram",
+		headers: map[string]string{
+			"User-Agent": "Mozilla/5.0", "X-IG-App-ID": instagramAppID, "X-ASBD-ID": "359341", "X-IG-WWW-Claim": "0",
+		},
+		// "Media cannot be found" arrives as 404 with a JSON body.
+		interpret: func(status int, raw []byte) *AppError {
+			if status == http.StatusNotFound {
+				return nil
+			}
+			return statusOnly(status, raw)
+		},
+	})
+	logOutbound(ctx, "ruling", "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
+	return ferr == nil && gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found"
+}
+
 func embedContextJSON(html string) (string, *AppError) {
 	const key = `"contextJSON":`
 	i := strings.Index(html, key)
@@ -46,10 +78,21 @@ func embedContextJSON(html string) (string, *AppError) {
 }
 
 func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
+	// While Instagram answers 429, skip the embed and let one probe through per
+	// embedProbeInterval (the CAS winner); everyone else falls through at once.
+	now := time.Now().UnixNano()
+	if until := a.embedPausedUntil.Load(); until != 0 &&
+		(now < until || !a.embedPausedUntil.CompareAndSwap(until, now+int64(embedProbeInterval))) {
+		return Post{}, ephemeralErr(http.StatusTooManyRequests, errorCodeRateLimited, "embed paused after Instagram rate limiting")
+	}
 	html, err := a.directGet(ctx, "post", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
 	if err != nil {
+		if err.Status == http.StatusTooManyRequests {
+			a.embedPausedUntil.Store(time.Now().Add(embedProbeInterval).UnixNano())
+		}
 		return Post{}, err
 	}
+	a.embedPausedUntil.Store(0)
 	post, perr := parseEmbedPost(html)
 	if perr != nil {
 		logEmbedParseFailure(ctx, "post", html, perr)
