@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -147,7 +148,7 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 	}{
 		{"429", respond(429, "{}"), errorCodeRateLimited, true},
 		{"refused", func(*http.Request) (*http.Response, error) { return nil, errors.New("refused") }, errorCodeConnection, true},
-		{"deadline", func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() }, errorCodeConnection, false},
+		{"deadline", func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() }, errorCodeConnection, true},
 		{"budget", func(*http.Request) (*http.Response, error) {
 			return nil, &proxyBudgetError{code: errorCodeBudgetExhausted}
 		}, errorCodeBudgetExhausted, false},
@@ -168,8 +169,8 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 			code = err.Code
 		}
 		rotated := s.getClient() != client && s.cooldownUntil.After(time.Now())
-		if code != tt.code || rotated != tt.rotated || (tt.code == "" && !s.hasEWMA) {
-			t.Errorf("%s: code=%q rotated=%v ewma=%v, want %q rotated=%v", tt.name, code, rotated, s.hasEWMA, tt.code, tt.rotated)
+		if code != tt.code || rotated != tt.rotated || (tt.code == "" && s.rttAt.IsZero()) || s.pending != 0 {
+			t.Errorf("%s: code=%q rotated=%v measured=%v pending=%d, want %q rotated=%v", tt.name, code, rotated, !s.rttAt.IsZero(), s.pending, tt.code, tt.rotated)
 		}
 	}
 }
@@ -177,4 +178,78 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
 	logOutbound(context.Background(), "op", "direct", http.MethodGet, "https://example.com/p#%zz", time.Now(), 0, 0,
 		causedErr(502, errorCodeConnection, "boom", errors.New("boom")), false)
+}
+
+func newTestPool(names ...string) *SessionPool {
+	p := &SessionPool{budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 30}
+	for _, n := range names {
+		p.sessions = append(p.sessions, &Session{name: n})
+	}
+	return p
+}
+
+// A fresh pool whose third session hangs on its first request used to receive
+// almost every later pick (28 of 30) until that request timed out.
+func TestPickAvoidsHungSession(t *testing.T) {
+	p := newTestPool("us-1", "us-2", "us-3")
+	counts := map[string]int{}
+	for range 30 {
+		s, _ := p.pick(context.Background())
+		counts[s.name]++
+		if s.name != "us-3" {
+			p.done(s, 300*time.Millisecond, true)
+		}
+	}
+	if counts["us-3"] > 3 {
+		t.Fatalf("hung session received %d of 30 picks: %v", counts["us-3"], counts)
+	}
+}
+
+func TestPickSpreadsLoadAcrossHealthySessions(t *testing.T) {
+	p := newTestPool("us-1", "us-2", "us-3", "us-4")
+	counts := map[string]int{}
+	for range 400 {
+		s, _ := p.pick(context.Background())
+		counts[s.name]++
+		p.done(s, 300*time.Millisecond, true)
+	}
+	for _, s := range p.sessions {
+		if counts[s.name] < 40 {
+			t.Fatalf("equal sessions should share traffic, got %v", counts)
+		}
+	}
+}
+
+func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestPool("fast", "slow")
+		fast, slow := p.sessions[0], p.sessions[1]
+		for _, s := range []*Session{fast, slow} {
+			s.pending++
+			p.done(s, 300*time.Millisecond, true)
+		}
+		slow.pending++
+		p.done(slow, 10*time.Second, true) // one peak replaces the estimate at once
+		picks := func() (n int) {
+			for range 50 {
+				s, _ := p.pick(context.Background())
+				p.done(s, 0, false)
+				if s == slow {
+					n++
+				}
+			}
+			return n
+		}
+		if n := picks(); n != 0 {
+			t.Fatalf("slow session picked %d of 50 right after a 10s peak", n)
+		}
+		// The busy session keeps fresh samples while the idle slow one decays,
+		// so after a while the slow one is worth retrying.
+		time.Sleep(time.Minute)
+		fast.pending++
+		p.done(fast, 300*time.Millisecond, true)
+		if n := picks(); n == 0 {
+			t.Fatal("a decayed peak should let the slow session be retried")
+		}
+	})
 }

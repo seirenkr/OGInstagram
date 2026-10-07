@@ -259,16 +259,17 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 
 	started := time.Now()
 	defer func() {
-		rotated := ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code)
+		// Only Instagram round trips describe the exit IP; the helper is slow on
+		// its own side (seconds), so it counts as pending but not as latency.
+		instagram := strings.HasPrefix(spec.url, instagramOrigin+"/")
+		// Instagram answers in well under a second. Running into our deadline means
+		// the exit IP hung (outlier ejection, as in Envoy): replace it.
+		hung := instagram && ferr != nil && ferr.Status == http.StatusGatewayTimeout
+		rotated := hung || (ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
 		logOutbound(ctx, spec.operation, s.name, spec.method, spec.url, started, status, len(out), ferr, rotated)
-		switch {
-		case ferr == nil:
-			a.pool.recordLatency(s, time.Since(started))
-		case rotated:
+		a.pool.done(s, time.Since(started), instagram && (ferr == nil || hung))
+		if rotated {
 			a.pool.fail(s)
-		case ferr.Status == http.StatusGatewayTimeout:
-			// Our deadline, but the session did not answer in time: demote it.
-			a.pool.recordLatency(s, requestTimeout)
 		}
 	}()
 
