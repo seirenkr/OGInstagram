@@ -84,16 +84,15 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	defer oembedTimer.Stop()
 
 	sources := []stagedSource[Post]{
-		// GraphQL first: same quality as embed at ~1/18 the bytes (22 KB vs 409 KB).
-		{name: "post_graphql", persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+		{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
+			return valid(a.fetchPostEmbed(ctx, shortcode))
+		}},
+		{name: "post_graphql", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
 			_, body, gqlErr := a.fetchViaProxy(ctx, webLoggedOutSpec(shortcode))
 			if gqlErr != nil {
 				return Post{}, gqlErr
 			}
 			return valid(parseInstagramPost(body))
-		}},
-		{name: "post_embed", after: postHedgeDelay, fetch: func(ctx context.Context) (Post, *AppError) {
-			return valid(a.fetchPostEmbed(ctx, shortcode))
 		}},
 	}
 	if externalHelperPostImpl != nil {
