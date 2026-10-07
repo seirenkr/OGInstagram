@@ -51,6 +51,11 @@ const (
 	rulingTimeout = time.Second
 
 	rotateCooldown = 3 * time.Second
+
+	// Unverified bots get this many requests per IP per hour instead of a
+	// managed challenge; Cloudflare marks them with botClassHeader: limited.
+	botHourlyLimit = 50
+	botClassHeader = "X-OG-Bot-Class"
 	// Keep origin work bounded on a single small instance.
 	maxConcurrentFetches = 48
 

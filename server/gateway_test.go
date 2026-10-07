@@ -412,3 +412,51 @@ func TestOffloadEdgeTTL(t *testing.T) {
 		t.Errorf("TTL must not outlive the signed link: %d", got)
 	}
 }
+
+func TestBotLimiterAllowsFiftyPerHour(t *testing.T) {
+	var l botLimiter
+	start := time.Date(2026, 10, 7, 5, 0, 0, 0, time.UTC)
+	for i := range botHourlyLimit {
+		if ok, _ := l.allow("198.51.100.7", start.Add(time.Duration(i)*time.Second)); !ok {
+			t.Fatalf("request %d denied", i+1)
+		}
+	}
+	ok, wait := l.allow("198.51.100.7", start.Add(10*time.Minute))
+	if ok || wait != 50*time.Minute {
+		t.Fatalf("51st request = %v, retry after %s; want denied for 50m", ok, wait)
+	}
+	if ok, _ := l.allow("198.51.100.8", start.Add(10*time.Minute)); !ok {
+		t.Fatal("another IP has its own budget")
+	}
+	if ok, _ := l.allow("198.51.100.7", start.Add(time.Hour)); !ok {
+		t.Fatal("the next hour starts a fresh window")
+	}
+}
+
+func TestGatewayRateLimitsOnlyLimitedBots(t *testing.T) {
+	g := testGateway(t)
+	now := time.Now()
+	for range botHourlyLimit {
+		g.bots.allow("198.51.100.7", now)
+	}
+	r := publicRequest(http.MethodGet, "/p/DaD8phTyclR")
+	r.Header.Set(botClassHeader, "limited")
+	r.Header.Set("CF-Connecting-IP", "198.51.100.7")
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("over-limit bot = %d (Retry-After %q), want 429", w.Code, w.Header().Get("Retry-After"))
+	}
+	// Exempt traffic (verified bots, Discord, partners) from the same IP passes on
+	// to normal handling; an unsigned offload link answers 404 without any fetch.
+	for class, want := range map[string]int{"exempt": http.StatusNotFound, "": http.StatusNotFound, "limited": http.StatusTooManyRequests} {
+		r = publicRequest(http.MethodGet, "/offload/DaD8phTyclR/1")
+		r.Header.Set(botClassHeader, class)
+		r.Header.Set("CF-Connecting-IP", "198.51.100.7")
+		w = httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("class %q = %d, want %d", class, w.Code, want)
+		}
+	}
+}
