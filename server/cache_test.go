@@ -124,6 +124,7 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}))
 	a := &App{
 		cfg:           Config{BaseURL: "https://example.test"},
+		pool:          &SessionPool{}, // no proxy: GraphQL fails fast, captioned serves
 		offloadSigner: mustOffloadSigner(testOffloadSigningKeys),
 		posts:         newPersistentCache[Post](store, "post", slots, localPostCacheBytes),
 	}
@@ -156,6 +157,7 @@ func TestEdgeAuthorizedDirectOffloadMayFetchOrigin(t *testing.T) {
 		}, nil
 	}))
 	a := &App{
+		pool:  &SessionPool{},
 		posts: postCache,
 	}
 	req := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
