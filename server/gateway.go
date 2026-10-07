@@ -42,6 +42,35 @@ type Gateway struct {
 	statusMu   sync.Mutex
 	statusBody []byte
 	statusAt   time.Time
+
+	bots botLimiter
+}
+
+// botLimiter caps requests that Cloudflare classed as unverified bots (a Request
+// Header Transform Rule sets botClassHeader on every request, so clients cannot
+// forge it) to botHourlyLimit per visitor IP. The Free plan's rate limiting only
+// counts over 10 s, so the hourly count lives here.
+// ponytail: fixed clock-hour window per instance (up to 2x at the boundary,
+// resets on deploy); move to a sliding window in SQLite if that ever matters.
+type botLimiter struct {
+	mu     sync.Mutex
+	hour   int64
+	counts map[string]int
+}
+
+// allow counts one request from ip, or reports how long until the next window.
+func (l *botLimiter) allow(ip string, now time.Time) (bool, time.Duration) {
+	hour := now.Unix() / 3600
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if hour != l.hour || l.counts == nil {
+		l.hour, l.counts = hour, map[string]int{} // memory stays bounded by one hour of IPs
+	}
+	if l.counts[ip] >= botHourlyLimit {
+		return false, time.Unix((hour+1)*3600, 0).Sub(now)
+	}
+	l.counts[ip]++
+	return true, 0
 }
 
 type metricEvent struct {
@@ -189,6 +218,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if route.humanRedirect != "" && r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document" {
 		http.Redirect(w, r, route.humanRedirect, http.StatusTemporaryRedirect)
 		return
+	}
+	if r.Header.Get(botClassHeader) == "limited" {
+		if ok, wait := g.bots.allow(r.Header.Get("CF-Connecting-IP"), time.Now()); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			g.problem(w, r, http.StatusTooManyRequests, "rate limited")
+			return
+		}
 	}
 	if route.offload && !g.app.offloadSigner.authorize(r.URL, time.Now()) {
 		// A link that fails verification never becomes valid; let the edge keep the 404.
