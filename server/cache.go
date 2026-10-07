@@ -177,6 +177,20 @@ func (c *cache[V]) runFlight(
 	c.storeLocal(key, entry)
 }
 
+// put stores a value fetched outside get, replacing any cached entry,
+// including a cached error.
+func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Duration, persist bool) {
+	value, ok := cloneAndValidateCacheValue(key, value)
+	if !ok || ttl <= 0 {
+		return
+	}
+	entry := &cacheEntry[V]{value: value, expiresAt: time.Now().Add(ttl)}
+	if c.store != nil && persist {
+		c.persistentPut(ctx, key, entry)
+	}
+	c.storeLocal(key, entry)
+}
+
 func cacheErrorIsUncacheable(err *AppError) bool {
 	return err != nil && (err.Ephemeral || err.Status == 499)
 }

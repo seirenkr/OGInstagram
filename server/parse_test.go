@@ -52,6 +52,23 @@ func TestParseNotFound(t *testing.T) {
 	}
 }
 
+func TestParseGraphQLErrors(t *testing.T) {
+	for _, tc := range []struct{ body, code string }{
+		{`{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`, errorCodeGraphQL},
+		{`{"data":null,"errors":[{"message":"Rate limited","code":1675004}]}`, errorCodeRateLimited},
+		{`{"data":null,"errors":[{"message":"Please wait a few minutes before you try again.","code":1}]}`, errorCodeRateLimited},
+		{`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`, errorCodeMediaNotFound},
+	} {
+		if _, err := parseInstagramPost(tc.body); err == nil || err.Code != tc.code {
+			t.Errorf("%s: got %v, want %s", tc.body, err, tc.code)
+		}
+	}
+	// A GraphQL field_exception is not proof of absence: it must not be cached as permanent.
+	if !isTransient(errorCodeGraphQL) {
+		t.Fatal("graphql_error must stay transient")
+	}
+}
+
 func TestNormalizeCDNHost(t *testing.T) {
 	cases := map[string]string{
 		"https://instagram.fcps4-1.fna.fbcdn.net/v/x.mp4?oh=1&oe=2": "https://scontent.cdninstagram.com/v/x.mp4?oh=1&oe=2",

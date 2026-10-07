@@ -43,6 +43,11 @@ const (
 	// A ready oEmbed card ends a still-running staged race this early, so the
 	// degraded card is served instead of a timeout.
 	oembedFallbackAt = requestTimeout - 500*time.Millisecond
+	// After a direct embed 429, skip embed and let one probe through this often,
+	// so Instagram's per-IP limit can lapse instead of being renewed.
+	embedProbeInterval = time.Minute
+	// The content-ruling check is a small JSON GET; past this it is no signal.
+	rulingTimeout = time.Second
 
 	rotateCooldown = 3 * time.Second
 	// Keep origin work bounded on a single small instance.

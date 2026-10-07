@@ -56,6 +56,9 @@ type AppError struct {
 	Cause         error `json:"-"`
 
 	Ephemeral bool
+	// Final ends a staged race at once: later sources cannot change the verdict
+	// in time to matter for this response.
+	Final bool
 
 	CardCode, CardTitle, CardDesc string
 }
