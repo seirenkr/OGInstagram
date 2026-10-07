@@ -52,9 +52,12 @@ fi
 
 current=$(docker compose ps --format '{{.Image}}' "$next")
 # Keep the running and previous app images for rollback (set OG_IMAGE back and
-# rerun this script); remove dangling layers and older app images only.
-docker image prune -f
-docker images --format '{{.Repository}}:{{.Tag}}' oginstagram | while read -r image; do
-  case "$image" in "$current"|"$previous") ;; *) docker rmi "$image" ;; esac
-done
+# rerun this script); remove dangling layers and older app images only. A
+# redeploy of the same image skips this, so the last rollback image survives.
+if [ "$current" != "$previous" ]; then
+  docker image prune -f
+  docker images --format '{{.Repository}}:{{.Tag}}' oginstagram | while read -r image; do
+    case "$image" in "$current"|"$previous") ;; *) docker rmi "$image" ;; esac
+  done
+fi
 echo "deployed $current on $next (rollback: $previous)"
