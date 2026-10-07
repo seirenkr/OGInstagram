@@ -34,7 +34,8 @@ const (
 
 	requestTimeout = 4 * time.Second
 
-	ewmaAlpha = 0.3
+	// How fast a session's Peak-EWMA latency fades (tower's decay; Linkerd uses 10 s).
+	sessionRTTDecay = 10 * time.Second
 
 	postHedgeDelay           = time.Second
 	profileHedgeDelay        = time.Second

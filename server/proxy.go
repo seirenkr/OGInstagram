@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,9 +20,27 @@ type Session struct {
 	mu     sync.Mutex
 	client *http.Client
 
-	ewmaMs        float64
-	hasEWMA       bool
+	// Peak-EWMA round trip of the current exit IP (as in tower and Finagle): a
+	// slower sample replaces it, faster ones pull it down, and it decays toward 0
+	// while idle so a once-slow session gets retried. Zero rttAt = unmeasured.
+	rttNs   float64
+	rttAt   time.Time
+	pending int
+
 	cooldownUntil time.Time
+}
+
+// costLocked is the expected wait for one more request: rtt × (pending+1).
+// A hung exit IP piles up pending requests, so its cost climbs at once
+// instead of only after the first timeout comes back.
+func (s *Session) costLocked(now time.Time) float64 {
+	if s.rttAt.IsZero() {
+		// Unmeasured (Finagle's rule): free to try once, but never pile onto its
+		// first request, which may be hanging on a dead exit IP.
+		return float64(time.Hour) * float64(s.pending)
+	}
+	rtt := s.rttNs * math.Exp(-float64(now.Sub(s.rttAt))/float64(sessionRTTDecay))
+	return rtt * float64(s.pending+1)
 }
 
 type SessionPool struct {
@@ -136,29 +156,48 @@ func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
 	}
 	now := time.Now()
 
-	var picked *Session
-	bestRank := 0.0
+	ready := make([]*Session, 0, len(p.sessions))
 	for _, s := range p.sessions {
 		s.mu.Lock()
-		ok := !s.cooldownUntil.After(now)
-		rank := s.ewmaMs
-		if !s.hasEWMA {
-			rank = -1
+		if !s.cooldownUntil.After(now) {
+			ready = append(ready, s)
 		}
 		s.mu.Unlock()
-		if ok && (picked == nil || rank < bestRank) {
-			picked, bestRank = s, rank
+	}
+	var picked *Session
+	switch len(ready) {
+	case 0:
+		return nil, ""
+	case 1:
+		picked = ready[0]
+	default:
+		// Power of two choices (tower, Finagle, Envoy least-request): compare two
+		// random sessions instead of always taking the single best, which spreads
+		// load across exit IPs and avoids a herd on one.
+		i := rand.IntN(len(ready))
+		j := rand.IntN(len(ready) - 1)
+		if j >= i {
+			j++
 		}
+		picked = ready[i]
+		ready[i].mu.Lock()
+		ready[j].mu.Lock()
+		if ready[j].costLocked(now) < ready[i].costLocked(now) {
+			picked = ready[j]
+		}
+		ready[j].mu.Unlock()
+		ready[i].mu.Unlock()
 	}
 
-	if picked != nil {
-		if errorCode := p.ensureBudgetBytesLocked(ctx, now, 1); errorCode != "" {
-			return nil, errorCode
-		}
-		if ctx.Err() != nil {
-			return nil, errorCodeConnection
-		}
+	if errorCode := p.ensureBudgetBytesLocked(ctx, now, 1); errorCode != "" {
+		return nil, errorCode
 	}
+	if ctx.Err() != nil {
+		return nil, errorCodeConnection
+	}
+	picked.mu.Lock()
+	picked.pending++
+	picked.mu.Unlock()
 	return picked, ""
 }
 
@@ -229,16 +268,28 @@ func (p *SessionPool) refundProxyBytes(bytes int64, leaseExpires time.Time) {
 	p.mu.Unlock()
 }
 
-func (p *SessionPool) recordLatency(s *Session, d time.Duration) {
-	ms := float64(d.Milliseconds())
+// done ends a request picked from s. With observe, rtt feeds the Peak-EWMA
+// estimate; tower's update rule, weighted by the time since the last sample.
+func (p *SessionPool) done(s *Session, rtt time.Duration, observe bool) {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.hasEWMA {
-		s.ewmaMs = ms
-		s.hasEWMA = true
+	s.pending = max(s.pending-1, 0)
+	if !observe {
 		return
 	}
-	s.ewmaMs = s.ewmaMs*(1-ewmaAlpha) + ms*ewmaAlpha
+	sample := float64(rtt)
+	if s.rttAt.IsZero() {
+		s.rttNs, s.rttAt = sample, now
+		return
+	}
+	decay := math.Exp(-float64(now.Sub(s.rttAt)) / float64(sessionRTTDecay))
+	if current := s.rttNs * decay; sample > current {
+		s.rttNs = sample
+	} else {
+		s.rttNs = current + (sample-current)*(1-decay)
+	}
+	s.rttAt = now
 }
 
 func (s *Session) getClient() *http.Client {
@@ -267,6 +318,7 @@ func (p *SessionPool) rotate(s *Session) {
 	s.mu.Lock()
 	old := s.client
 	s.client = client
+	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
 	s.mu.Unlock()
 	if old != nil {
 		old.CloseIdleConnections()
