@@ -1,41 +1,60 @@
 name: oginstagram
 
+# Blue/green app slots: tools/deploy.sh starts the idle slot, waits for it to
+# be healthy, points nginx at it, then stops the old slot (graceful drain).
+x-app: &app
+  image: ${OG_IMAGE:-oginstagram:local}
+  env_file:
+    - ${APP_ENV_FILE:-.env}
+  environment:
+    PORT: "8080"
+    DATA_DIR: /data
+    ASSETS_DIR: /app/web
+    GOMEMLIMIT: 256MiB
+    GOMAXPROCS: "1"
+    # Exact nginx address below, never the entire subnet.
+    TRUSTED_PROXIES: 172.30.0.4
+  user: "65532:65532"
+  restart: unless-stopped
+  init: true
+  read_only: true
+  mem_limit: 512m
+  cpus: 1
+  pids_limit: 128
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 40s
+  # Image check plus start_interval, so a new slot reports healthy within seconds.
+  healthcheck:
+    test: [CMD, /app/server, --healthcheck]
+    interval: 30s
+    timeout: 5s
+    start_period: 10s
+    start_interval: 1s
+    retries: 3
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  volumes:
+    - ./data:/data
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+
 services:
-  app:
-    image: ${OG_IMAGE:-oginstagram:local}
-    env_file:
-      - ${APP_ENV_FILE:-.env}
-    environment:
-      PORT: "8080"
-      DATA_DIR: /data
-      ASSETS_DIR: /app/web
-      GOMEMLIMIT: 256MiB
-      GOMAXPROCS: "1"
-      # Exact nginx address below, never the entire subnet.
-      TRUSTED_PROXIES: 172.30.0.4
-    user: "65532:65532"
-    restart: unless-stopped
-    init: true
-    read_only: true
-    mem_limit: 512m
-    cpus: 1
-    pids_limit: 128
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    stop_grace_period: 40s
-    tmpfs:
-      - /tmp:size=128m,mode=1777
-    volumes:
-      - ./data:/data
+  app_blue:
+    <<: *app
     networks:
       origin:
         ipv4_address: 172.30.0.2
-    logging:
-      driver: local
-      options:
-        max-size: 10m
-        max-file: "3"
+
+  app_green:
+    <<: *app
+    networks:
+      origin:
+        ipv4_address: 172.30.0.5
 
   # Standard access log, visitor IP (realip), and preview rate limit.
   proxy:
@@ -51,14 +70,13 @@ services:
       - /tmp:size=16m,mode=1777
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # app-upstream.conf names the live slot; written by tools/deploy.sh.
+      - ./nginx/runtime:/etc/nginx/runtime:ro
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/health]
       interval: 30s
       timeout: 5s
       start_period: 5s
-    depends_on:
-      app:
-        condition: service_healthy
     networks:
       origin:
         ipv4_address: 172.30.0.4
