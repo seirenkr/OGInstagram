@@ -20,7 +20,7 @@ import (
 const (
 	proxyMonthlyBudgetBytes int64 = 100_000_000_000
 	persistentModelBytes    int64 = 256 << 20
-	persistentModelEntries        = 4096
+	persistentModelEntries        = 16384
 	metricRetention               = 24 * time.Hour
 	metricEntryCap                = 200_000
 )
@@ -92,6 +92,7 @@ func openLocalStore(dataDir, budgetStartDate string) (*localStore, error) {
 		);
 		CREATE INDEX IF NOT EXISTS model_expiry ON models(expires_at);
 		CREATE INDEX IF NOT EXISTS model_age ON models(stored_at);
+		CREATE INDEX IF NOT EXISTS model_value_size ON models(length(value));
 		CREATE TABLE IF NOT EXISTS metrics (
 			id INTEGER PRIMARY KEY, t INTEGER NOT NULL, category TEXT NOT NULL,
 			duration REAL NOT NULL, outcome INTEGER NOT NULL
@@ -201,7 +202,8 @@ func (s *localStore) putModel(ctx context.Context, kind, key string, value []byt
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "DELETE FROM models WHERE expires_at <= ?", time.Now().UnixMilli()); err != nil {
+	// Exclude the replaced value before measuring capacity; rollback preserves it on failure.
+	if _, err = tx.ExecContext(ctx, "DELETE FROM models WHERE expires_at <= ? OR (kind = ? AND key = ?)", time.Now().UnixMilli(), kind, key); err != nil {
 		return err
 	}
 	// Evict before insertion so the on-disk page ceiling cannot prevent cleanup.
@@ -222,8 +224,7 @@ func (s *localStore) putModel(ctx context.Context, kind, key string, value []byt
 		count--
 		used -= size
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO models(kind, key, value, expires_at, stored_at) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(kind, key) DO UPDATE SET value=excluded.value, expires_at=excluded.expires_at, stored_at=excluded.stored_at`, kind, key, value, expires.UnixMilli(), time.Now().UnixMilli())
+	_, err = tx.ExecContext(ctx, "INSERT INTO models(kind, key, value, expires_at, stored_at) VALUES (?, ?, ?, ?, ?)", kind, key, value, expires.UnixMilli(), time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}

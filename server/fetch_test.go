@@ -75,7 +75,7 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if spec.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", spec.method)
 	}
-	if spec.url != "https://www.instagram.com/graphql/query" {
+	if spec.url != "https://i.instagram.com/graphql/query" || !spec.expectJSON {
 		t.Errorf("url = %q", spec.url)
 	}
 	if spec.headers["X-FB-Friendly-Name"] != "PolarisPostRootQuery" {
@@ -91,6 +91,9 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	}
 	if vals.Get("doc_id") != instagramWebLoggedOutDocID {
 		t.Errorf("doc_id = %q, want %q", vals.Get("doc_id"), instagramWebLoggedOutDocID)
+	}
+	if vals.Has("server_timestamps") {
+		t.Error("unused server timestamps should not be requested")
 	}
 	if lsd := vals.Get("lsd"); lsd == "" || lsd != spec.headers["X-FB-LSD"] {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
@@ -180,6 +183,103 @@ func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
 		causedErr(502, errorCodeConnection, "boom", errors.New("boom")), false)
 }
 
+func TestHelperCaptchaCooldownPreservesInstagramAndResumes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		helperCalls, instagramCalls := 0, 0
+		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			status := http.StatusOK
+			if req.URL.Host == "helper.example" {
+				helperCalls++
+				if helperCalls == 1 {
+					status = http.StatusUnprocessableEntity
+				}
+			} else {
+				instagramCalls++
+			}
+			return mediaTestResponse(req, status, nil, []byte(`{}`)), nil
+		})}
+		pool := newTestPool("shared")
+		s := pool.sessions[0]
+		s.client = client
+		a := &App{pool: pool}
+		helper := fetchSpec{method: http.MethodPost, url: "https://helper.example/convert", interpret: func(status int, raw []byte) *AppError {
+			if status == http.StatusUnprocessableEntity {
+				return igErr(http.StatusBadGateway, errorCodeCaptchaRequired, "verification required")
+			}
+			return statusOnly(status, raw)
+		}}
+		_, _, err := a.fetchViaProxy(context.Background(), helper)
+		if err == nil || err.Code != errorCodeCaptchaRequired || helperCalls != 1 {
+			t.Fatalf("initial challenge = %v, helper calls = %d", err, helperCalls)
+		}
+		if s.getClient() != client || !s.cooldownUntil.IsZero() || s.pending != 0 ||
+			!s.helperCooldownUntil.Equal(time.Now().Add(helperCaptchaCooldown)) {
+			t.Fatal("challenge should pause only helper requests on the same connection")
+		}
+		assertPaused := func() {
+			t.Helper()
+			status, _, err := a.fetchViaProxy(context.Background(), helper)
+			if status != 0 || err == nil || err.Status != http.StatusServiceUnavailable ||
+				err.Code != errorCodeCaptchaRequired || !err.Ephemeral || helperCalls != 1 || s.pending != 0 {
+				t.Fatalf("paused helper sent a request or returned the wrong error: status=%d err=%v calls=%d", status, err, helperCalls)
+			}
+		}
+		assertPaused()
+		_, _, err = a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: instagramGraphQLOrigin + "/graphql/query", interpret: statusOnly})
+		if err != nil || instagramCalls != 1 || s.getClient() != client {
+			t.Fatalf("Instagram stopped using the shared connection: err=%v calls=%d", err, instagramCalls)
+		}
+		time.Sleep(helperCaptchaCooldown - time.Nanosecond)
+		assertPaused()
+		time.Sleep(time.Nanosecond)
+		_, _, err = a.fetchViaProxy(context.Background(), helper)
+		if err != nil || helperCalls != 2 {
+			t.Fatalf("helper did not resume after cooldown: err=%v calls=%d", err, helperCalls)
+		}
+	})
+}
+
+func TestHelperCaptchaCooldownUsesUnaffectedSession(t *testing.T) {
+	pool := newTestPool("challenged", "ready")
+	pool.sessions[0].helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
+	pool.sessions[0].client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("helper used a challenged session")
+		return nil, nil
+	})}
+	calls := 0
+	pool.sessions[1].client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return mediaTestResponse(req, http.StatusOK, nil, []byte(`{}`)), nil
+	})}
+	a := &App{pool: pool}
+	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: "https://helper.example/convert", interpret: statusOnly})
+	if err != nil || calls != 1 {
+		t.Fatalf("unaffected helper session was unavailable: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestHelperCaptchaFromOldConnectionDoesNotPauseReplacement(t *testing.T) {
+	pool := newTestPool("shared")
+	s := pool.sessions[0]
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		pool.rotate(s)
+		return mediaTestResponse(req, http.StatusUnprocessableEntity, nil, []byte(`{}`)), nil
+	})}
+	s.client = client
+	a := &App{pool: pool}
+	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: "https://helper.example/convert", interpret: func(int, []byte) *AppError {
+		return igErr(http.StatusBadGateway, errorCodeCaptchaRequired, "verification required")
+	}})
+	if err == nil || err.Code != errorCodeCaptchaRequired || s.getClient() == client || !s.helperCooldownUntil.IsZero() {
+		t.Fatalf("late challenge paused replacement: err=%v cooldown=%v", err, s.helperCooldownUntil)
+	}
+	s.helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
+	pool.rotate(s)
+	if !s.helperCooldownUntil.IsZero() {
+		t.Fatal("rotation did not clear the previous IP's helper cooldown")
+	}
+}
+
 func newTestPool(names ...string) *SessionPool {
 	p := &SessionPool{budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 30}
 	for _, n := range names {
@@ -194,7 +294,7 @@ func TestPickAvoidsHungSession(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3")
 	counts := map[string]int{}
 	for range 30 {
-		s, _ := p.pick(context.Background())
+		s, _ := p.pick(context.Background(), false)
 		counts[s.name]++
 		if s.name != "us-3" {
 			p.done(s, 300*time.Millisecond, true)
@@ -209,7 +309,7 @@ func TestPickSpreadsLoadAcrossHealthySessions(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3", "us-4")
 	counts := map[string]int{}
 	for range 400 {
-		s, _ := p.pick(context.Background())
+		s, _ := p.pick(context.Background(), false)
 		counts[s.name]++
 		p.done(s, 300*time.Millisecond, true)
 	}
@@ -232,7 +332,7 @@ func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
 		p.done(slow, 10*time.Second, true) // one peak replaces the estimate at once
 		picks := func() (n int) {
 			for range 50 {
-				s, _ := p.pick(context.Background())
+				s, _ := p.pick(context.Background(), false)
 				p.done(s, 0, false)
 				if s == slow {
 					n++

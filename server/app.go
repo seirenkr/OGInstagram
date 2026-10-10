@@ -87,6 +87,38 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 		})
 	}
 	valid := validSourceModel[Post](shortcode)
+	// A final ruling can answer before the helper finishes. Keep one bounded
+	// attempt available to fill the cache instead of cancelling and restarting it.
+	helperCtx, cancelHelper := context.WithCancel(context.WithoutCancel(ctx))
+	keepHelper := false
+	defer func() {
+		if !keepHelper {
+			cancelHelper()
+		}
+	}()
+	var helperOnce sync.Once
+	helperDone := make(chan struct{})
+	var helperPost Post
+	var helperErr *AppError
+	startHelper := func() {
+		helperOnce.Do(func() {
+			go func() {
+				defer close(helperDone)
+				workCtx, cancel := context.WithTimeout(helperCtx, cacheSharedWorkTimeout)
+				defer cancel()
+				if workCtx.Err() != nil {
+					helperErr = contextAppError(workCtx)
+					return
+				}
+				post, ok := externalHelperPostImpl(a, workCtx, shortcode)
+				if !ok {
+					helperErr = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
+					return
+				}
+				helperPost, helperErr = valid(post, nil)
+			}()
+		})
+	}
 	oembedTimer := time.AfterFunc(oembedHedgeDelay, startOembed)
 	defer oembedTimer.Stop()
 
@@ -112,11 +144,13 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	if externalHelperPostImpl != nil {
 		sources = append(sources,
 			stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
-				helperPost, ok := externalHelperPostImpl(a, ctx, shortcode)
-				if !ok {
-					return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
+				startHelper()
+				select {
+				case <-helperDone:
+					return helperPost, helperErr
+				case <-ctx.Done():
+					return Post{}, contextAppError(ctx)
 				}
-				return valid(helperPost, nil)
 			}},
 		)
 	}
@@ -125,7 +159,15 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 		// The ruling is sometimes wrong (fastdl still finds ~1 in 5 such posts),
 		// so answer now and keep looking in the background for the next request.
 		if externalHelperPostImpl != nil {
-			go a.fillPostFromHelper(context.WithoutCancel(ctx), shortcode)
+			keepHelper = true
+			startHelper()
+			go func() {
+				defer cancelHelper()
+				<-helperDone
+				if helperErr == nil {
+					a.storeHelperPost(helperCtx, shortcode, helperPost)
+				}
+			}()
 		}
 		return Post{}, false, false, err
 	}
@@ -158,14 +200,20 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	return post, persist, degraded, nil
 }
 
-// fillPostFromHelper replaces a cached "missing" verdict when fastdl finds the
-// post after all. It skips fetchSlots: it only runs after a ruling miss, which is rare.
-func (a *App) fillPostFromHelper(ctx context.Context, shortcode string) {
+// Wait for the original lookup to store its verdict before replacing it. A
+// fast helper must not have its successful cache entry overwritten by that 404.
+func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) {
 	ctx, cancel := context.WithTimeout(ctx, cacheSharedWorkTimeout)
 	defer cancel()
-	post, ok := externalHelperPostImpl(a, ctx, shortcode)
-	if !ok {
-		return
+	a.posts.flightMu.Lock()
+	call := a.posts.flight[shortcode]
+	a.posts.flightMu.Unlock()
+	if call != nil {
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return
+		}
 	}
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)

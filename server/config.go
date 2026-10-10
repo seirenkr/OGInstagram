@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	instagramOrigin = "https://www.instagram.com"
-	instagramAppID  = "936619743392459"
+	instagramOrigin        = "https://www.instagram.com"
+	instagramAppID         = "936619743392459"
+	instagramGraphQLOrigin = "https://i.instagram.com"
 
 	instagramWebLoggedOutDocID = "27128499623469141"
 
@@ -50,7 +51,8 @@ const (
 	// The content-ruling check is a small JSON GET; past this it is no signal.
 	rulingTimeout = time.Second
 
-	rotateCooldown = 3 * time.Second
+	rotateCooldown        = 3 * time.Second
+	helperCaptchaCooldown = time.Minute
 
 	// Unverified bots get this many requests per IP per hour instead of a
 	// managed challenge; Cloudflare marks them with botClassHeader: limited.
