@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"html"
 	"net/http"
 	"net/url"
@@ -21,7 +22,30 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 	defer func() {
 		logOutbound(ctx, operation, "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
 	}()
-	status, out, ferr = fetchRequest(ctx, http.DefaultClient, fetchSpec{
+	client := *http.DefaultClient
+	checkRedirect := client.CheckRedirect
+	loginRedirect := errors.New("Instagram redirected to login or verification")
+	loginStatus := 0
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if isInstagramURL(req.URL.String()) {
+			for _, path := range []string{"/accounts/login", "/challenge", "/checkpoint"} {
+				if req.URL.Path == path || strings.HasPrefix(req.URL.Path, path+"/") {
+					if req.Response != nil {
+						loginStatus = req.Response.StatusCode
+					}
+					return loginRedirect
+				}
+			}
+		}
+		if checkRedirect != nil {
+			return checkRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	status, out, ferr = fetchRequest(ctx, &client, fetchSpec{
 		operation: operation,
 		method:    http.MethodGet,
 		url:       rawURL,
@@ -29,6 +53,10 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 		headers:   map[string]string{"User-Agent": embedUA},
 		interpret: statusOnly,
 	})
+	if ferr != nil && errors.Is(ferr.Cause, loginRedirect) {
+		status = loginStatus
+		ferr = igErr(http.StatusBadGateway, errorCodeLoginRequired, loginRedirect.Error())
+	}
 	return
 }
 
@@ -78,24 +106,29 @@ func embedContextJSON(html string) (string, *AppError) {
 }
 
 func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
-	// While Instagram answers 429, skip the embed and let one probe through per
+	// While Instagram blocks the embed, skip it and let one probe through per
 	// embedProbeInterval (the CAS winner); everyone else falls through at once.
 	now := time.Now().UnixNano()
-	if until := a.embedPausedUntil.Load(); until != 0 &&
-		(now < until || !a.embedPausedUntil.CompareAndSwap(until, now+int64(embedProbeInterval))) {
-		return Post{}, ephemeralErr(http.StatusTooManyRequests, errorCodeRateLimited, "embed paused after Instagram rate limiting")
+	until := a.embedPausedUntil.Load()
+	if until != 0 {
+		if now < until || !a.embedPausedUntil.CompareAndSwap(until, now+int64(embedProbeInterval)) {
+			return Post{}, ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "embed temporarily paused after Instagram blocked requests")
+		}
+		until = now + int64(embedProbeInterval)
 	}
 	html, err := a.directGet(ctx, "post", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
 	if err != nil {
-		if err.Status == http.StatusTooManyRequests {
+		if err.Status == http.StatusTooManyRequests || err.Code == errorCodeLoginRequired {
 			a.embedPausedUntil.Store(time.Now().Add(embedProbeInterval).UnixNano())
 		}
 		return Post{}, err
 	}
-	a.embedPausedUntil.Store(0)
 	post, perr := parseEmbedPost(html)
 	if perr != nil {
 		logEmbedParseFailure(ctx, "post", html, perr)
+	} else {
+		// A response started before a newer block must not reopen the embed path.
+		a.embedPausedUntil.CompareAndSwap(until, 0)
 	}
 	return post, perr
 }
