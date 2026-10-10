@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"math"
@@ -27,7 +28,8 @@ type Session struct {
 	rttAt   time.Time
 	pending int
 
-	cooldownUntil time.Time
+	cooldownUntil       time.Time
+	helperCooldownUntil time.Time
 }
 
 // costLocked is the expected wait for one more request: rtt × (pending+1).
@@ -47,6 +49,7 @@ type SessionPool struct {
 	sessions []*Session
 	cfg      Config
 	mu       sync.Mutex
+	tlsCache tls.ClientSessionCache
 
 	budgetLeaseExpires   time.Time
 	budgetLeaseRemaining int64
@@ -101,7 +104,7 @@ func (c *budgetedConn) metered(p []byte, op func([]byte) (int, error)) (int, err
 }
 
 func newSessionPool(cfg Config) *SessionPool {
-	pool := &SessionPool{cfg: cfg}
+	pool := &SessionPool{cfg: cfg, tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2)}
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
 		for i := range proxySessionCount {
 			// A stable slot label: rotation replaces the exit IP behind it.
@@ -137,9 +140,17 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 			return &budgetedConn{Conn: conn, pool: pool}, nil
 		},
 		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,
 		TLSHandshakeTimeout: 3 * time.Second,
+		TLSClientConfig:     &tls.Config{ClientSessionCache: pool.tlsCache},
 		// Close a silent tunnel instead of letting requests hang on it.
-		HTTP2:                 &http.HTTP2Config{SendPingTimeout: 5 * time.Second, PingTimeout: 2 * time.Second},
+		HTTP2: &http.HTTP2Config{
+			MaxDecoderHeaderTableSize: 64 << 10,
+			// Bound bytes already in flight when an unexpected HTML response is rejected.
+			MaxReceiveBufferPerStream: 32 << 10,
+			SendPingTimeout:           5 * time.Second,
+			PingTimeout:               2 * time.Second,
+		},
 		MaxIdleConns:          8,
 		MaxIdleConnsPerHost:   4,
 		IdleConnTimeout:       90 * time.Second,
@@ -148,7 +159,7 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 	return &http.Client{Transport: transport}, nil
 }
 
-func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
+func (p *SessionPool) pick(ctx context.Context, helper bool) (*Session, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if ctx.Err() != nil {
@@ -157,17 +168,22 @@ func (p *SessionPool) pick(ctx context.Context) (*Session, string) {
 	now := time.Now()
 
 	ready := make([]*Session, 0, len(p.sessions))
+	pickReason := ""
 	for _, s := range p.sessions {
 		s.mu.Lock()
 		if !s.cooldownUntil.After(now) {
-			ready = append(ready, s)
+			if helper && s.helperCooldownUntil.After(now) {
+				pickReason = errorCodeCaptchaRequired
+			} else {
+				ready = append(ready, s)
+			}
 		}
 		s.mu.Unlock()
 	}
 	var picked *Session
 	switch len(ready) {
 	case 0:
-		return nil, ""
+		return nil, pickReason
 	case 1:
 		picked = ready[0]
 	default:
@@ -319,6 +335,7 @@ func (p *SessionPool) rotate(s *Session) {
 	old := s.client
 	s.client = client
 	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
+	s.helperCooldownUntil = time.Time{}
 	s.mu.Unlock()
 	if old != nil {
 		old.CloseIdleConnections()
