@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -277,7 +278,7 @@ func TestProxyBudgetExhaustionAndBackendFailuresFailClosed(t *testing.T) {
 	if _, reason := p.reserveProxyBytes(1); reason != errorCodeBudgetExhausted {
 		t.Fatalf("memoized exhaustion reason=%s", reason)
 	}
-	if session, reason := p.pick(context.Background()); session != nil || reason != errorCodeBudgetExhausted {
+	if session, reason := p.pick(context.Background(), false); session != nil || reason != errorCodeBudgetExhausted {
 		t.Fatalf("exhausted budget pick=%v,%s", session, reason)
 	}
 	for _, store := range []*localStore{nil, newTestStore(t)} {
@@ -285,7 +286,7 @@ func TestProxyBudgetExhaustionAndBackendFailuresFailClosed(t *testing.T) {
 			_ = store.budget.Close()
 		}
 		p := &SessionPool{cfg: Config{Store: store}, sessions: []*Session{{}}}
-		if session, reason := p.pick(context.Background()); session != nil || reason != errorCodeBudgetBackend {
+		if session, reason := p.pick(context.Background(), false); session != nil || reason != errorCodeBudgetBackend {
 			t.Fatalf("backend failure=%v,%s", session, reason)
 		}
 		if p.budgetBackendRetryAt.IsZero() {
@@ -369,7 +370,7 @@ func TestBudgetLeaseOutlivesCancelledLeaderWithoutChargingIt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan string, 1)
 	go func() {
-		session, reason := p.pick(ctx)
+		session, reason := p.pick(ctx, false)
 		if session != nil {
 			reason = "reserved"
 		}
@@ -384,7 +385,7 @@ func TestBudgetLeaseOutlivesCancelledLeaderWithoutChargingIt(t *testing.T) {
 	if p.budgetLeaseRemaining != proxyByteLeaseSize {
 		t.Fatal("cancelled leader consumed shared grant")
 	}
-	if session, reason := p.pick(context.Background()); session == nil || reason != "" {
+	if session, reason := p.pick(context.Background(), false); session == nil || reason != "" {
 		t.Fatalf("live waiter=%v,%s", session, reason)
 	}
 	if remainingDailyBudget(t, s) != proxyDailyByteBudget(time.Now())-proxyByteLeaseSize {
@@ -510,6 +511,50 @@ func TestLocalModelStoreBoundsAndPurgeDoesNotResetBudget(t *testing.T) {
 	}
 	if remainingDailyBudget(t, s) != remaining {
 		t.Fatal("model purge reset bandwidth ledger")
+	}
+}
+
+func TestLocalModelStoreReplacementAtCapacity(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	expires := time.Now().Add(time.Hour).Truncate(time.Millisecond)
+	_, err := s.state.Exec(`WITH RECURSIVE numbers(n) AS (
+		VALUES (0) UNION ALL SELECT n+1 FROM numbers WHERE n+1 < ?
+	) INSERT INTO models(kind,key,value,expires_at,stored_at)
+		SELECT 'post', n, ?, ?, n FROM numbers`, persistentModelEntries, []byte(`{"value":1}`), expires.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := strconv.Itoa(persistentModelEntries - 1)
+	replacement := []byte(`{"value":22}`)
+	if err := s.putModel(ctx, "post", key, replacement, expires); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.state.QueryRow("SELECT COUNT(*) FROM models").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != persistentModelEntries {
+		t.Fatalf("replacement evicted another entry: count=%d", count)
+	}
+	if _, _, err := s.getModel(ctx, "post", "0"); err != nil {
+		t.Fatalf("oldest entry lost during replacement: %v", err)
+	}
+	value, gotExpiry, err := s.getModel(ctx, "post", key)
+	if err != nil || string(value) != string(replacement) || !gotExpiry.Equal(expires) {
+		t.Fatalf("replacement value=%s expiry=%s error=%v", value, gotExpiry, err)
+	}
+	// A rejected insertion must roll back removal of the previous value.
+	if _, err := s.state.Exec(`CREATE TRIGGER reject_model BEFORE INSERT ON models
+		BEGIN SELECT RAISE(ABORT, 'test rejected write'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.putModel(ctx, "post", key, []byte(`{"value":333}`), expires); err == nil {
+		t.Fatal("rejected write succeeded")
+	}
+	value, gotExpiry, err = s.getModel(ctx, "post", key)
+	if err != nil || string(value) != string(replacement) || !gotExpiry.Equal(expires) {
+		t.Fatalf("failed replacement lost previous value: %s, %s, %v", value, gotExpiry, err)
 	}
 }
 

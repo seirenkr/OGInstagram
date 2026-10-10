@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/tidwall/gjson"
 )
 
@@ -22,13 +24,14 @@ import (
 // AppError (nil accepts it); it runs inside fetchRequest so the deferred log
 // still sees the final error.
 type fetchSpec struct {
-	operation string
-	method    string
-	url       string
-	body      string
-	subject   string
-	headers   map[string]string
-	interpret func(status int, raw []byte) *AppError
+	operation  string
+	method     string
+	url        string
+	body       string
+	subject    string
+	expectJSON bool
+	headers    map[string]string
+	interpret  func(status int, raw []byte) *AppError
 }
 
 func statusOnly(status int, _ []byte) *AppError {
@@ -39,6 +42,8 @@ func statusOnly(status int, _ []byte) *AppError {
 }
 
 func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (status int, out string, ferr *AppError) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var reader io.Reader
 	if spec.body != "" {
 		reader = strings.NewReader(spec.body)
@@ -50,6 +55,16 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	for k, v := range spec.headers {
 		req.Header.Set(k, v)
 	}
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "br, gzip")
+	}
+	if spec.expectJSON {
+		// API redirects lead to login/challenge HTML, not the requested media.
+		// Keep the shared client's policy intact for other request types.
+		copy := *client
+		copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &copy
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -59,7 +74,42 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	}
 	defer resp.Body.Close()
 	status = resp.StatusCode
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
+	if spec.expectJSON && ((status >= 300 && status < 400) || contentType == "text/html" || contentType == "application/xhtml+xml") {
+		// Cancel before closing: HTTP/2 can stop the stream without draining it.
+		cancel()
+		if status >= 400 {
+			if err := spec.interpret(status, nil); err != nil {
+				return status, "", err
+			}
+		}
+		code := errorCodeUpstream
+		if isInstagramURL(spec.url) {
+			code = errorCodeLoginRequired
+		}
+		return status, "", igErr(http.StatusBadGateway, code, spec.subject+" returned a page instead of JSON")
+	}
+	var body io.Reader = resp.Body
+	if !resp.Uncompressed {
+		switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+		case "", "identity":
+		case "gzip":
+			decoded, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				if ctx.Err() != nil {
+					return status, "", contextAppError(ctx)
+				}
+				return status, "", requestError(err, spec.subject+" response decompression failed")
+			}
+			defer decoded.Close()
+			body = decoded
+		case "br":
+			body = brotli.NewReader(resp.Body)
+		default:
+			return status, "", igErr(http.StatusBadGateway, errorCodeUpstream, spec.subject+" returned an unsupported encoding")
+		}
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
 	if ctx.Err() != nil {
 		return status, "", contextAppError(ctx)
 	}
@@ -84,15 +134,15 @@ func webLoggedOutSpec(shortcode string) fetchSpec {
 	form := url.Values{}
 	form.Set("variables", string(variables))
 	form.Set("doc_id", instagramWebLoggedOutDocID)
-	form.Set("server_timestamps", "true")
 	form.Set("lsd", lsd)
 	return fetchSpec{
-		operation: "post",
-		subject:   "Instagram",
-		interpret: instagramJSON,
-		method:    http.MethodPost,
-		url:       instagramOrigin + "/graphql/query",
-		body:      form.Encode(),
+		operation:  "post",
+		subject:    "Instagram",
+		expectJSON: true,
+		interpret:  instagramJSON,
+		method:     http.MethodPost,
+		url:        instagramGraphQLOrigin + "/graphql/query",
+		body:       form.Encode(),
 		headers: map[string]string{
 			"User-Agent":         "Mozilla/5.0",
 			"Accept":             "*/*",
@@ -239,6 +289,11 @@ func logOutbound(ctx context.Context, operation, session, method, rawURL string,
 	logger(ctx).WarnContext(ctx, "outbound request failed", attrs...)
 }
 
+func isInstagramURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "https" && (u.Hostname() == "www.instagram.com" || u.Hostname() == "i.instagram.com")
+}
+
 // One proxied request: pick a session, run it, then hold that session
 // accountable. Ephemeral errors (deadline, budget) are ours, so only a
 // non-ephemeral, rotatable code marks the session bad.
@@ -246,8 +301,12 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
 	}
-	s, pickReason := a.pool.pick(ctx)
+	instagram := isInstagramURL(spec.url)
+	s, pickReason := a.pool.pick(ctx, !instagram)
 	if s == nil {
+		if pickReason == errorCodeCaptchaRequired {
+			return 0, "", ephemeralErr(http.StatusServiceUnavailable, errorCodeCaptchaRequired, "external helper is temporarily paused after verification requests")
+		}
 		if pickReason == errorCodeBudgetBackend || pickReason == errorCodeBudgetExhausted {
 			return 0, "", budgetAppError(pickReason)
 		}
@@ -258,22 +317,29 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 	}
 
 	started := time.Now()
+	client := s.getClient()
 	defer func() {
-		// Only Instagram round trips describe the exit IP; the helper is slow on
-		// its own side (seconds), so it counts as pending but not as latency.
-		instagram := strings.HasPrefix(spec.url, instagramOrigin+"/")
+		if !instagram && ferr != nil && ferr.Code == errorCodeCaptchaRequired {
+			s.mu.Lock()
+			// A late response from the previous exit IP must not pause its replacement.
+			if s.client == client {
+				s.helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
+			}
+			s.mu.Unlock()
+		}
 		// Instagram answers in well under a second. Running into our deadline means
 		// the exit IP hung (outlier ejection, as in Envoy): replace it.
 		hung := instagram && ferr != nil && ferr.Status == http.StatusGatewayTimeout
 		rotated := hung || (ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
 		logOutbound(ctx, spec.operation, s.name, spec.method, spec.url, started, status, len(out), ferr, rotated)
+		// Helper latency describes its own service, so only Instagram updates the exit IP's RTT.
 		a.pool.done(s, time.Since(started), instagram && (ferr == nil || hung))
 		if rotated {
 			a.pool.fail(s)
 		}
 	}()
 
-	return fetchRequest(ctx, s.getClient(), spec)
+	return fetchRequest(ctx, client, spec)
 }
 
 func instagramJSON(status int, raw []byte) *AppError {
@@ -321,7 +387,8 @@ type oembedOutcome struct {
 func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
 	status, body, err := a.fetchViaProxy(ctx, fetchSpec{
 		operation: "oembed", method: http.MethodGet, subject: "Instagram",
-		url: instagramOrigin + "/api/v1/oembed/?" + url.Values{"url": {instagramOrigin + "/p/" + shortcode + "/"}}.Encode(),
+		expectJSON: true,
+		url:        instagramOrigin + "/api/v1/oembed/?" + url.Values{"url": {instagramOrigin + "/p/" + shortcode + "/"}}.Encode(),
 		headers: map[string]string{
 			"User-Agent":  instagramAppUA,
 			"Accept":      "*/*",

@@ -37,20 +37,20 @@ func TestProxySessionHonorsCooldown(t *testing.T) {
 		sessions:             []*Session{session},
 	}
 	for i := 0; i < 2000; i++ {
-		if picked, reason := pool.pick(context.Background()); picked != session || reason != "" {
+		if picked, reason := pool.pick(context.Background(), false); picked != session || reason != "" {
 			t.Fatalf("pick %d = (%v, %q), want session", i+1, picked, reason)
 		}
 	}
 	session.mu.Lock()
 	session.cooldownUntil = time.Now().Add(time.Minute)
 	session.mu.Unlock()
-	if picked, reason := pool.pick(context.Background()); picked != nil || reason != "" {
+	if picked, reason := pool.pick(context.Background(), false); picked != nil || reason != "" {
 		t.Fatalf("pick during cooldown = (%v, %q), want unavailable", picked, reason)
 	}
 	session.mu.Lock()
 	session.cooldownUntil = time.Now().Add(-time.Second)
 	session.mu.Unlock()
-	if picked, reason := pool.pick(context.Background()); picked != session || reason != "" {
+	if picked, reason := pool.pick(context.Background(), false); picked != session || reason != "" {
 		t.Fatalf("pick after cooldown = (%v, %q), want session", picked, reason)
 	}
 }
@@ -65,7 +65,7 @@ func TestProxyPickDoesNotReserveAfterWaitingContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan string, 1)
 	go func() {
-		session, reason := pool.pick(ctx)
+		session, reason := pool.pick(ctx, false)
 		if session != nil {
 			result <- "reserved"
 			return

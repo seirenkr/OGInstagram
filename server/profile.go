@@ -62,11 +62,12 @@ func validUsername(s string) bool { return usernameRE.MatchString(s) }
 
 func webProfileSpec(username string) fetchSpec {
 	return fetchSpec{
-		operation: "profile",
-		subject:   "Instagram",
-		interpret: instagramJSON,
-		method:    http.MethodGet,
-		url:       instagramOrigin + "/api/v1/users/web_profile_info/?username=" + url.QueryEscape(username),
+		operation:  "profile",
+		subject:    "Instagram",
+		expectJSON: true,
+		interpret:  instagramJSON,
+		method:     http.MethodGet,
+		url:        instagramOrigin + "/api/v1/users/web_profile_info/?username=" + url.QueryEscape(username),
 		headers: map[string]string{
 			"User-Agent":                  instagramWebUA,
 			"Accept":                      "*/*",

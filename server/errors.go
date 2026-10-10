@@ -18,6 +18,8 @@ const (
 	errorCodeNotFound      = "not_found"
 	errorCodeMediaNotFound = "media_not_found"
 
+	errorCodeCaptchaRequired = "captcha_required"
+
 	errorCodeBudgetExhausted = "budget_exhausted"
 	errorCodeBudgetBackend   = "budget_backend_error"
 	errorCodeGeoBlocked      = "geo_block_required"
@@ -104,7 +106,9 @@ func contextAppError(ctx context.Context) *AppError {
 	return ephemeralErr(499, "", "cancelled")
 }
 func preferredError(current, candidate *AppError) *AppError {
-	if current == nil || (isTransient(current.Code) && candidate != nil && !isTransient(candidate.Code)) {
+	// A skipped source must not hide a real upstream failure from the short error cache.
+	if current == nil || (isTransient(current.Code) && candidate != nil &&
+		(!isTransient(candidate.Code) || (current.Ephemeral && !candidate.Ephemeral))) {
 		return candidate
 	}
 	return current
