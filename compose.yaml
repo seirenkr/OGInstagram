@@ -10,7 +10,8 @@ x-app: &app
     PORT: "8080"
     DATA_DIR: /data
     ASSETS_DIR: /app/web
-    GOMEMLIMIT: 256MiB
+    # Leave room inside the container for one verification browser.
+    GOMEMLIMIT: 128MiB
     GOMAXPROCS: "1"
     # Exact nginx address below, never the entire subnet.
     TRUSTED_PROXIES: 172.30.0.4
@@ -18,9 +19,10 @@ x-app: &app
   restart: unless-stopped
   init: true
   read_only: true
-  mem_limit: 512m
+  mem_limit: 768m
   cpus: 1
-  pids_limit: 128
+  # Chromium verification briefly needs more than 128 threads, even one at a time.
+  pids_limit: 256
   cap_drop: [ALL]
   security_opt:
     - no-new-privileges:true

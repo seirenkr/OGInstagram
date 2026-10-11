@@ -86,6 +86,9 @@ func main() {
 		os.Exit(1)
 	}
 	app := newApp(cfg, newSessionPool(cfg), signer)
+	if app.helper != nil {
+		defer app.helper.close()
+	}
 
 	slog.Info("server started", "service", serviceName, "version", cfg.Version,
 		"proxies", len(app.pool.sessions), "port", cfg.Port)
