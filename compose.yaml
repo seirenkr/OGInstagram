@@ -39,11 +39,9 @@ x-app: &app
     - /tmp:size=128m,mode=1777
   volumes:
     - ./data:/data
+  # journald keeps a slot's logs after deploys recreate its container.
   logging:
-    driver: local
-    options:
-      max-size: 10m
-      max-file: "3"
+    driver: journald
 
 services:
   app_blue:
@@ -58,7 +56,7 @@ services:
       origin:
         ipv4_address: 172.30.0.5
 
-  # Standard access log, visitor IP (realip), and preview rate limit.
+  # Access log, visitor IP (realip), and preview rate limit.
   proxy:
     image: nginxinc/nginx-unprivileged:1.30-alpine@sha256:15c994d10d6d78658721c3bcafff14cb281fba2a4bdf9d5ba92c416a472516e3
     restart: unless-stopped
@@ -83,10 +81,7 @@ services:
       origin:
         ipv4_address: 172.30.0.4
     logging:
-      driver: local
-      options:
-        max-size: 10m
-        max-file: "3"
+      driver: journald
 
   cloudflared:
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c}

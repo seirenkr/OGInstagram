@@ -14,6 +14,12 @@ env.DATA_DIR = resolve(root, ".local-data");
 env.ASSETS_DIR = resolve(root, "web/dist");
 env.TRUSTED_PROXIES = "";
 env.TURNSTILE_SITE_KEY ||= "1x00000000000000000000BB"; // Cloudflare's always-pass test sitekey
+// Local runs would otherwise spend the shared proxy account.
+if (env.DEV_PROXY !== "1" && (env.PROXY_USERNAME || env.PROXY_PASSWORD)) {
+  delete env.PROXY_USERNAME;
+  delete env.PROXY_PASSWORD;
+  console.log("dev: proxy credentials unset; run with DEV_PROXY=1 to use them");
+}
 mkdirSync(env.DATA_DIR, { recursive: true });
 
 const build = spawn("pnpm", ["run", "build"], { cwd: root, env, stdio: "inherit" });
