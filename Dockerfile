@@ -1,6 +1,6 @@
 # Base images are pinned by digest (Docker build best practices); bump tag and
 # digest together.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine3.24@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
@@ -9,6 +9,9 @@ COPY server/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/server . \
     && mkdir /out/data
+# Scans with the toolchain that builds the release, so a reachable stdlib or
+# module vulnerability fails the image build.
+RUN go vet ./... && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 # Build the frontend natively on the build platform; its output is arch-independent.
 FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
