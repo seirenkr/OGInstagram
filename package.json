@@ -17,7 +17,7 @@
   "dependencies": {
     "@cloudflare/kumo": "^2.14.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@twemoji/parser": "15.0.0",
+    "@twemoji/parser": "17.0.2",
     "@twemoji/svg": "15.0.0",
     "echarts": "^6.1.0",
     "react": "^19.3.0",
