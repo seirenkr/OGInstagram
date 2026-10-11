@@ -12,6 +12,7 @@ type App struct {
 	cfg           Config
 	pool          *SessionPool
 	offloadSigner offloadSigner
+	helper        externalHelperClient
 
 	posts    *cache[Post]
 	profiles *cache[Profile]
@@ -23,7 +24,7 @@ type App struct {
 
 func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 	fetchSlots := make(chan struct{}, maxConcurrentFetches)
-	return &App{
+	a := &App{
 		cfg:           cfg,
 		pool:          pool,
 		offloadSigner: signer,
@@ -31,6 +32,10 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 		profiles:      newPersistentCache[Profile](cfg.Store, "profile", fetchSlots, localProfileCacheBytes),
 		stories:       newPersistentCache[Story](cfg.Store, "story", fetchSlots, localStoryCacheBytes),
 	}
+	if newExternalHelperClient != nil {
+		a.helper = newExternalHelperClient(pool)
+	}
+	return a
 }
 
 type fetchMeta struct{ fetched bool }
@@ -156,8 +161,8 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	}
 	post, persist, err = stagedFetch(stagedCtx, sources...)
 	if err != nil && err.Final {
-		// The ruling is sometimes wrong (fastdl still finds ~1 in 5 such posts),
-		// so answer now and keep looking in the background for the next request.
+		// Other sources can still find posts rejected by this ruling, so answer
+		// now and keep looking in the background for the next request.
 		if externalHelperPostImpl != nil {
 			keepHelper = true
 			startHelper()

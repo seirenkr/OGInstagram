@@ -2,7 +2,13 @@ package main
 
 import "context"
 
+type externalHelperClient interface {
+	request(ctx context.Context, operation, endpoint, contentType, unsigned string) (string, *AppError)
+	close()
+}
+
 var (
+	newExternalHelperClient func(*SessionPool) externalHelperClient
 	// nil until a private helper registers itself; fetchPost then skips the stage.
 	externalHelperPostImpl func(*App, context.Context, string) (Post, bool)
 
