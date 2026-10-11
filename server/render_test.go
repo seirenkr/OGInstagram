@@ -53,7 +53,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 			t.Errorf("gallery embed is missing %s", tag)
 		}
 	}
-	if strings.Contains(gallery, `property="og:image:alt"`) || strings.Contains(gallery, `property="twitter:image:alt"`) {
+	if strings.Contains(gallery, "image:alt") {
 		t.Error("gallery embed must not expose the caption through image alt metadata")
 	}
 
@@ -122,6 +122,29 @@ func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
 		}
 		if status["content"] != "" {
 			t.Errorf("%s gallery content = %q, want empty", name, status["content"])
+		}
+	}
+}
+
+func TestProfileGalleryLeavesStatsAndBioEmpty(t *testing.T) {
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
+	p := Profile{Username: "user", FullName: "User", Biography: "profile bio", FollowerCount: 7}
+	baseURL := "https://g.oginstagram.com"
+	wantStatus := profileStatusURL(baseURL, p.Username, true)
+	if html := a.buildProfileEmbedHTML(baseURL, p, true, discordLegacy); !strings.Contains(html, `href="`+wantStatus+`"`) {
+		t.Fatalf("gallery profile must advertise the gallery status %s: %s", wantStatus, html)
+	}
+
+	for name, body := range map[string][]byte{
+		"activity": a.buildProfileActivityStatus(baseURL, p, true),
+		"mastodon": a.buildMastodonProfileStatus(baseURL, p, true),
+	} {
+		var status map[string]any
+		if err := json.Unmarshal(body, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status["content"] != "" || strings.Contains(string(body), "profile bio") {
+			t.Errorf("%s gallery profile leaked stats or bio: %s", name, body)
 		}
 	}
 }
@@ -253,7 +276,7 @@ func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
 	}
 
 	var st map[string]any
-	if err := json.Unmarshal(a.buildMastodonProfileStatus("https://oginstagram.com", p), &st); err != nil {
+	if err := json.Unmarshal(a.buildMastodonProfileStatus("https://oginstagram.com", p, false), &st); err != nil {
 		t.Fatal(err)
 	}
 	if st["created_at"] != "2026-04-23T10:01:13.000Z" {
@@ -321,6 +344,17 @@ func TestCaptionHTMLLinkifiesEntities(t *testing.T) {
 		{"www prepended scheme", "at www.example.com now", `at <a href="https://www.example.com">www.example.com</a> now`},
 		{"fuzzy domain with path", "watch youtube.com/abc here", `watch <a href="https://youtube.com/abc">youtube.com/abc</a> here`},
 		{"non-tld not linked", "open report.pdf please", "open report.pdf please"},
+		{"mention ending in a tld", "photo by @jisoo.kim", `photo by <a href="https://www.instagram.com/jisoo.kim">@jisoo.kim</a>`},
+		{"hashtag ending in a tld", "#travel.com", `<a href="https://www.instagram.com/explore/search/keyword/?q=%23travel">#travel</a>.com`},
+		{"thai hashtag keeps marks", "#สวัสดี", `<a href="https://www.instagram.com/explore/search/keyword/?q=%23%E0%B8%AA%E0%B8%A7%E0%B8%B1%E0%B8%AA%E0%B8%94%E0%B8%B5">#สวัสดี</a>`},
+		{"hashtag after a mark not linked", "ดี#tag", "ดี#tag"},
+		{"url stops at ideographic space", "https://example.com/x\u3000next", `<a href="https://example.com/x">https://example.com/x</a>` + "\u3000next"},
+		{"url stops at nbsp", "https://example.com/x\u00a0next", `<a href="https://example.com/x">https://example.com/x</a>` + "\u00a0next"},
+		{"url stops at cjk full stop", "https://example.com/x。次", `<a href="https://example.com/x">https://example.com/x</a>。次`},
+		{"balanced paren kept", "(https://example.com/a_(b))", `(<a href="https://example.com/a_(b)">https://example.com/a_(b)</a>)`},
+		{"capitalized tld is prose", "a good day.Love you Mr.Kim", "a good day.Love you Mr.Kim"},
+		{"overlong mention not linked", "@abcdefghijklmnopqrstuvwxyz01234", "@abcdefghijklmnopqrstuvwxyz01234"},
+		{"double-dot mention not linked", "hi @a..b", "hi @a..b"},
 	}
 	for _, c := range cases {
 		if got := captionHTML(c.in); got != c.want {

@@ -1,6 +1,9 @@
 package main
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 type externalHelperClient interface {
 	request(ctx context.Context, operation, endpoint, contentType, unsigned string) (string, *AppError)
@@ -10,9 +13,9 @@ type externalHelperClient interface {
 var (
 	newExternalHelperClient func(*SessionPool) externalHelperClient
 	// nil until a private helper registers itself; fetchPost then skips the stage.
-	externalHelperPostImpl func(*App, context.Context, string) (Post, bool)
+	externalHelperPostImpl func(*App, context.Context, string) (Post, *AppError)
 
 	externalHelperStoryImpl = func(*App, context.Context, string, string) (Story, *AppError) {
-		return Story{}, igErr(404, errorCodeMediaNotFound, "story fetching is not available")
+		return Story{}, ephemeralErr(http.StatusNotImplemented, errorCodeUpstream, "story fetching is not available")
 	}
 )

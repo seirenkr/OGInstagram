@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
-	"errors"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -28,8 +26,7 @@ type Session struct {
 	rttAt   time.Time
 	pending int
 
-	cooldownUntil       time.Time
-	helperCooldownUntil time.Time
+	cooldownUntil time.Time
 }
 
 // costLocked is the expected wait for one more request: rtt × (pending+1).
@@ -50,57 +47,6 @@ type SessionPool struct {
 	cfg      Config
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
-
-	budgetLeaseExpires   time.Time
-	budgetLeaseRemaining int64
-	budgetExhaustedUntil time.Time
-	budgetBackendRetryAt time.Time
-}
-
-type proxyBudgetError struct {
-	code string
-}
-
-func (e *proxyBudgetError) Error() string {
-	if e.code == errorCodeBudgetExhausted {
-		return "daily proxy bandwidth budget reached"
-	}
-	return "daily proxy bandwidth budget is temporarily unavailable"
-}
-
-func budgetAppError(code string) *AppError {
-	return ephemeralErr(503, code, (&proxyBudgetError{code}).Error())
-}
-
-func proxyBudgetErrorCode(err error) string {
-	var budgetErr *proxyBudgetError
-	if errors.As(err, &budgetErr) {
-		return budgetErr.code
-	}
-	return ""
-}
-
-type budgetedConn struct {
-	net.Conn
-	pool *SessionPool
-}
-
-func (c *budgetedConn) Read(p []byte) (int, error)  { return c.metered(p, c.Conn.Read) }
-func (c *budgetedConn) Write(p []byte) (int, error) { return c.metered(p, c.Conn.Write) }
-
-// Reserve len(p) before the transfer and refund what it did not move.
-func (c *budgetedConn) metered(p []byte, op func([]byte) (int, error)) (int, error) {
-	if len(p) == 0 {
-		return op(p)
-	}
-	leaseExpires, code := c.pool.reserveProxyBytes(int64(len(p)))
-	if code != "" {
-		_ = c.Conn.Close()
-		return 0, &proxyBudgetError{code: code}
-	}
-	n, err := op(p)
-	c.pool.refundProxyBytes(int64(len(p)-n), leaseExpires)
-	return n, err
 }
 
 func newSessionPool(cfg Config) *SessionPool {
@@ -131,14 +77,8 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 	}
 	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
 	transport := &http.Transport{
-		Proxy: http.ProxyURL(parsed),
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, address)
-			if err != nil {
-				return nil, err
-			}
-			return &budgetedConn{Conn: conn, pool: pool}, nil
-		},
+		Proxy:               http.ProxyURL(parsed),
+		DialContext:         dialer.DialContext,
 		ForceAttemptHTTP2:   true,
 		DisableCompression:  true,
 		TLSHandshakeTimeout: 3 * time.Second,
@@ -148,42 +88,39 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 			MaxDecoderHeaderTableSize: 64 << 10,
 			// Bound bytes already in flight when an unexpected HTML response is rejected.
 			MaxReceiveBufferPerStream: 32 << 10,
-			SendPingTimeout:           5 * time.Second,
+			SendPingTimeout:           30 * time.Second,
 			PingTimeout:               2 * time.Second,
 		},
-		MaxIdleConns:          8,
-		MaxIdleConnsPerHost:   4,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: time.Second,
+		IdleConnTimeout: 90 * time.Second,
 	}
 	return &http.Client{Transport: transport}, nil
 }
 
-func (p *SessionPool) pick(ctx context.Context, helper bool) (*Session, string) {
+// www.instagram.com traffic (oEmbed, profile, ruling) is sparse: spread over
+// every session it would mostly open new connections, so it keeps to the first
+// wwwSessions unless none of them is ready.
+const wwwSessions = 3
+
+func (p *SessionPool) pick(www bool) *Session {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if ctx.Err() != nil {
-		return nil, errorCodeConnection
-	}
 	now := time.Now()
 
 	ready := make([]*Session, 0, len(p.sessions))
-	pickReason := ""
-	for _, s := range p.sessions {
+	for i, s := range p.sessions {
+		if www && i == wwwSessions && len(ready) > 0 {
+			break
+		}
 		s.mu.Lock()
 		if !s.cooldownUntil.After(now) {
-			if helper && s.helperCooldownUntil.After(now) {
-				pickReason = errorCodeCaptchaRequired
-			} else {
-				ready = append(ready, s)
-			}
+			ready = append(ready, s)
 		}
 		s.mu.Unlock()
 	}
 	var picked *Session
 	switch len(ready) {
 	case 0:
-		return nil, pickReason
+		return nil
 	case 1:
 		picked = ready[0]
 	default:
@@ -205,93 +142,21 @@ func (p *SessionPool) pick(ctx context.Context, helper bool) (*Session, string) 
 		ready[i].mu.Unlock()
 	}
 
-	if errorCode := p.ensureBudgetBytesLocked(ctx, now, 1); errorCode != "" {
-		return nil, errorCode
-	}
-	if ctx.Err() != nil {
-		return nil, errorCodeConnection
-	}
 	picked.mu.Lock()
 	picked.pending++
 	picked.mu.Unlock()
-	return picked, ""
+	return picked
 }
 
-func (p *SessionPool) ensureBudgetBytesLocked(ctx context.Context, now time.Time, required int64) string {
-	if !now.Before(p.budgetLeaseExpires) {
-		p.budgetLeaseRemaining = 0
-		p.budgetLeaseExpires = time.Time{}
-	}
-	if p.budgetLeaseRemaining >= required {
-		return ""
-	}
-	if now.Before(p.budgetExhaustedUntil) {
-		return errorCodeBudgetExhausted
-	}
-	p.budgetExhaustedUntil = time.Time{}
-	if now.Before(p.budgetBackendRetryAt) {
-		return errorCodeBudgetBackend
-	}
-	p.budgetBackendRetryAt = time.Time{}
-
-	for p.budgetLeaseRemaining < required {
-		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetRequestTimeout)
-		granted, expires, err := p.cfg.Store.takeBudget(requestCtx, time.Now())
-		cancel()
-		if err != nil {
-			logger(ctx).ErrorContext(ctx, "proxy budget request failed", "error_type", "budget_storage", "error", err)
-			p.budgetBackendRetryAt = time.Now().Add(budgetBackendRetryDelay)
-			return errorCodeBudgetBackend
-		}
-		if granted == 0 {
-			p.budgetExhaustedUntil = expires
-			return errorCodeBudgetExhausted
-		}
-		// A grant can finish across UTC midnight while waiting for SQLite. Its
-		// old-day charge remains durable, but only a live lease may send bytes.
-		if !expires.After(time.Now()) {
-			p.budgetLeaseRemaining = 0
-			p.budgetLeaseExpires = time.Time{}
-			continue
-		}
-		if !p.budgetLeaseExpires.IsZero() && !p.budgetLeaseExpires.Equal(expires) {
-			p.budgetLeaseRemaining = 0
-		}
-		p.budgetLeaseRemaining += granted
-		p.budgetLeaseExpires = expires
-	}
-	return ""
-}
-
-func (p *SessionPool) reserveProxyBytes(bytes int64) (time.Time, string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if code := p.ensureBudgetBytesLocked(context.Background(), time.Now(), bytes); code != "" {
-		return time.Time{}, code
-	}
-	p.budgetLeaseRemaining -= bytes
-	return p.budgetLeaseExpires, ""
-}
-
-func (p *SessionPool) refundProxyBytes(bytes int64, leaseExpires time.Time) {
-	if bytes <= 0 {
-		return
-	}
-	p.mu.Lock()
-	if p.budgetLeaseExpires.Equal(leaseExpires) && time.Now().Before(leaseExpires) {
-		p.budgetLeaseRemaining += bytes
-	}
-	p.mu.Unlock()
-}
-
-// done ends a request picked from s. With observe, rtt feeds the Peak-EWMA
-// estimate; tower's update rule, weighted by the time since the last sample.
-func (p *SessionPool) done(s *Session, rtt time.Duration, observe bool) {
+// done ends a request picked from s that ran on client. With observe, rtt feeds
+// the Peak-EWMA estimate; tower's update rule, weighted by the time since the
+// last sample. A retired client's rtt says nothing about the current exit IP.
+func (p *SessionPool) done(s *Session, client *http.Client, rtt time.Duration, observe bool) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending = max(s.pending-1, 0)
-	if !observe {
+	if !observe || s.client != client {
 		return
 	}
 	sample := float64(rtt)
@@ -315,29 +180,28 @@ func (s *Session) getClient() *http.Client {
 	return c
 }
 
-func (p *SessionPool) fail(s *Session) {
-	p.rotate(s)
-	until := time.Now().Add(rotateCooldown)
+// fail moves s off client to a new exit IP and cools it down. A late failure
+// from an already retired client leaves its replacement alone and reports false.
+func (p *SessionPool) fail(s *Session, client *http.Client) bool {
+	next, err := buildSessionClient(proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), p)
+	if err != nil {
+		slog.Warn("proxy session rotation failed", "session", s.name, "error", err)
+	}
 	s.mu.Lock()
-	if until.After(s.cooldownUntil) {
+	if s.client != client {
+		s.mu.Unlock()
+		return false
+	}
+	if next != nil {
+		s.client = next
+		s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
+	}
+	if until := time.Now().Add(rotateCooldown); until.After(s.cooldownUntil) {
 		s.cooldownUntil = until
 	}
 	s.mu.Unlock()
-}
-
-func (p *SessionPool) rotate(s *Session) {
-	client, err := buildSessionClient(proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), p)
-	if err != nil {
-		slog.Warn("proxy session rotation failed", "session", s.name, "error", err)
-		return
+	if next != nil {
+		client.CloseIdleConnections()
 	}
-	s.mu.Lock()
-	old := s.client
-	s.client = client
-	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
-	s.helperCooldownUntil = time.Time{}
-	s.mu.Unlock()
-	if old != nil {
-		old.CloseIdleConnections()
-	}
+	return true
 }

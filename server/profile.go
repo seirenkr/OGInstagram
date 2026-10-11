@@ -104,7 +104,11 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 func parseProfile(body string) (Profile, *AppError) {
 	u := gjson.Get(body, "data.user")
 	if !present(u) {
-		return Profile{}, igErr(404, errorCodeNotFound, "user not found")
+		// Only an explicit "user": null means the account is gone; any other shape is drift.
+		if u.Exists() {
+			return Profile{}, igErr(404, errorCodeNotFound, "user not found")
+		}
+		return Profile{}, igErr(502, errorCodeUpstream, "profile response had no user")
 	}
 	p := Profile{
 		Username:       u.Get("username").String(),
@@ -119,22 +123,17 @@ func parseProfile(body string) (Profile, *AppError) {
 		IsVerified:     u.Get("is_verified").Type == gjson.True,
 	}
 	if p.Username == "" {
-		return Profile{}, igErr(404, errorCodeMediaNotFound, "profile had no username")
+		return Profile{}, igErr(502, errorCodeUpstream, "profile had no username")
 	}
 	u.Get("edge_owner_to_timeline_media.edges").ForEach(func(_, e gjson.Result) bool {
 		n := e.Get("node")
-		thumb := cmp.Or(n.Get("thumbnail_src").String(), n.Get("display_url").String())
-		if thumb != "" {
-			var takenAt time.Time
-			if ts := n.Get("taken_at_timestamp").Int(); ts > 0 {
-				takenAt = time.Unix(ts, 0).UTC()
-			}
+		if thumb := bestGraphImageURL(n); thumb != "" {
 			p.RecentMedia = append(p.RecentMedia, ProfileMedia{
 				ID:        cmp.Or(n.Get("pk").String(), n.Get("id").String()),
 				Thumbnail: thumb,
-				Width:     int(n.Get("dimensions.width").Int()),
-				Height:    int(n.Get("dimensions.height").Int()),
-				TakenAt:   takenAt,
+				Width:     uintOf(n, "dimensions.width"),
+				Height:    uintOf(n, "dimensions.height"),
+				TakenAt:   unixTime(n.Get("taken_at_timestamp").Int()),
 			})
 		}
 		return len(p.RecentMedia) < profileGalleryMax

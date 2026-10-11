@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
@@ -37,9 +39,8 @@ func TestUserAccountActorDoesNotFetchProfile(t *testing.T) {
 	}
 }
 
-func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
+func TestActivityCollectionsAreEmpty(t *testing.T) {
 	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
-	g := testGateway(t)
 	for _, name := range []string{"inbox", "outbox"} {
 		req := httptest.NewRequest(http.MethodGet, "https://oginstagram.com/users/instagram/"+name, nil)
 		res := a.handleActivityCollection(req, "instagram", name)
@@ -50,11 +51,6 @@ func TestActivityCollectionsAreEmptyAndReadOnly(t *testing.T) {
 		}
 		if res.status != http.StatusOK || json.Unmarshal(res.body, &collection) != nil || collection.Type != "OrderedCollection" || collection.TotalItems != 0 || len(collection.OrderedItems) != 0 {
 			t.Fatalf("%s collection = status %d, body %s", name, res.status, res.body)
-		}
-		w := httptest.NewRecorder()
-		g.ServeHTTP(w, publicRequest(http.MethodPost, "/users/instagram/"+name))
-		if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" {
-			t.Fatalf("POST %s = %d %v", name, w.Code, w.Header())
 		}
 	}
 }
@@ -83,6 +79,25 @@ func TestWebFingerReturnsActorAndFiltersRelations(t *testing.T) {
 	}
 }
 
+func TestWebFingerRejectsBadResources(t *testing.T) {
+	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
+	for _, tt := range []struct {
+		resource string
+		status   int
+	}{
+		{"instagram@oginstagram.com", http.StatusBadRequest},
+		{"acct:@oginstagram.com", http.StatusBadRequest},
+		{"acct:instagram@", http.StatusBadRequest},
+		{"acct:instagram@example.com", http.StatusNotFound},
+		{"acct:bad-name@oginstagram.com", http.StatusNotFound},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "https://oginstagram.com/.well-known/webfinger?resource="+url.QueryEscape(tt.resource), nil)
+		if got := a.handleWebFinger(req).status; got != tt.status {
+			t.Errorf("resource %q = %d, want %d", tt.resource, got, tt.status)
+		}
+	}
+}
+
 func TestActivityStatusLinkifiesCaptionAndCapsImages(t *testing.T) {
 	post := Post{
 		Shortcode: "CODE",
@@ -97,18 +112,33 @@ func TestActivityStatusLinkifiesCaptionAndCapsImages(t *testing.T) {
 		},
 	}
 	var note struct {
-		Content    string            `json:"content"`
-		Attachment []json.RawMessage `json:"attachment"`
+		Content    string `json:"content"`
+		Attachment []struct {
+			URL string `json:"url"`
+		} `json:"attachment"`
 	}
-	if err := json.Unmarshal((&App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}).buildActivityStatus("https://oginstagram.com", post, "p", 0, false, false), &note); err != nil {
+	a := &App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
+	if err := json.Unmarshal(a.buildActivityStatus("https://oginstagram.com", post, "p", 0, false, false), &note); err != nil {
 		t.Fatal(err)
 	}
 	if len(note.Attachment) != activityMaxImages {
 		t.Fatalf("attachments = %d, want %d", len(note.Attachment), activityMaxImages)
 	}
+	for _, att := range note.Attachment {
+		u, err := url.Parse(att.URL)
+		if err != nil || !strings.HasPrefix(u.Path, "/offload/CODE/") || !a.offloadSigner.authorize(u, time.Now()) {
+			t.Fatalf("attachment url %q is not a signed offload URL", att.URL)
+		}
+	}
 	for _, want := range []string{`href="https://www.instagram.com/bob"`, `q=%23sunset`} {
 		if !strings.Contains(note.Content, want) {
 			t.Fatalf("content missing %q: %s", want, note.Content)
 		}
+	}
+}
+
+func TestPostStatusContentOmitsEmptyStats(t *testing.T) {
+	if got := postStatusContent(Post{Caption: "hi"}, "", false); got != "<p>hi</p>" {
+		t.Fatalf("content = %q, want only the caption paragraph", got)
 	}
 }

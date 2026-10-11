@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -43,8 +45,16 @@ func TestParseEmbedPostVideoBlocked(t *testing.T) {
 
 	inner := `{"gql_data":{"shortcode_media":{"shortcode":"V","is_video":true,` +
 		`"owner":{"id":"1","username":"u"},"display_url":"https://cdn/t.jpg","dimensions":{"width":1,"height":1}}}}`
-	if _, err := parseEmbedPost(wrapEmbed(inner)); err == nil {
-		t.Fatal("expected blocked-video error, got nil")
+	if _, err := parseEmbedPost(wrapEmbed(inner)); err == nil || !isTransient(err.Code) {
+		t.Fatalf("want transient blocked-video error, got %v", err)
+	}
+}
+
+func TestParseEmbedCarouselChildWithoutImageFails(t *testing.T) {
+	inner := `{"gql_data":{"shortcode_media":{"shortcode":"C","owner":{"username":"u"},"edge_sidecar_to_children":{"edges":[` +
+		`{"node":{"id":"c1","display_url":"https://cdn/1.jpg"}},{"node":{"id":"c2"}},{"node":{"id":"c3","display_url":"https://cdn/3.jpg"}}]}}}}`
+	if post, err := parseEmbedPost(wrapEmbed(inner)); err == nil || err.Code != errorCodeUpstream {
+		t.Fatalf("want upstream error instead of shifted indices, got %+v, %v", post.Attachments, err)
 	}
 }
 
@@ -94,16 +104,16 @@ func TestParseEmbedSimpleCollabAvatar(t *testing.T) {
 
 func TestParseEmbedSimpleVideoBailsToGraphQL(t *testing.T) {
 	page := `<div class="Embed" data-media-type="GraphVideo" data-owner-id="1"><span class="UsernameText">u</span></div>`
-	if _, err := parseEmbedPost(page); err == nil {
-		t.Fatal("expected error so caller falls back to GraphQL")
+	if _, err := parseEmbedPost(page); err == nil || !isTransient(err.Code) {
+		t.Fatalf("want transient error so caller falls back to GraphQL, got %v", err)
 	}
 }
 
 func TestParseEmbedSimpleBrokenMediaBailsToGraphQL(t *testing.T) {
 	page := `<script>["PolarisEmbedSimple","init",[],[{"isRichEmbed":false,"contextJSON":null}]]</script>` +
 		`<div class="EmbedBrokenMedia"><div class="ebmMessage">The link to this photo or video may be broken, or the post may have been removed.</div></div>`
-	if _, err := parseEmbedPost(page); err == nil {
-		t.Fatal("expected error for broken media, got nil")
+	if _, err := parseEmbedPost(page); err == nil || !isTransient(err.Code) {
+		t.Fatalf("want transient error for broken media, got %v", err)
 	}
 }
 
@@ -140,5 +150,33 @@ func TestParseEmbedPostVideoPlayCount(t *testing.T) {
 	}
 	if want := "▶️ 22,850,111  ❤️ 489,864  💬 10,994"; post.StatsLine != want {
 		t.Fatalf("StatsLine = %q, want %q", post.StatsLine, want)
+	}
+}
+
+// The ruling borrows a GraphQL session: a refusal is neither "missing" nor a
+// reason to rotate that session.
+func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		status  int
+		body    string
+		missing bool
+	}{
+		{http.StatusUnauthorized, `{"status":"fail"}`, false},
+		{http.StatusNotFound, `{"status":"fail","message":"Media cannot be found"}`, true},
+		{http.StatusOK, `{"status":"ok"}`, false},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return mediaTestResponse(r, tc.status, http.Header{"Content-Type": {"application/json"}}, []byte(tc.body)), nil
+			})}
+			s := &Session{client: client}
+			a := &App{pool: &SessionPool{sessions: []*Session{s}}}
+			if got, answered := a.mediaMissing(context.Background(), "ABC123"); got != tc.missing || answered != (tc.status != http.StatusUnauthorized) {
+				t.Fatalf("mediaMissing = %t, %t; want %t", got, answered, tc.missing)
+			}
+			if s.client != client || !s.cooldownUntil.IsZero() || s.pending != 0 || s.rttAt.IsZero() != (tc.status == http.StatusUnauthorized) {
+				t.Fatalf("session: rotated=%t cooldown=%s pending=%d rttAt=%s", s.client != client, s.cooldownUntil, s.pending, s.rttAt)
+			}
+		})
 	}
 }

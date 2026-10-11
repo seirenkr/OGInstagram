@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -69,6 +71,7 @@ func TestHomeAcceptLanguageAndCookie(t *testing.T) {
 		{"ko;q=0.1,en-US;q=0.8", "en"},
 		{"de;q=1,zh-TW;q=0.9", "zh-hant"},
 		{"zh-CN", "zh-hans"},
+		{"zh-Hans-HK", "zh-hans"},
 		{"fr;q=0,pt-BR;q=0.5", "pt"},
 		{"ja;q=1.001,es;q=0.6", "es"},
 		{"ja;q=0.1234,ko;q=0.2", "ko"},
@@ -142,7 +145,10 @@ func TestAssetsDenyTemplatesTraversalAndDirectories(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(g.cfg.AssetsDir, "assets", "escaped.txt")); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{"/home/en.html", "/home", "/.assetsignore", "/robots.txt", "/favicon.ico", "/sitemap.xml", "/assets/", "/assets", "/assets/../../secret.txt", "/assets/.env", "/assets/escaped.txt"} {
+	if err := os.MkdirAll(filepath.Join(g.cfg.AssetsDir, "preview", "v1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/home/en.html", "/home", "/.assetsignore", "/robots.txt", "/favicon.ico", "/sitemap.xml", "/assets/", "/assets", "/assets/../../secret.txt", "/assets/.env", "/assets/escaped.txt", "/preview/v1"} {
 		response := httptest.NewRecorder()
 		if !g.serveAsset(response, httptest.NewRequest(http.MethodGet, "https://oginstagram.com"+target, nil)) || response.Code != 404 {
 			t.Errorf("private asset %s exposed with %d", target, response.Code)
@@ -172,5 +178,49 @@ func TestAssetsDenyTemplatesTraversalAndDirectories(t *testing.T) {
 	response = httptest.NewRecorder()
 	if !g.serveAsset(response, httptest.NewRequest(http.MethodPost, "https://oginstagram.com/assets/app.js", nil)) || response.Code != 405 || response.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatal("asset handler accepted a mutating method")
+	}
+}
+
+func TestHomeLocalesMatchWeb(t *testing.T) {
+	files, err := filepath.Glob("../web/locales/*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromFiles []string
+	for _, file := range files {
+		fromFiles = append(fromFiles, strings.TrimSuffix(filepath.Base(file), ".json"))
+	}
+	app, err := os.ReadFile("../web/src/app.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	languages := regexp.MustCompile(`const languages = \{(.*?)\};`).FindSubmatch(app)
+	if languages == nil {
+		t.Fatal("languages map missing from app.tsx")
+	}
+	var fromApp []string
+	for _, key := range regexp.MustCompile(`"?([a-z-]+)"?: "`).FindAllSubmatch(languages[1], -1) {
+		fromApp = append(fromApp, string(key[1]))
+	}
+	slices.Sort(fromApp)
+	want := slices.Sorted(maps.Keys(homeLocales))
+	if !slices.Equal(fromFiles, want) || !slices.Equal(fromApp, want) {
+		t.Fatalf("locales differ: web/locales %v, app.tsx %v, homeLocales %v", fromFiles, fromApp, want)
+	}
+}
+
+func TestHomeCSPCoversPretendardLinks(t *testing.T) {
+	page, err := os.ReadFile("../web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := regexp.MustCompile(`"(https://cdn\.jsdelivr\.net/[^"]+)"`).FindAllSubmatch(page, -1)
+	if len(links) != 2 {
+		t.Fatalf("want 2 Pretendard stylesheets, found %d", len(links))
+	}
+	for _, link := range links {
+		if !slices.ContainsFunc(strings.Fields(pretendardSources), func(source string) bool { return strings.HasPrefix(string(link[1]), source) }) {
+			t.Errorf("%s is outside the CSP sources %s", link[1], pretendardSources)
+		}
 	}
 }

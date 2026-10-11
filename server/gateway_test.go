@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,7 +20,11 @@ import (
 func testGateway(t *testing.T) *Gateway {
 	t.Helper()
 	store := newTestStore(t)
-	cfg := Config{BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com", "g.oginstagram.com", "d.oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, Store: store, TurnstileSecretKey: "test", AdminPurgeToken: "admin-test"}
+	cfg := Config{BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com", "g.oginstagram.com", "d.oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, Store: store, TurnstileSecretKey: "test"}
+	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("unexpected outbound request: %s", r.URL)
+		return nil, errors.New("unexpected outbound request")
+	}))
 	return newGateway(cfg, newApp(cfg, newSessionPool(cfg), mustOffloadSigner(testOffloadSigningKeys)), nil)
 }
 
@@ -93,6 +96,27 @@ func TestGatewayWebFingerUsesValidatedHost(t *testing.T) {
 	}
 	if asset.Code != 200 || asset.Body.String() != "png" {
 		t.Fatalf("asset = %d %q", asset.Code, asset.Body.String())
+	}
+}
+
+func TestGatewayPassesItsOriginToHandlers(t *testing.T) {
+	g := testGateway(t)
+	g.cfg.AllowedHosts = append(g.cfg.AllowedHosts, "localhost")
+	for _, tt := range []struct {
+		dev              bool
+		peer, host, want string
+	}{
+		{true, "127.0.0.1:1", "localhost:5173", "http://localhost:5173"},
+		{false, "172.30.0.3:1", "oginstagram.com", "https://oginstagram.com"},
+		{false, "172.30.0.3:1", "localhost", "https://localhost"},
+	} {
+		r := publicRequest("GET", "/.well-known/webfinger?resource=acct:alice@"+tt.host)
+		r.RemoteAddr, r.Host, g.cfg.Development = tt.peer, tt.host, tt.dev
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+tt.want+`/users/alice"`) {
+			t.Errorf("dev=%v host=%s: %d %s, want origin %s", tt.dev, tt.host, w.Code, w.Body.String(), tt.want)
+		}
 	}
 }
 
@@ -188,9 +212,14 @@ func TestGatewayBotUnfurls(t *testing.T) {
 		{"GET", "/p/GONE12", `Post unavailable`, 200},
 		{"GET", "/bob", `Account unavailable`, 200},
 		{"POST", "/users/alice/inbox", ``, 405},
+		{"GET", "/stories/alice/123?e=c", `id="discord:component-embed"`, 200},
+		{"GET", "/alice?e=c", `id="discord:component-embed"`, 200},
+		{"GET", "/p/ABC123?e=s", `https://ko-fi.com/seirenkr`, 200},
 	} {
 		r := publicRequest(tt.method, tt.path)
 		r.Header.Set("User-Agent", "Discordbot/2.0")
+		// Ray ID "0" hashes to the legacy arm; ?e=c and ?e=s pin the other two.
+		r.Header.Set("Cf-Ray", "0")
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
 		if w.Code != tt.status || !strings.Contains(w.Body.String(), tt.want) {
@@ -209,10 +238,15 @@ func TestGatewayOffloadAuthBeforeWarmModel(t *testing.T) {
 	signed := g.app.offloadSigner.url("https://oginstagram.com", "/offload/ABC123/1", false)
 	valid, _ := url.Parse(signed)
 	for _, tt := range []struct {
-		query  string
-		status int
+		query, edge string
+		status      int
 	}{
-		{valid.RawQuery, 302}, {"", 404}, {valid.RawQuery + "&sig=duplicate", 404}, {strings.Replace(valid.RawQuery, "v=2", "v=3", 1), 404},
+		{"", "max-age=60", 404},
+		{valid.RawQuery + "&sig=duplicate", "max-age=86400", 404},
+		{strings.Replace(valid.RawQuery, "v=2", "v=3", 1), "max-age=86400", 404},
+		// A removed key may be restored, so its links must not stay dead at the edge.
+		{strings.Replace(valid.RawQuery, "kid=test-v1", "kid=retired", 1), "max-age=60", 404},
+		{valid.RawQuery, "", 302},
 	} {
 		r := publicRequest("GET", "/offload/ABC123/1?"+tt.query)
 		r.Header.Set("User-Agent", "Discordbot")
@@ -221,37 +255,98 @@ func TestGatewayOffloadAuthBeforeWarmModel(t *testing.T) {
 		if w.Code != tt.status {
 			t.Fatalf("offload got%d want%d body%s", w.Code, tt.status, w.Body.String())
 		}
+		if edge := w.Header().Get("Cloudflare-CDN-Cache-Control"); tt.status == 404 && edge != tt.edge {
+			t.Errorf("offload %q edge cache = %q, want %q", tt.query, edge, tt.edge)
+		}
+		if _, warmed := g.app.posts.localGet("ABC123"); tt.status == 404 && warmed {
+			t.Fatalf("rejected offload %q loaded the model", tt.query)
+		}
 	}
 }
 
-func TestValidPreviewPaths(t *testing.T) {
-	r := publicRequest("POST", "/api/embed")
-	for _, path := range []string{"/p/ABC123", "/alice/reel/ABC123/2", "/p/ABC123?img_index=1", "/alice", "/stories/alice/123"} {
-		if _, _, ok := previewTarget(r, path); !ok {
-			t.Errorf("valid path rejected: %s", path)
-		}
+func TestGatewayOffloadErrorRedirectIsNotEdgeCached(t *testing.T) {
+	g := testGateway(t)
+	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{err: ephemeralErr(504, errorCodeConnection, "timeout"), expiresAt: time.Now().Add(time.Minute)})
+	signed, _ := url.Parse(g.app.offloadSigner.url("https://oginstagram.com", "/offload/ABC123/1", false))
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, publicRequest("GET", signed.RequestURI()))
+	if w.Code != 302 || w.Header().Get("Cloudflare-CDN-Cache-Control") != "" {
+		t.Fatalf("error fallback = %d, edge cache %q", w.Code, w.Header().Get("Cloudflare-CDN-Cache-Control"))
 	}
-	for _, path := range []string{"//attacker.example/p/A", "https://attacker.example/p/A", "/offload/A", "/offload/ABC123/1", "/users/p/inbox", "/users/p/statuses/123",
-		"/.well-known/webfinger", "/p/A?img_index=1&img_index=2", "/p/A?img_index=0", "/p/A#fragment", "/p/A?__gallery=1", "/alice?x=1", "/p/A\\bad", "/stories/alice/nope"} {
+}
+
+// serveAsset answers these before the router. The browser check does not
+// mirror the asset list, so they stay out of shared/route-cases.json.
+func TestPreviewRejectsAssetPaths(t *testing.T) {
+	r := publicRequest("POST", "/api/embed")
+	for _, path := range []string{"/robots.txt", "/sitemap.xml", "/.env", "/home/p/ABC123", "/assets/p/ABC123", "/preview/reel/ABC123/2"} {
 		if _, _, ok := previewTarget(r, path); ok {
-			t.Errorf("unsafe path accepted: %s", path)
+			t.Errorf("asset path accepted: %s", path)
 		}
 	}
 }
 
 func TestPreviewRejectsBadOriginAndDuplicateClearance(t *testing.T) {
 	g := testGateway(t)
-	for _, tt := range []struct{ origin, cookie string }{{"https://attacker.example", "cf_clearance=a"}, {"https://oginstagram.com", ""}, {"https://oginstagram.com", "cf_clearance=a; cf_clearance=b"}} {
+	for _, tt := range []struct{ origin, cookie, site string }{
+		{"https://attacker.example", "cf_clearance=a", "same-origin"},
+		{"https://attacker.example", "cf_clearance=a", ""},
+		{"https://oginstagram.com", "", "same-origin"},
+		{"https://oginstagram.com", "cf_clearance=a; cf_clearance=b", "same-origin"},
+		{"https://oginstagram.com", "cf_clearance=a", "same-site"},
+	} {
 		r := publicRequest("POST", "/api/embed")
 		r.Body = io.NopCloser(strings.NewReader(`{"path":"/p/ABC123"}`))
 		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("Sec-Fetch-Site", "same-origin")
+		r.Header.Set("Sec-Fetch-Site", tt.site)
 		r.Header.Set("Origin", tt.origin)
 		r.Header.Set("Cookie", tt.cookie)
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
 		if w.Code != 403 {
 			t.Fatalf("preview got%d for %+v", w.Code, tt)
+		}
+	}
+}
+
+func TestPreviewResponses(t *testing.T) {
+	g := testGateway(t)
+	g.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"success":false,"action":"turnstile-spin-v1","hostname":"oginstagram.com"}`))}, nil
+	})}
+	post := Post{Shortcode: "ABC123", Username: "alice", Caption: "a <b>", Attachments: []Attachment{{URL: "https://scontent.cdninstagram.com/photo.jpg", Kind: "image"}}}
+	for _, tt := range []struct {
+		err    *AppError
+		body   string
+		status int
+	}{
+		{nil, `{"path":"/p/ABC123"}`, 200},
+		// Instagram's 429 is not the visitor's rate limit.
+		{igErr(429, errorCodeRateLimited, "limited"), `{"path":"/p/ABC123"}`, 502},
+		{ephemeralErr(499, "", "cancelled"), `{"path":"/p/ABC123"}`, 504},
+		{igErr(404, errorCodeNotFound, "gone"), `{"path":"/p/ABC123"}`, 404},
+		{igErr(403, errorCodeRestricted, "restricted"), `{"path":"/p/ABC123"}`, 451},
+		{nil, `{"path":"/p/ABC123","token":"token"}`, 403},
+	} {
+		g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: post, err: tt.err, expiresAt: time.Now().Add(time.Hour)})
+		r := publicRequest("POST", "/api/embed")
+		r.Body = io.NopCloser(strings.NewReader(tt.body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "https://oginstagram.com")
+		r.Header.Set("Cookie", "cf_clearance=test")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		if w.Code != tt.status {
+			t.Errorf("preview %s with %v = %d, want %d", tt.body, tt.err, w.Code, tt.status)
+		}
+		if w.Code != 200 {
+			continue
+		}
+		_, inline, _ := strings.Cut(w.Body.String(), `<script type="application/json" id="og-status">`)
+		inline, _, _ = strings.Cut(inline, "</script>")
+		var status struct{ Content string }
+		if strings.Contains(inline, "<") || json.Unmarshal([]byte(inline), &status) != nil || !strings.Contains(status.Content, "a &lt;b&gt;") {
+			t.Errorf("inline status = %q", inline)
 		}
 	}
 }
@@ -271,22 +366,22 @@ func TestGatewayAdmissionLimit(t *testing.T) {
 func TestGatewayHealthIsLocalOnly(t *testing.T) {
 	g := testGateway(t)
 	for _, tt := range []struct {
-		peer   string
-		status int
-	}{{"127.0.0.1:2000", 200}, {"172.30.0.3:2000", 404}} {
-		r := publicRequest("GET", "/readyz")
+		path, peer string
+		status     int
+	}{{"/readyz", "127.0.0.1:2000", 200}, {"/readyz", "172.30.0.3:2000", 404}, {"/healthz", "127.0.0.1:2000", 403}} {
+		r := publicRequest("GET", tt.path)
 		r.RemoteAddr = tt.peer
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
 		if w.Code != tt.status {
-			t.Fatalf("readiness got%d want%d", w.Code, tt.status)
+			t.Fatalf("%s from %s got%d want%d", tt.path, tt.peer, w.Code, tt.status)
 		}
 	}
 }
 
 func TestGatewayRejectsEncodedProtectedEndpoints(t *testing.T) {
 	g := testGateway(t)
-	for _, path := range []string{"/api%2Fembed", "/%61pi/embed", "/api/%65mbed", "/api%2Fadmin/purge", "/api/%73tatus"} {
+	for _, path := range []string{"/api%2Fembed", "/%61pi/embed", "/api/%65mbed", "/api/%73tatus"} {
 		r := publicRequest("POST", path)
 		r.Header.Set("Origin", "https://oginstagram.com")
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -359,45 +454,6 @@ func TestPreviewExtendsWriteDeadlineForSiteverify(t *testing.T) {
 	}
 }
 
-func TestAdminPurgeAuthenticatesAndPreservesBudget(t *testing.T) {
-	g := testGateway(t)
-	ctx := context.Background()
-	if _, _, err := g.cfg.Store.takeBudget(ctx, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	remaining := remainingDailyBudget(t, g.cfg.Store)
-	if err := g.cfg.Store.putModel(ctx, "post", "ABC123", []byte(`{}`), time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{expiresAt: time.Now().Add(time.Hour)})
-	for _, tt := range []struct {
-		token  string
-		status int
-	}{{"bad", 403}, {"admin-test", 200}} {
-		r := publicRequest("POST", "/api/admin/purge")
-		r.Header.Set("Authorization", "Bearer "+tt.token)
-		w := httptest.NewRecorder()
-		g.ServeHTTP(w, r)
-		if w.Code != tt.status {
-			t.Fatalf("purge got %d want %d", w.Code, tt.status)
-		}
-		if tt.status == 403 {
-			if _, ok := g.app.posts.localGet("ABC123"); !ok {
-				t.Fatal("unauthorized purge changed cache")
-			}
-		}
-	}
-	if _, ok := g.app.posts.localGet("ABC123"); ok {
-		t.Fatal("L1 retained purged model")
-	}
-	if _, _, err := g.cfg.Store.getModel(ctx, "post", "ABC123"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("L2 retained purged model: %v", err)
-	}
-	if remainingDailyBudget(t, g.cfg.Store) != remaining {
-		t.Fatal("cache purge reset proxy budget")
-	}
-}
-
 func TestOffloadEdgeTTL(t *testing.T) {
 	now := time.Now()
 	cdn := "https://scontent.cdninstagram.com/v/x.jpg?oe=" + strconv.FormatInt(now.Add(3*time.Hour).Unix(), 16)
@@ -433,6 +489,20 @@ func TestBotLimiterAllowsFiftyPerHour(t *testing.T) {
 	}
 }
 
+func TestBotLimiterSharesOneBudgetPerIPv6Slash64(t *testing.T) {
+	var l botLimiter
+	now := time.Date(2026, 10, 7, 5, 0, 0, 0, time.UTC)
+	for i := range botHourlyLimit {
+		l.allow("2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16), now)
+	}
+	if ok, _ := l.allow("2001:db8:1:2:ffff::1", now); ok {
+		t.Fatal("a fresh address in the same /64 got its own budget")
+	}
+	if ok, _ := l.allow("2001:db8:1:3::1", now); !ok {
+		t.Fatal("another /64 has its own budget")
+	}
+}
+
 func TestGatewayRateLimitsOnlyLimitedBots(t *testing.T) {
 	g := testGateway(t)
 	now := time.Now()
@@ -458,5 +528,16 @@ func TestGatewayRateLimitsOnlyLimitedBots(t *testing.T) {
 		if w.Code != want {
 			t.Fatalf("class %q = %d, want %d", class, w.Code, want)
 		}
+	}
+}
+
+func TestRecordMetric(t *testing.T) {
+	g := &Gateway{metrics: make(chan metricEvent, 1)}
+	posts := gatewayRoute{category: "posts"}
+	g.recordMetric(posts, resp{status: 200, cacheHit: true}, time.Second)
+	g.recordMetric(posts, resp{status: 200, originStatus: 504, errorType: errorCodeConnection}, time.Second)
+	g.recordMetric(posts, resp{status: 200}, time.Second) // the backlog is full: dropped, not blocked
+	if got := <-g.metrics; got.status != 504 || got.errorType != errorCodeConnection || len(g.metrics) != 0 {
+		t.Fatalf("recorded %+v with %d more queued; want only the origin 504", got, len(g.metrics))
 	}
 }

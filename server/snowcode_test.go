@@ -58,6 +58,9 @@ func TestProfileSnowcodeRoundTrip(t *testing.T) {
 		if got.Username != username || got.Shortcode != "" {
 			t.Errorf("%s: parsed=%#v, want Username only", username, got)
 		}
+		if got := parseStatusSnowcode(profileStatusSnowcode(username, true)); got != (snowcodePost{Username: username, Gallery: true}) {
+			t.Errorf("%s: gallery parsed=%#v", username, got)
+		}
 	}
 }
 
@@ -67,13 +70,5 @@ func TestStorySnowcodeRoundTrip(t *testing.T) {
 		if got := parseStatusSnowcode(storyStatusSnowcode(want.Username, want.Shortcode, gallery)); got != want {
 			t.Fatalf("parsed=%#v, want %#v", got, want)
 		}
-	}
-}
-
-func TestParseStatusSnowcodeFallsBackToRawShortcode(t *testing.T) {
-
-	got := parseStatusSnowcode("DaTSSukB-Lb")
-	if got.Shortcode != "DaTSSukB-Lb" || got.PostType != "p" {
-		t.Errorf("raw shortcode fallback failed: %#v", got)
 	}
 }

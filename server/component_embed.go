@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -105,7 +106,9 @@ func discordEmbedResponse(req *http.Request, document string, choice discordEmbe
 		rendered = "mastodon"
 	}
 	r.headers["X-OGInstagram-Embed"] = rendered
-	logger(req.Context()).Info("discord embed served", "variant", variant, "rendered", rendered, "path", req.URL.Path)
+	if mathrand.IntN(100) == 0 {
+		logger(req.Context()).Info("discord embed served", "variant", variant, "rendered", rendered, "path", req.URL.Path, "sample_rate", 100)
+	}
 	return r
 }
 
@@ -303,8 +306,6 @@ func componentEmbedScript(card discordCard) string {
 	// masked link, so a valid handle is linked as is.
 	if validUsername(card.username) {
 		author += "\n[@" + card.username + "](" + card.authorURL + ")"
-	} else if card.username != "" {
-		author += "\n" + discordText("@"+truncateFlat(card.username, 30))
 	}
 	if !card.gallery && card.stats != "" {
 		// A third line fills the fixed-size avatar thumbnail's height.
@@ -356,12 +357,15 @@ func componentEmbedScript(card discordCard) string {
 		return ""
 	}
 	if !card.gallery {
-		caption := normalizeCaption(card.caption)
+		// The rune-indexed cut below needs []rune to round-trip to the same bytes.
+		caption := strings.ToValidUTF8(normalizeCaption(card.caption), "\uFFFD")
 		spans := detectLinks(caption)
 		full := encode(discordCaption(caption, spans, len(caption)))
 		if len(full) <= discordComponentMaxBytes {
 			body = full
 		} else {
+			// ponytail: rune-based cut may split a grapheme cluster; move this and
+			// truncateFlat to grapheme boundaries together if users report broken emoji.
 			runes := []rune(caption)
 			lo, hi := 0, min(len(runes)-1, 4000)
 			for lo < hi {

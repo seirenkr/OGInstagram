@@ -10,16 +10,19 @@ import (
 	"unicode/utf8"
 )
 
+// CJK punctuation ends a URL: captions run the next sentence on with no space.
+const urlChars = `[^\s\p{Z}\p{Cc}\p{Cf}<>。、，！？「」『』【】（）]`
+
 var (
-	schemeLinkRE = regexp.MustCompile(`(?i)\bhttps?://[^\s<>]+|\bmailto:[^\s<>]+`)
+	schemeLinkRE = regexp.MustCompile(`(?i)\bhttps?://` + urlChars + `+|\bmailto:` + urlChars + `+`)
 
 	emailRE = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}\b`)
 
-	domainRE = regexp.MustCompile(`(?i)\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#][^\s<>]*)?`)
+	domainRE = regexp.MustCompile(`(?i)\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]` + urlChars + `*)?`)
 
 	// A mention may not end in a dot; a hashtag needs a letter or digit.
 	mentionRE = regexp.MustCompile(`@[A-Za-z0-9._]*[A-Za-z0-9_]`)
-	hashtagRE = regexp.MustCompile(`#[\p{L}\p{N}_]*[\p{L}\p{N}][\p{L}\p{N}_]*`)
+	hashtagRE = regexp.MustCompile(`#[\p{L}\p{M}\p{N}_]*[\p{L}\p{N}][\p{L}\p{M}\p{N}_]*`)
 )
 
 type linkSpan struct {
@@ -73,6 +76,9 @@ func detectLinks(text string) []linkSpan {
 	}
 	for _, m := range domainRE.FindAllStringIndex(text, -1) {
 		s, e := m[0], trimURLEnd(text, m[0], m[1])
+		if s > 0 && (text[s-1] == '@' || text[s-1] == '#') {
+			continue
+		}
 		if s >= 3 && text[s-3:s] == "://" {
 			continue
 		}
@@ -82,7 +88,9 @@ func detectLinks(text string) []linkSpan {
 		add(s, e, "https://"+text[s:e])
 	}
 	for _, sp := range scanSigil(text, mentionRE, func(handle string) string { return instagramOrigin + "/" + handle }) {
-		add(sp.start, sp.end, sp.href)
+		if h := text[sp.start+1 : sp.end]; validUsername(h) && !strings.Contains(h, "..") {
+			add(sp.start, sp.end, sp.href)
+		}
 	}
 	for _, sp := range scanSigil(text, hashtagRE, func(tag string) string {
 		return instagramOrigin + "/explore/search/keyword/?q=%23" + url.QueryEscape(tag)
@@ -106,7 +114,8 @@ func hasKnownTLD(candidate string) bool {
 	if len(labels) < 2 {
 		return false
 	}
-	_, ok := tldSet[strings.ToLower(labels[len(labels)-1])]
+	// No case folding: a capitalized last label ("day.Love", "Mr.Kim") is prose.
+	_, ok := tldSet[labels[len(labels)-1]]
 	return ok
 }
 
@@ -114,16 +123,20 @@ var closingToOpening = map[rune]rune{')': '(', ']': '[', '}': '{'}
 
 func trimURLEnd(text string, start, end int) int {
 	const trail = ".,;:!?'\"”’»…"
+	var count [256]int
+	for i := start; i < end; i++ {
+		count[text[i]]++
+	}
 	for end > start {
 		r, size := utf8.DecodeLastRuneInString(text[start:end])
 		switch {
 		case strings.ContainsRune(trail, r):
 			end -= size
 		case r == ')' || r == ']' || r == '}':
-			open := closingToOpening[r]
-			if strings.Count(text[start:end], string(open)) >= strings.Count(text[start:end], string(r)) {
+			if count[closingToOpening[r]] >= count[r] {
 				return end
 			}
+			count[r]--
 			end -= size
 		default:
 			return end
@@ -133,7 +146,7 @@ func trimURLEnd(text string, start, end int) int {
 }
 
 func isWordRune(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.Is(unicode.M, r)
 }
 
 func boundaryOK(text string, start int) bool {

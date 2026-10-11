@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +19,8 @@ type App struct {
 	profiles *cache[Profile]
 	stories  *cache[Story]
 
+	fetchSlots chan struct{}
+
 	// Unix nanos until which direct embed requests are skipped (0 = healthy).
 	embedPausedUntil atomic.Int64
 }
@@ -28,6 +31,7 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 		cfg:           cfg,
 		pool:          pool,
 		offloadSigner: signer,
+		fetchSlots:    fetchSlots,
 		posts:         newPersistentCache[Post](cfg.Store, "post", fetchSlots, localPostCacheBytes),
 		profiles:      newPersistentCache[Profile](cfg.Store, "profile", fetchSlots, localProfileCacheBytes),
 		stories:       newPersistentCache[Story](cfg.Store, "story", fetchSlots, localStoryCacheBytes),
@@ -41,16 +45,13 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 type fetchMeta struct{ fetched bool }
 
 func (a *App) getPost(ctx context.Context, shortcode string, meta *fetchMeta) (Post, *AppError) {
-	if !validShortcode(shortcode) {
+	// A code that cannot decode to a media id costs paid lookups for a sure miss.
+	if pk := shortcodePK(shortcode); !validShortcode(shortcode) || pk == nil || !pk.IsInt64() {
 		return Post{}, igErr(404, errorCodeNotFound, "invalid shortcode")
 	}
 	return a.posts.get(ctx, shortcode, meta, func(fetchCtx context.Context) (Post, time.Duration, bool, *AppError) {
-		post, persist, degraded, err := a.fetchPost(fetchCtx, shortcode)
-		ttl := postCacheTTL(post)
-		if degraded {
-			ttl = min(ttl, transientErrorCacheSeconds*time.Second)
-		}
-		return post, ttl, persist, err
+		post, persist, err := a.fetchPost(fetchCtx, shortcode)
+		return post, postCacheTTL(post), persist, err
 	})
 }
 
@@ -62,35 +63,7 @@ func postCacheTTL(post Post) time.Duration {
 	return cacheTTLFromURLs(urls...)
 }
 
-// degraded reports an oEmbed card served because the full sources were still
-// running; it is cached briefly so a later full fetch replaces it.
-func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persist, degraded bool, err *AppError) {
-	oembedCtx, cancelOembed := context.WithCancel(ctx)
-	defer cancelOembed()
-	stagedCtx, cancelStaged := context.WithCancel(ctx)
-	defer cancelStaged()
-	started := time.Now()
-	var cutEarly atomic.Bool
-	oembedCh := make(chan oembedOutcome, 1)
-	var oembedOnce sync.Once
-	startOembed := func() {
-		oembedOnce.Do(func() {
-			go func() {
-				outcome := a.fetchOembed(oembedCtx, shortcode)
-				oembedCh <- outcome
-				if _, verr := oembedVerdict(outcome, shortcode, AppError{}); verr != nil {
-					return
-				}
-				// A usable degraded card is ready: end the staged race in time to serve it.
-				select {
-				case <-time.After(time.Until(started.Add(oembedFallbackAt))):
-					cutEarly.Store(true)
-					cancelStaged()
-				case <-stagedCtx.Done():
-				}
-			}()
-		})
-	}
+func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persist bool, err *AppError) {
 	valid := validSourceModel[Post](shortcode)
 	// A final ruling can answer before the helper finishes. Keep one bounded
 	// attempt available to fill the cache instead of cancelling and restarting it.
@@ -101,6 +74,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			cancelHelper()
 		}
 	}()
+	var rulingAnswered atomic.Bool
 	var helperOnce sync.Once
 	helperDone := make(chan struct{})
 	var helperPost Post
@@ -109,23 +83,22 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 		helperOnce.Do(func() {
 			go func() {
 				defer close(helperDone)
+				defer func() {
+					if r := recover(); r != nil {
+						logger(helperCtx).ErrorContext(helperCtx, "external helper panicked", "panic", r, "stack", string(debug.Stack()))
+						helperErr = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper panicked")
+					}
+				}()
 				workCtx, cancel := context.WithTimeout(helperCtx, cacheSharedWorkTimeout)
 				defer cancel()
 				if workCtx.Err() != nil {
 					helperErr = contextAppError(workCtx)
 					return
 				}
-				post, ok := externalHelperPostImpl(a, workCtx, shortcode)
-				if !ok {
-					helperErr = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "external helper had no post")
-					return
-				}
-				helperPost, helperErr = valid(post, nil)
+				helperPost, helperErr = valid(externalHelperPostImpl(a, workCtx, shortcode))
 			}()
 		})
 	}
-	oembedTimer := time.AfterFunc(oembedHedgeDelay, startOembed)
-	defer oembedTimer.Stop()
 
 	sources := []stagedSource[Post]{
 		{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
@@ -139,9 +112,13 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			post, perr := parseInstagramPost(body)
 			// GraphQL errors the same way for gated, hidden and missing posts; the
 			// ruling endpoint can tell "missing" apart in ~0.2s.
-			if perr != nil && perr.Code == errorCodeGraphQL && a.mediaMissing(ctx, shortcode) {
-				perr = igErr(404, errorCodeMediaNotFound, "This post isn't available.")
-				perr.Final = true
+			if perr != nil && perr.Code == errorCodeGraphQL {
+				missing, answered := a.mediaMissing(ctx, shortcode)
+				rulingAnswered.Store(answered)
+				if missing {
+					perr = igErr(404, errorCodeMediaNotFound, "This post isn't available.")
+					perr.Final = true
+				}
 			}
 			return valid(post, perr)
 		}},
@@ -159,69 +136,65 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			}},
 		)
 	}
-	post, persist, err = stagedFetch(stagedCtx, sources...)
+	post, persist, err = stagedFetch(ctx, sources...)
 	if err != nil && err.Final {
 		// Other sources can still find posts rejected by this ruling, so answer
-		// now and keep looking in the background for the next request.
+		// now and keep looking in the background for the next request, but only
+		// while a fetch slot is free: this work outlives the flight that held one.
 		if externalHelperPostImpl != nil {
-			keepHelper = true
-			startHelper()
-			go func() {
-				defer cancelHelper()
-				<-helperDone
-				if helperErr == nil {
-					a.storeHelperPost(helperCtx, shortcode, helperPost)
-				}
-			}()
-		}
-		return Post{}, false, false, err
-	}
-	if err != nil {
-		startOembed()
-		var outcome oembedOutcome
-		// A finished oEmbed wins over an expired ctx: at the deadline both
-		// channels are ready, and select would discard the answer half the time.
-		select {
-		case outcome = <-oembedCh:
-		default:
 			select {
-			case outcome = <-oembedCh:
-			case <-ctx.Done():
+			case a.fetchSlots <- struct{}{}:
+				keepHelper = true
+				startHelper()
+				go func() {
+					defer func() { <-a.fetchSlots }()
+					defer cancelHelper()
+					defer func() {
+						if r := recover(); r != nil {
+							logger(helperCtx).ErrorContext(helperCtx, "storing helper post panicked", "panic", r, "stack", string(debug.Stack()))
+						}
+					}()
+					<-helperDone
+					if helperErr == nil {
+						a.storeHelperPost(helperCtx, shortcode, helperPost)
+					}
+				}()
+			default:
 			}
 		}
+		return Post{}, false, err
+	}
+	if err != nil {
+		outcome := a.fetchOembed(ctx, shortcode)
 		enriched, enrichedErr := oembedVerdict(outcome, shortcode, *err)
 		if enriched.Shortcode == "" {
-			return Post{}, false, false, enrichedErr
+			// oEmbed also 404s posts it hides from logged-out viewers. Its 404 means
+			// "gone" only when the ruling could not tell and the external helper had
+			// no post either.
+			select {
+			case <-helperDone:
+				if outcome.status == http.StatusNotFound && isTransient(enrichedErr.Code) && !rulingAnswered.Load() &&
+					helperErr != nil && helperErr.Status == http.StatusNotFound && helperErr.Code == errorCodeUpstream {
+					return Post{}, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
+				}
+			default:
+			}
+			return Post{}, false, enrichedErr
 		}
-		post, err = enriched, nil
-		// After a total failure the proxied oEmbed answer is worth keeping; a card
-		// taken while full sources were still running is only a stopgap.
-		degraded = cutEarly.Load()
-		persist = !degraded
+		// After a total failure the proxied oEmbed answer is worth keeping.
+		post, persist, err = enriched, true, nil
 	}
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	return post, persist, degraded, nil
+	return post, persist, nil
 }
 
-// Wait for the original lookup to store its verdict before replacing it. A
-// fast helper must not have its successful cache entry overwritten by that 404.
 func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) {
 	ctx, cancel := context.WithTimeout(ctx, cacheSharedWorkTimeout)
 	defer cancel()
-	a.posts.flightMu.Lock()
-	call := a.posts.flight[shortcode]
-	a.posts.flightMu.Unlock()
-	if call != nil {
-		select {
-		case <-call.done:
-		case <-ctx.Done():
-			return
-		}
-	}
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	a.posts.put(ctx, shortcode, post, postCacheTTL(post), true)
+	a.posts.putAfterFlight(ctx, shortcode, post, postCacheTTL(post), true)
 }

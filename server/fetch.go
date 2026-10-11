@@ -7,13 +7,18 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -32,6 +37,9 @@ type fetchSpec struct {
 	expectJSON bool
 	headers    map[string]string
 	interpret  func(status int, raw []byte) *AppError
+	// An advisory request's failures say nothing about the exit IP: they never
+	// rotate its session, and only its successes feed the RTT.
+	advisory bool
 }
 
 func statusOnly(status int, _ []byte) *AppError {
@@ -61,9 +69,9 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	if spec.expectJSON {
 		// API redirects lead to login/challenge HTML, not the requested media.
 		// Keep the shared client's policy intact for other request types.
-		copy := *client
-		copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		client = &copy
+		noRedirect := *client
+		noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &noRedirect
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -73,6 +81,7 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 		return 0, "", requestError(err, spec.subject+" request failed")
 	}
 	defer resp.Body.Close()
+	wire := countingReader{resp.Body, outboundCounter(spec.operation)}
 	status = resp.StatusCode
 	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
 	if spec.expectJSON && ((status >= 300 && status < 400) || contentType == "text/html" || contentType == "application/xhtml+xml") {
@@ -89,25 +98,23 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 		}
 		return status, "", igErr(http.StatusBadGateway, code, spec.subject+" returned a page instead of JSON")
 	}
-	var body io.Reader = resp.Body
-	if !resp.Uncompressed {
-		switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
-		case "", "identity":
-		case "gzip":
-			decoded, err := gzip.NewReader(resp.Body)
-			if err != nil {
-				if ctx.Err() != nil {
-					return status, "", contextAppError(ctx)
-				}
-				return status, "", requestError(err, spec.subject+" response decompression failed")
+	var body io.Reader = wire
+	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
+	case "", "identity":
+	case "gzip":
+		decoded, err := gzip.NewReader(wire)
+		if err != nil {
+			if ctx.Err() != nil {
+				return status, "", contextAppError(ctx)
 			}
-			defer decoded.Close()
-			body = decoded
-		case "br":
-			body = brotli.NewReader(resp.Body)
-		default:
-			return status, "", igErr(http.StatusBadGateway, errorCodeUpstream, spec.subject+" returned an unsupported encoding")
+			return status, "", requestError(err, spec.subject+" response decompression failed")
 		}
+		defer decoded.Close()
+		body = decoded
+	case "br":
+		body = brotli.NewReader(wire)
+	default:
+		return status, "", igErr(http.StatusBadGateway, errorCodeUpstream, spec.subject+" returned an unsupported encoding")
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
 	if ctx.Err() != nil {
@@ -125,6 +132,27 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	return status, string(raw), nil
 }
 
+// Compressed body bytes per operation since the last "outbound bytes" line:
+// proxy spend is billed on the wire, and sampled success lines cannot be summed.
+var outboundBytes sync.Map // operation -> *atomic.Int64
+var outboundBytesLoggedAt atomic.Int64
+
+func outboundCounter(operation string) *atomic.Int64 {
+	c, _ := outboundBytes.LoadOrStore(operation, new(atomic.Int64))
+	return c.(*atomic.Int64)
+}
+
+type countingReader struct {
+	io.Reader
+	n *atomic.Int64
+}
+
+func (c countingReader) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
 func webLoggedOutSpec(shortcode string) fetchSpec {
 	variables, _ := json.Marshal(map[string]any{
 		"shortcode": shortcode,
@@ -139,7 +167,7 @@ func webLoggedOutSpec(shortcode string) fetchSpec {
 		operation:  "post",
 		subject:    "Instagram",
 		expectJSON: true,
-		interpret:  instagramJSON,
+		interpret:  graphQLJSON,
 		method:     http.MethodPost,
 		url:        instagramGraphQLOrigin + "/graphql/query",
 		body:       form.Encode(),
@@ -176,7 +204,7 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	results := make(chan result, len(sources))
 
 	started := time.Now()
-	next, pending := 0, 0
+	next, pending, skipped := 0, 0, 0
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	defer func() {
@@ -193,8 +221,15 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 		next++
 		pending++
 		go func() {
-			v, err := source.fetch(ctx)
-			results <- result{name: source.name, value: v, persist: source.persist, err: err}
+			r := result{name: source.name, persist: source.persist}
+			defer func() {
+				if p := recover(); p != nil {
+					logger(parent).ErrorContext(parent, "staged source panicked", "source", source.name, "panic", p, "stack", string(debug.Stack()))
+					r.err = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, source.name+" failed")
+				}
+				results <- r
+			}()
+			r.value, r.err = source.fetch(ctx)
 		}()
 	}
 
@@ -218,10 +253,10 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	// One line per fetch that hedged or failed: the hedge rate and parse
 	// failures (format drift) are otherwise invisible. Clean first-source wins log nothing.
 	var failures []string
-	report := func(winner string) {
-		if winner == "" || next > 1 || len(failures) > 0 {
-			logger(parent).InfoContext(parent, "staged fetch finished", "winner", winner, "started", next,
-				"duration_ms", time.Since(started).Milliseconds(), "failures", failures)
+	report := func(winner string, extra ...any) {
+		if winner == "" || next-skipped > 1 || len(failures) > 0 {
+			logger(parent).InfoContext(parent, "staged fetch finished", append([]any{"winner", winner, "started", next,
+				"duration_ms", time.Since(started).Milliseconds(), "failures", failures}, extra...)...)
 		}
 	}
 
@@ -229,7 +264,7 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	for pending > 0 {
 		select {
 		case <-parent.Done():
-			report("")
+			report("", "cut", parent.Err().Error(), "pending", pending)
 			if lastErr != nil && !isTransient(lastErr.Code) {
 				return zero, false, lastErr
 			}
@@ -243,7 +278,11 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 				report(r.name)
 				return r.value, r.persist, nil
 			}
-			failures = append(failures, r.name+": "+r.err.errorType()+": "+r.err.logMessage())
+			if r.err == errEmbedPaused {
+				skipped++
+			} else {
+				failures = append(failures, r.name+": "+r.err.errorType()+": "+r.err.logMessage())
+			}
 			if r.err.Final {
 				report("")
 				return zero, false, r.err
@@ -261,13 +300,23 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 }
 
 func requestError(err error, fallback string) *AppError {
-	if code := proxyBudgetErrorCode(err); code != "" {
-		return budgetAppError(code)
-	}
 	return causedErr(502, errorCodeConnection, fallback, err)
 }
 
 func logOutbound(ctx context.Context, operation, session, method, rawURL string, started time.Time, status, bytes int, appErr *AppError, sessionRotated bool) {
+	if last := outboundBytesLoggedAt.Load(); time.Since(time.Unix(0, last)) >= time.Minute &&
+		outboundBytesLoggedAt.CompareAndSwap(last, time.Now().UnixNano()) {
+		var totals []any
+		outboundBytes.Range(func(op, n any) bool {
+			if v := n.(*atomic.Int64).Swap(0); v > 0 {
+				totals = append(totals, op.(string), v)
+			}
+			return true
+		})
+		if len(totals) > 0 {
+			slog.Info("outbound bytes", totals...)
+		}
+	}
 	if (appErr == nil && mathrand.IntN(100) != 0) || (appErr != nil && appErr.Status == 499) {
 		return
 	}
@@ -278,7 +327,7 @@ func logOutbound(ctx context.Context, operation, session, method, rawURL string,
 	attrs := []any{"operation", operation, "method", method, "host", u.Hostname(), "path", u.Path,
 		"session", session, "duration_ms", time.Since(started).Milliseconds()}
 	if appErr == nil {
-		logger(ctx).InfoContext(ctx, "outbound request completed", append(attrs, "status", status, "bytes", bytes)...)
+		logger(ctx).InfoContext(ctx, "outbound request completed", append(attrs, "status", status, "bytes", bytes, "sample_rate", 100)...)
 		return
 	}
 	attrs = append(attrs, "app_status", appErr.Status, "error_type", appErr.errorType(),
@@ -295,21 +344,14 @@ func isInstagramURL(rawURL string) bool {
 }
 
 // One proxied request: pick a session, run it, then hold that session
-// accountable. Ephemeral errors (deadline, budget) are ours, so only a
+// accountable. Ephemeral errors (deadlines, cooldowns) are ours, so only a
 // non-ephemeral, rotatable code marks the session bad.
 func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, out string, ferr *AppError) {
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
 	}
-	instagram := isInstagramURL(spec.url)
-	s, pickReason := a.pool.pick(ctx, !instagram)
+	s := a.pool.pick(strings.HasPrefix(spec.url, instagramOrigin+"/"))
 	if s == nil {
-		if pickReason == errorCodeCaptchaRequired {
-			return 0, "", ephemeralErr(http.StatusServiceUnavailable, errorCodeCaptchaRequired, "external helper is temporarily paused after verification requests")
-		}
-		if pickReason == errorCodeBudgetBackend || pickReason == errorCodeBudgetExhausted {
-			return 0, "", budgetAppError(pickReason)
-		}
 		if len(a.pool.sessions) == 0 {
 			return 0, "", igErr(503, errorCodeConnection, "Instagram proxy sessions are not configured")
 		}
@@ -319,24 +361,17 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (status int, ou
 	started := time.Now()
 	client := s.getClient()
 	defer func() {
-		if !instagram && ferr != nil && ferr.Code == errorCodeCaptchaRequired {
-			s.mu.Lock()
-			// A late response from the previous exit IP must not pause its replacement.
-			if s.client == client {
-				s.helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
-			}
-			s.mu.Unlock()
-		}
-		// Instagram answers in well under a second. Running into our deadline means
-		// the exit IP hung (outlier ejection, as in Envoy): replace it.
-		hung := instagram && ferr != nil && ferr.Status == http.StatusGatewayTimeout
-		rotated := hung || (ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
-		logOutbound(ctx, spec.operation, s.name, spec.method, spec.url, started, status, len(out), ferr, rotated)
-		// Helper latency describes its own service, so only Instagram updates the exit IP's RTT.
-		a.pool.done(s, time.Since(started), instagram && (ferr == nil || hung))
+		elapsed := time.Since(started)
+		// Instagram answers in well under a second. Running into a deadline of 3 s or
+		// more means the exit IP hung (outlier ejection, as in Envoy): replace it.
+		// A shorter caller deadline says nothing about the exit IP.
+		hung := !spec.advisory && ferr != nil && ferr.Status == http.StatusGatewayTimeout && elapsed >= 3*time.Second
+		rotated := hung || (!spec.advisory && ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
+		a.pool.done(s, client, elapsed, ferr == nil || hung)
 		if rotated {
-			a.pool.fail(s)
+			rotated = a.pool.fail(s, client)
 		}
+		logOutbound(ctx, spec.operation, s.name, spec.method, spec.url, started, status, len(out), ferr, rotated)
 	}()
 
 	return fetchRequest(ctx, client, spec)
@@ -364,7 +399,7 @@ func instagramJSON(status int, raw []byte) *AppError {
 		}
 		return causedErr(status, code, "Instagram request failed", errors.New(msg))
 	}
-	if strings.HasPrefix(body, "<!DOCTYPE html") || strings.Contains(body, "require_login") {
+	if strings.HasPrefix(body, "<!DOCTYPE html") || gjson.Get(body, "require_login").Bool() {
 		return igErr(401, errorCodeLoginRequired, "Instagram requires login to view this content")
 	}
 	if !gjson.Valid(body) {
@@ -378,14 +413,30 @@ func instagramJSON(status int, raw []byte) *AppError {
 	return nil
 }
 
+// GraphQL signals throttling in a 200 body, and its other HTTP errors come from
+// the endpoint (retired doc_id, rejected lsd), not from the post or the exit IP.
+func graphQLJSON(status int, raw []byte) *AppError {
+	if err := instagramJSON(status, raw); err != nil {
+		if status >= 400 && status != 401 && status != 403 && status != 429 {
+			err.Code = errorCodeGraphQL
+		}
+		return err
+	}
+	first := gjson.GetBytes(raw, "errors.0")
+	if code, msg := first.Get("code").Int(), first.Get("message").String(); code == graphQLRateLimitedCode || strings.Contains(msg, "Please wait") {
+		return causedErr(429, errorCodeRateLimited, "Instagram rate limited the request", fmt.Errorf("graphql %d: %s", code, msg))
+	}
+	return nil
+}
+
 type oembedOutcome struct {
 	status int
 	body   string
 	ok     bool
 }
 
-func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
-	status, body, err := a.fetchViaProxy(ctx, fetchSpec{
+func oembedSpec(shortcode string) fetchSpec {
+	return fetchSpec{
 		operation: "oembed", method: http.MethodGet, subject: "Instagram",
 		expectJSON: true,
 		url:        instagramOrigin + "/api/v1/oembed/?" + url.Values{"url": {instagramOrigin + "/p/" + shortcode + "/"}}.Encode(),
@@ -394,10 +445,19 @@ func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
 			"Accept":      "*/*",
 			"X-IG-App-ID": instagramAppID,
 		},
-		// oEmbed's failure body carries Instagram's own reason, so any status is
-		// worth reading; only transport failures are errors here.
-		interpret: func(int, []byte) *AppError { return nil },
-	})
+		// oEmbed's JSON failure body carries Instagram's own reason for
+		// oembedVerdict; HTML pages, throttling and server errors are classified here.
+		interpret: func(status int, raw []byte) *AppError {
+			if raw == nil || status == http.StatusTooManyRequests || status >= 500 {
+				return instagramJSON(status, raw)
+			}
+			return nil
+		},
+	}
+}
+
+func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
+	status, body, err := a.fetchViaProxy(ctx, oembedSpec(shortcode))
 	return oembedOutcome{status: status, body: body, ok: err == nil}
 }
 
@@ -416,9 +476,14 @@ func oembedVerdict(o oembedOutcome, shortcode string, baseErr AppError) (Post, *
 	}
 	msg := root.Get("message").String()
 	if msg == "geoblock_required" {
-		msg = errorCodeGeoBlocked
-		baseErr.Code = errorCodeGeoBlocked
-		baseErr.Status = 451
+		// Every gate kind gets this message; only gating type 2 is regional. Either
+		// way it is Instagram's verdict on the post, so it caches like one.
+		baseErr.Code, baseErr.Status = errorCodeRestricted, http.StatusForbidden
+		if root.Get("gating_type_thrift").Int() == 2 {
+			baseErr.Code, baseErr.Status = errorCodeGeoBlocked, http.StatusUnavailableForLegalReasons
+		}
+		msg = baseErr.Code
+		baseErr.Ephemeral, baseErr.Final = false, false
 	}
 	if title := root.Get("title").String(); msg != "" && title != "" {
 		baseErr.CardCode, baseErr.CardTitle, baseErr.CardDesc = msg, title, root.Get("description").String()

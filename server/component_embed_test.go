@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -427,8 +426,11 @@ func TestComponentEmbedStatsHeaderAndBrandFooter(t *testing.T) {
 					for _, child := range children[max(len(children)-3, 0):] {
 						tail = append(tail, child.(map[string]any))
 					}
+					if len(tail) != 3 {
+						t.Fatalf("support footer needs three trailing components: %v", tail)
+					}
 					row, _ := tail[2]["components"].([]any)
-					if len(tail) != 3 || tail[0]["content"] != wantBrand || tail[1]["type"] != float64(14) || tail[2]["type"] != float64(1) || len(row) != 2 ||
+					if tail[0]["content"] != wantBrand || tail[1]["type"] != float64(14) || tail[2]["type"] != float64(1) || len(row) != 2 ||
 						row[0].(map[string]any)["label"] != "📷 Instagram" || row[1].(map[string]any)["label"] != "☕ Support me" {
 						t.Errorf("support footer must be brand %q, a separator, and one row with both buttons: %v", wantBrand, tail)
 					}
@@ -503,7 +505,11 @@ func TestComponentEmbedSafeJSONAndByteBudget(t *testing.T) {
 	post = componentTestPost()
 	document = a.buildEmbedHTML("https://oginstagram.com/"+strings.Repeat("x", 600), post, "p", 0, false, false, discordComponents)
 	payload = componentPayload(t, document)
-	if items := componentsOfType(payload, 12)[0]["items"].([]any); len(items) == 0 || len(items) >= len(post.Attachments) {
+	galleries := componentsOfType(payload, 12)
+	if len(galleries) != 1 {
+		t.Fatalf("long signed URLs must keep one media gallery: %v", payload)
+	}
+	if items := galleries[0]["items"].([]any); len(items) == 0 || len(items) >= len(post.Attachments) {
 		t.Errorf("long signed URLs should reduce media count to fit the wire limit: %d", len(items))
 	}
 }
@@ -598,6 +604,9 @@ func TestComponentEmbedKeepsCaptionThatExactlyFits(t *testing.T) {
 	if len(body) != 3000 {
 		t.Errorf("full caption should exactly fill the wire budget, got %d bytes", len(body))
 	}
+	if long, _ := wire(strings.Repeat("x", 6000)); len(long) <= 3000-16 {
+		t.Errorf("a cut caption should nearly fill the wire budget, got %d bytes", len(long))
+	}
 	for _, display := range componentsOfType(payload, 10) {
 		if display["content"] == caption {
 			return
@@ -668,17 +677,18 @@ func TestGatewayComponentEmbedNegotiationAndDirectRoutes(t *testing.T) {
 	g.app.posts.storeLocal("GONE12", &cacheEntry[Post]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: expiry})
 	for _, path := range []string{"/p/ABC123", "/alice", "/stories/alice/123"} {
 		for _, tc := range []struct {
-			ua, requestID, header string
-			component, support    bool
+			ua, query, requestID, header string
+			component, support           bool
 		}{
-			{"Discordbot/2.0", "2", "component", true, false},
-			{"Discordbot/2.0", "15", "component", true, true},
-			{"Discordbot/2.0", "0", "mastodon", false, false},
-			{"TelegramBot", "36", "", false, false},
-			{"OGInstagramPreviewBot/1.0", "36", "", false, false},
-			{"", "36", "", false, false},
+			{"Discordbot/2.0", "?e=c", "", "component", true, false},
+			{"Discordbot/2.0", "?e=s", "", "component", true, true},
+			// Ray ID "0" hashes to the legacy arm.
+			{"Discordbot/2.0", "", "0", "mastodon", false, false},
+			{"TelegramBot", "", "36", "", false, false},
+			{"OGInstagramPreviewBot/1.0", "", "36", "", false, false},
+			{"", "", "36", "", false, false},
 		} {
-			r := publicRequest("GET", path)
+			r := publicRequest("GET", path+tc.query)
 			r.Header.Set("User-Agent", tc.ua)
 			r.Header.Set("Cf-Ray", tc.requestID)
 			w := httptest.NewRecorder()
@@ -697,10 +707,9 @@ func TestGatewayComponentEmbedNegotiationAndDirectRoutes(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{"/p/ABC123/2", "/p/ABC123?img_index=2"} {
+	for _, path := range []string{"/p/ABC123/2?e=c", "/p/ABC123?img_index=2&e=c"} {
 		r := publicRequest("GET", path)
 		r.Header.Set("User-Agent", "Discordbot")
-		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, "2"))
 		result := serveApp(t, g.app, r)
 		paths := componentMediaPaths(t, componentPayload(t, string(result.body)), g.app.offloadSigner)
 		if len(paths) != 1 || paths[0] != "/offload/ABC123/2" {
@@ -716,19 +725,17 @@ func TestGatewayComponentEmbedNegotiationAndDirectRoutes(t *testing.T) {
 			t.Errorf("direct route changed for %s: %+v", path, result)
 		}
 	}
-	r := publicRequest("GET", "/alice")
+	r := publicRequest("GET", "/alice?e=c")
 	r.Host = "d.oginstagram.com"
 	r.Header.Set("User-Agent", "Discordbot")
-	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, "2"))
 	componentPayload(t, string(serveApp(t, g.app, r).body))
 	r = publicRequest("GET", "/p/GONE12")
 	r.Header.Set("User-Agent", "Discordbot")
 	if result := serveApp(t, g.app, r); result.status != http.StatusOK || strings.Contains(string(result.body), `id="discord:component-embed"`) {
 		t.Error("error card should remain a legacy HTML embed")
 	}
-	r = publicRequest("HEAD", "/p/ABC123")
+	r = publicRequest("HEAD", "/p/ABC123?e=c")
 	r.Header.Set("User-Agent", "Discordbot")
-	r.Header.Set("Cf-Ray", "36")
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || w.Body.Len() != 0 || w.Header().Get("X-OGInstagram-Embed") != "component" || w.Header().Get("Cache-Control") != "no-store" {

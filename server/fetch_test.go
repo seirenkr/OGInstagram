@@ -135,6 +135,24 @@ func TestStagedFetch(t *testing.T) {
 	if err == nil || err.Code != errorCodeConnection {
 		t.Fatalf("single source error = %v", err)
 	}
+
+	v, _, err = stagedFetch(ctx, stagedSource[string]{fetch: func(context.Context) (string, *AppError) { panic("boom") }},
+		stagedSource[string]{after: time.Second, fetch: str("b", nil)})
+	if v != "b" || err != nil {
+		t.Fatalf("panicking source should fail like any other: %q %v", v, err)
+	}
+}
+
+// proxyOnce sends spec through a fresh one-session pool and reports whether
+// that session was rotated into a cooldown.
+func proxyOnce(spec fetchSpec, rt roundTripFunc, timeout time.Duration) (out string, err *AppError, s *Session, rotated bool) {
+	client := &http.Client{Transport: rt}
+	s = &Session{client: client}
+	a := &App{pool: &SessionPool{sessions: []*Session{s}}}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, out, err = a.fetchViaProxy(ctx, spec)
+	return out, err, s, s.getClient() != client && s.cooldownUntil.After(time.Now())
 }
 
 func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
@@ -143,38 +161,115 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 			return mediaTestResponse(r, status, nil, []byte(body)), nil
 		}
 	}
+	hang := func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() }
+	htmlPage := func(r *http.Request) (*http.Response, error) {
+		return mediaTestResponse(r, 404, http.Header{"Content-Type": {"text/html"}}, []byte("<html>")), nil
+	}
+	synctest.Test(t, func(t *testing.T) {
+		for _, tt := range []struct {
+			name      string
+			interpret func(int, []byte) *AppError
+			rt        roundTripFunc
+			code      string
+			rotated   bool
+			permanent bool
+		}{
+			{"429", instagramJSON, respond(429, "{}"), errorCodeRateLimited, true, false},
+			{"refused", instagramJSON, func(*http.Request) (*http.Response, error) { return nil, errors.New("refused") }, errorCodeConnection, true, false},
+			{"hung", instagramJSON, hang, errorCodeConnection, true, false},
+			{"short deadline", instagramJSON, hang, errorCodeConnection, false, false},
+			{"ok", instagramJSON, respond(200, "{}"), "", false, false},
+			{"login wall", instagramJSON, respond(200, "<!DOCTYPE html><html>"), errorCodeLoginRequired, true, false},
+			{"require_login", instagramJSON, respond(200, `{"require_login":true}`), errorCodeLoginRequired, true, false},
+			{"caption require_login", instagramJSON, respond(200, `{"caption":"how to fix require_login"}`), "", false, false},
+			{"bad json", instagramJSON, respond(200, "{"), errorCodeJSONDecode, true, false},
+			{"status fail", instagramJSON, respond(200, `{"status":"fail"}`), errorCodeGraphQL, false, false},
+			{"400", instagramJSON, respond(400, `{"status":"fail"}`), errorCodeBadRequest, false, false},
+			{"401", instagramJSON, respond(401, `{"message":"Please wait a few minutes"}`), errorCodeUnauthorized, true, false},
+			{"404", instagramJSON, respond(404, "{}"), errorCodeNotFound, false, true},
+			{"graphql throttle", graphQLJSON, respond(200, `{"data":null,"errors":[{"code":1675004,"message":"x"}]}`), errorCodeRateLimited, true, false},
+			{"graphql 400", graphQLJSON, respond(400, `{"status":"fail"}`), errorCodeGraphQL, false, false},
+			{"graphql html 404", graphQLJSON, htmlPage, errorCodeGraphQL, false, false},
+		} {
+			timeout := 5 * time.Second
+			if tt.name == "short deadline" {
+				timeout = 2 * time.Second
+			}
+			_, err, s, rotated := proxyOnce(fetchSpec{method: "GET", url: "https://www.instagram.com/x", expectJSON: true, interpret: tt.interpret}, tt.rt, timeout)
+			code := ""
+			if err != nil {
+				code = err.Code
+			}
+			if code != tt.code || rotated != tt.rotated || (code != "" && isTransient(code) == tt.permanent) || (tt.code == "" && s.rttAt.IsZero()) || s.pending != 0 {
+				t.Errorf("%s: code=%q rotated=%v measured=%v pending=%d, want %q rotated=%v permanent=%v", tt.name, code, rotated, !s.rttAt.IsZero(), s.pending, tt.code, tt.rotated, tt.permanent)
+			}
+		}
+	})
+}
+
+func TestOembedHTMLErrorPageClassification(t *testing.T) {
+	page := func(status int, contentType, body string) roundTripFunc {
+		return func(r *http.Request) (*http.Response, error) {
+			return mediaTestResponse(r, status, http.Header{"Content-Type": {contentType}}, []byte(body)), nil
+		}
+	}
+	const gated = `{"status":"fail","message":"geoblock_required","gating_type_thrift":3}`
 	for _, tt := range []struct {
 		name    string
 		rt      roundTripFunc
 		code    string
 		rotated bool
 	}{
-		{"429", respond(429, "{}"), errorCodeRateLimited, true},
-		{"refused", func(*http.Request) (*http.Response, error) { return nil, errors.New("refused") }, errorCodeConnection, true},
-		{"deadline", func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() }, errorCodeConnection, true},
-		{"budget", func(*http.Request) (*http.Response, error) {
-			return nil, &proxyBudgetError{code: errorCodeBudgetExhausted}
-		}, errorCodeBudgetExhausted, false},
-		{"ok", respond(200, "{}"), "", false},
+		{"html 404", page(404, "text/html", "<html>"), errorCodeNotFound, false},
+		{"html 429", page(429, "text/html", "<html>"), errorCodeRateLimited, true},
+		{"json 429", page(429, "application/json", "{}"), errorCodeRateLimited, true},
+		{"json 500", page(500, "application/json", "{}"), errorCodeUpstream, true},
+		{"json 400", page(400, "application/json", gated), "", false},
 	} {
-		client := &http.Client{Transport: tt.rt}
-		s := &Session{client: client}
-		a := &App{pool: &SessionPool{sessions: []*Session{s}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}}
-		timeout := 5 * time.Second
-		if tt.name == "deadline" {
-			timeout = 50 * time.Millisecond
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		_, _, err := a.fetchViaProxy(ctx, fetchSpec{method: "GET", url: "https://www.instagram.com/x", interpret: instagramJSON})
-		cancel()
+		out, err, _, rotated := proxyOnce(oembedSpec("x"), tt.rt, 5*time.Second)
 		code := ""
 		if err != nil {
 			code = err.Code
 		}
-		rotated := s.getClient() != client && s.cooldownUntil.After(time.Now())
-		if code != tt.code || rotated != tt.rotated || (tt.code == "" && s.rttAt.IsZero()) || s.pending != 0 {
-			t.Errorf("%s: code=%q rotated=%v measured=%v pending=%d, want %q rotated=%v", tt.name, code, rotated, !s.rttAt.IsZero(), s.pending, tt.code, tt.rotated)
+		if code != tt.code || rotated != tt.rotated || (code == "" && out != gated) {
+			t.Errorf("%s: code=%q rotated=%v body=%q, want %q rotated=%v", tt.name, code, rotated, out, tt.code, tt.rotated)
 		}
+	}
+}
+
+func TestOembedVerdictGating(t *testing.T) {
+	for _, tt := range []struct {
+		gating string
+		status int
+		code   string
+	}{
+		{`,"gating_type_thrift":2`, 451, errorCodeGeoBlocked},
+		{`,"gating_type_thrift":3`, 403, errorCodeRestricted},
+		{`,"gating_type_thrift":12`, 403, errorCodeRestricted},
+		{"", 403, errorCodeRestricted},
+	} {
+		body := `{"status":"fail","message":"geoblock_required","title":"Restricted Post","description":"d"` + tt.gating + `}`
+		base := *ephemeralErr(http.StatusGatewayTimeout, errorCodeConnection, "deadline")
+		base.Final = true
+		_, err := oembedVerdict(oembedOutcome{status: 400, body: body, ok: true}, "x", base)
+		if err.Status != tt.status || err.Code != tt.code || err.CardCode != tt.code || isTransient(err.Code) ||
+			err.Ephemeral || err.Final || err.CardTitle != "Restricted Post" {
+			t.Errorf("%q: %+v", tt.gating, err)
+		}
+	}
+}
+
+func TestFetchRequestCountsWireBytes(t *testing.T) {
+	wire := compressedResponse(t, "gzip", []byte(`{"data":{}}`))
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return mediaTestResponse(r, 200, http.Header{"Content-Encoding": {"gzip"}}, wire), nil
+	})}
+	before := outboundCounter("wire_test").Load()
+	if _, _, err := fetchRequest(context.Background(), client, fetchSpec{operation: "wire_test", method: http.MethodGet, url: "https://example.com/", interpret: statusOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if got := outboundCounter("wire_test").Load() - before; got != int64(len(wire)) {
+		t.Fatalf("counted %d bytes, want the %d compressed bytes", got, len(wire))
 	}
 }
 
@@ -183,105 +278,27 @@ func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
 		causedErr(502, errorCodeConnection, "boom", errors.New("boom")), false)
 }
 
-func TestHelperCaptchaCooldownPreservesInstagramAndResumes(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		helperCalls, instagramCalls := 0, 0
-		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			status := http.StatusOK
-			if req.URL.Host == "helper.example" {
-				helperCalls++
-				if helperCalls == 1 {
-					status = http.StatusUnprocessableEntity
-				}
-			} else {
-				instagramCalls++
-			}
-			return mediaTestResponse(req, status, nil, []byte(`{}`)), nil
-		})}
-		pool := newTestPool("shared")
-		s := pool.sessions[0]
-		s.client = client
-		a := &App{pool: pool}
-		helper := fetchSpec{method: http.MethodPost, url: "https://helper.example/convert", interpret: func(status int, raw []byte) *AppError {
-			if status == http.StatusUnprocessableEntity {
-				return igErr(http.StatusBadGateway, errorCodeCaptchaRequired, "verification required")
-			}
-			return statusOnly(status, raw)
-		}}
-		_, _, err := a.fetchViaProxy(context.Background(), helper)
-		if err == nil || err.Code != errorCodeCaptchaRequired || helperCalls != 1 {
-			t.Fatalf("initial challenge = %v, helper calls = %d", err, helperCalls)
-		}
-		if s.getClient() != client || !s.cooldownUntil.IsZero() || s.pending != 0 ||
-			!s.helperCooldownUntil.Equal(time.Now().Add(helperCaptchaCooldown)) {
-			t.Fatal("challenge should pause only helper requests on the same connection")
-		}
-		assertPaused := func() {
-			t.Helper()
-			status, _, err := a.fetchViaProxy(context.Background(), helper)
-			if status != 0 || err == nil || err.Status != http.StatusServiceUnavailable ||
-				err.Code != errorCodeCaptchaRequired || !err.Ephemeral || helperCalls != 1 || s.pending != 0 {
-				t.Fatalf("paused helper sent a request or returned the wrong error: status=%d err=%v calls=%d", status, err, helperCalls)
-			}
-		}
-		assertPaused()
-		_, _, err = a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: instagramGraphQLOrigin + "/graphql/query", interpret: statusOnly})
-		if err != nil || instagramCalls != 1 || s.getClient() != client {
-			t.Fatalf("Instagram stopped using the shared connection: err=%v calls=%d", err, instagramCalls)
-		}
-		time.Sleep(helperCaptchaCooldown - time.Nanosecond)
-		assertPaused()
-		time.Sleep(time.Nanosecond)
-		_, _, err = a.fetchViaProxy(context.Background(), helper)
-		if err != nil || helperCalls != 2 {
-			t.Fatalf("helper did not resume after cooldown: err=%v calls=%d", err, helperCalls)
-		}
-	})
-}
-
-func TestHelperCaptchaCooldownUsesUnaffectedSession(t *testing.T) {
-	pool := newTestPool("challenged", "ready")
-	pool.sessions[0].helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
-	pool.sessions[0].client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("helper used a challenged session")
-		return nil, nil
-	})}
-	calls := 0
-	pool.sessions[1].client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		return mediaTestResponse(req, http.StatusOK, nil, []byte(`{}`)), nil
-	})}
-	a := &App{pool: pool}
-	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: "https://helper.example/convert", interpret: statusOnly})
-	if err != nil || calls != 1 {
-		t.Fatalf("unaffected helper session was unavailable: err=%v calls=%d", err, calls)
-	}
-}
-
-func TestHelperCaptchaFromOldConnectionDoesNotPauseReplacement(t *testing.T) {
+func TestLateFailureFromRetiredClientSparesReplacement(t *testing.T) {
 	pool := newTestPool("shared")
 	s := pool.sessions[0]
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		pool.rotate(s)
-		return mediaTestResponse(req, http.StatusUnprocessableEntity, nil, []byte(`{}`)), nil
+	replacement := &http.Client{}
+	measured := time.Now()
+	s.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		s.mu.Lock() // a concurrent failure already rotated the slot
+		s.client, s.rttNs, s.rttAt = replacement, 1, measured
+		s.mu.Unlock()
+		return mediaTestResponse(req, http.StatusTooManyRequests, nil, []byte(`{}`)), nil
 	})}
-	s.client = client
 	a := &App{pool: pool}
-	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: "https://helper.example/convert", interpret: func(int, []byte) *AppError {
-		return igErr(http.StatusBadGateway, errorCodeCaptchaRequired, "verification required")
-	}})
-	if err == nil || err.Code != errorCodeCaptchaRequired || s.getClient() == client || !s.helperCooldownUntil.IsZero() {
-		t.Fatalf("late challenge paused replacement: err=%v cooldown=%v", err, s.helperCooldownUntil)
-	}
-	s.helperCooldownUntil = time.Now().Add(helperCaptchaCooldown)
-	pool.rotate(s)
-	if !s.helperCooldownUntil.IsZero() {
-		t.Fatal("rotation did not clear the previous IP's helper cooldown")
+	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: instagramGraphQLOrigin + "/graphql/query", interpret: instagramJSON})
+	if err == nil || err.Code != errorCodeRateLimited || s.getClient() != replacement || !s.cooldownUntil.IsZero() ||
+		!s.rttAt.Equal(measured) || s.pending != 0 {
+		t.Fatalf("late failure touched the replacement: err=%v cooldown=%v rttAt=%v pending=%d", err, s.cooldownUntil, s.rttAt, s.pending)
 	}
 }
 
 func newTestPool(names ...string) *SessionPool {
-	p := &SessionPool{budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 30}
+	p := &SessionPool{}
 	for _, n := range names {
 		p.sessions = append(p.sessions, &Session{name: n})
 	}
@@ -294,10 +311,10 @@ func TestPickAvoidsHungSession(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3")
 	counts := map[string]int{}
 	for range 30 {
-		s, _ := p.pick(context.Background(), false)
+		s := p.pick(false)
 		counts[s.name]++
 		if s.name != "us-3" {
-			p.done(s, 300*time.Millisecond, true)
+			p.done(s, nil, 300*time.Millisecond, true)
 		}
 	}
 	if counts["us-3"] > 3 {
@@ -309,14 +326,44 @@ func TestPickSpreadsLoadAcrossHealthySessions(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3", "us-4")
 	counts := map[string]int{}
 	for range 400 {
-		s, _ := p.pick(context.Background(), false)
+		s := p.pick(false)
 		counts[s.name]++
-		p.done(s, 300*time.Millisecond, true)
+		p.done(s, nil, 300*time.Millisecond, true)
 	}
 	for _, s := range p.sessions {
 		if counts[s.name] < 40 {
 			t.Fatalf("equal sessions should share traffic, got %v", counts)
 		}
+	}
+}
+
+func TestPickKeepsWWWOnFirstSessions(t *testing.T) {
+	p := newTestPool("us-1", "us-2", "us-3", "us-4", "us-5")
+	for range 50 {
+		s := p.pick(true)
+		p.done(s, nil, 300*time.Millisecond, true)
+		if s.name == "us-4" || s.name == "us-5" {
+			t.Fatalf("www request picked %s", s.name)
+		}
+	}
+	for _, s := range p.sessions[:wwwSessions] {
+		s.cooldownUntil = time.Now().Add(time.Minute)
+	}
+	if s := p.pick(true); s == nil || (s.name != "us-4" && s.name != "us-5") {
+		t.Fatalf("www did not fall back to the remaining sessions: %v", s)
+	}
+}
+
+func TestPickHonorsCooldown(t *testing.T) {
+	p := newTestPool("us-1")
+	s := p.sessions[0]
+	s.cooldownUntil = time.Now().Add(time.Minute)
+	if got := p.pick(false); got != nil {
+		t.Fatalf("pick during cooldown = %v, want none", got)
+	}
+	s.cooldownUntil = time.Now().Add(-time.Second)
+	if got := p.pick(false); got != s {
+		t.Fatalf("pick after cooldown = %v, want the session", got)
 	}
 }
 
@@ -326,14 +373,14 @@ func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
 		fast, slow := p.sessions[0], p.sessions[1]
 		for _, s := range []*Session{fast, slow} {
 			s.pending++
-			p.done(s, 300*time.Millisecond, true)
+			p.done(s, nil, 300*time.Millisecond, true)
 		}
 		slow.pending++
-		p.done(slow, 10*time.Second, true) // one peak replaces the estimate at once
+		p.done(slow, nil, 10*time.Second, true) // one peak replaces the estimate at once
 		picks := func() (n int) {
 			for range 50 {
-				s, _ := p.pick(context.Background(), false)
-				p.done(s, 0, false)
+				s := p.pick(false)
+				p.done(s, nil, 0, false)
 				if s == slow {
 					n++
 				}
@@ -347,7 +394,7 @@ func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
 		// so after a while the slow one is worth retrying.
 		time.Sleep(time.Minute)
 		fast.pending++
-		p.done(fast, 300*time.Millisecond, true)
+		p.done(fast, nil, 300*time.Millisecond, true)
 		if n := picks(); n == 0 {
 			t.Fatal("a decayed peak should let the slow session be retried")
 		}

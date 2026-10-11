@@ -2,7 +2,6 @@ package main
 
 import (
 	"cmp"
-	"html"
 	"net/url"
 	"strconv"
 	"time"
@@ -86,9 +85,7 @@ func mastodonMediaObject(id, kind, mediaURL, previewURL string, width, height in
 func (a *App) mastodonMedia(baseURL, shortcode string, att Attachment, index int) map[string]any {
 	id := att.ID
 	if id == "" {
-		if pk := shortcodePK(shortcode); pk != nil {
-			id = pk.String()
-		}
+		id = strconv.Itoa(index)
 	}
 	return mastodonMediaObject(id, att.Kind,
 		a.offloadURL(baseURL, shortcode, index, false),
@@ -174,7 +171,7 @@ func (a *App) buildStoryMastodonStatus(baseURL string, story Story, gallery bool
 			story.Media.Width, story.Media.Height)})
 }
 
-func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
+func (a *App) buildMastodonProfileStatus(baseURL string, p Profile, gallery bool) []byte {
 	media := make([]any, 0, len(p.RecentMedia))
 	for i, m := range p.RecentMedia {
 		media = append(media, profileMastodonMedia(m, i, a.profileMediaOffloadURL(baseURL, p.Username, i)))
@@ -184,25 +181,30 @@ func (a *App) buildMastodonProfileStatus(baseURL string, p Profile) []byte {
 	if len(p.RecentMedia) > 0 && !p.RecentMedia[0].TakenAt.IsZero() {
 		created = p.RecentMedia[0].TakenAt
 	}
+	var note string
+	if !gallery {
+		note = captionParagraphHTML(p.Biography)
+	}
 	account := mastodonAccount(mastodonAccountData{
 		ID:             p.UserID,
 		Username:       p.Username,
 		FullName:       p.FullName,
 		Avatar:         a.profileAvatarURL(baseURL, p),
-		Note:           captionParagraphHTML(p.Biography),
+		Note:           note,
 		LastStatusAt:   created,
 		FollowersCount: p.FollowerCount,
 		FollowingCount: p.FollowingCount,
 		StatusesCount:  p.MediaCount,
 	})
 	return mastodonStatusJSON(
-		profileSnowcode(p.Username),
-		profileStatusURL(baseURL, p.Username),
+		profileStatusSnowcode(p.Username, gallery),
+		profileStatusURL(baseURL, p.Username, gallery),
 		baseURL+"/"+url.PathEscape(p.Username),
-		profileDigestContent(p), created, account, media)
+		profileDigestContent(p, gallery), created, account, media)
 }
 
 func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
+	selectedIndex := mediaIndexFor(post, mediaIndex)
 	selection := selectActivityAttachments(post, mediaIndex, specified)
 	media := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
@@ -217,9 +219,9 @@ func (a *App) buildMastodonStatus(baseURL string, post Post, postType string, me
 		LastStatusAt: post.CreatedAt,
 	})
 	return mastodonStatusJSON(
-		statusSnowcode(postType, post.Shortcode, mediaIndex, specified, gallery),
-		statusURL(baseURL, post.Username, postType, post.Shortcode, mediaIndex, specified, false),
+		statusSnowcode(postType, post.Shortcode, selectedIndex, specified, gallery),
+		statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery),
 		baseURL+"/"+normalizePostType(postType)+"/"+url.PathEscape(post.Shortcode),
-		statusContent("<p><b>"+html.EscapeString(withIndicator(selection.indicator, post.StatsLine))+"</b></p>", post.Caption, gallery),
+		postStatusContent(post, selection.indicator, gallery),
 		post.CreatedAt, account, media)
 }
