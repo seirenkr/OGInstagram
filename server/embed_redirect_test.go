@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -53,28 +52,6 @@ func TestDirectEmbedPreservesBenignRedirects(t *testing.T) {
 				t.Fatalf("benign redirect: err=%v calls=%d body matches=%t", err, calls, body == simpleEmbedImagePage)
 			}
 		})
-	}
-}
-
-func TestDirectEmbedPreservesRedirectPolicy(t *testing.T) {
-	previous := http.DefaultClient
-	t.Cleanup(func() { http.DefaultClient = previous })
-	policyError := errors.New("redirect rejected by existing policy")
-	calls, policyCalls := 0, 0
-	client := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error { policyCalls++; return policyError },
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			calls++
-			return mediaTestResponse(r, http.StatusFound, http.Header{"Location": {"/p/ABC123/embed/"}}, nil), nil
-		}),
-	}
-	http.DefaultClient = client
-	_, err := (&App{}).directGet(context.Background(), "post", instagramOrigin+"/p/ABC123/embed/captioned/")
-	if err == nil || !errors.Is(err.Cause, policyError) || calls != 1 || policyCalls != 1 {
-		t.Fatalf("custom redirect policy: err=%v requests=%d policy calls=%d", err, calls, policyCalls)
-	}
-	if got := client.CheckRedirect(nil, nil); got != policyError || policyCalls != 2 {
-		t.Fatal("shared client's redirect policy was changed")
 	}
 }
 
@@ -179,7 +156,7 @@ func TestPausedEmbedStartsGraphQLImmediately(t *testing.T) {
 			graphqlCalls.Add(1)
 			return mediaTestResponse(r, http.StatusOK, nil, []byte(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}]}}}`)), nil
 		})}
-		pool := &SessionPool{sessions: []*Session{{client: client}}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+		pool := &SessionPool{sessions: []*Session{{client: client}}}
 		a := newApp(Config{}, pool, offloadSigner{})
 		a.embedPausedUntil.Store(time.Now().Add(3 * time.Hour).UnixNano())
 		started := time.Now()

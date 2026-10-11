@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -14,8 +15,8 @@ import (
 )
 
 const (
-	maxCacheValueBytes      = 1_900_000
 	persistentLocalEntryCap = 2048
+	errorLocalEntryCap      = 8192
 
 	cacheSharedWorkTimeout   = 10 * time.Second
 	cacheEntryMemoryOverhead = 512
@@ -48,6 +49,10 @@ type cache[V any] struct {
 	entries   map[string]*cacheEntry[V]
 	order     []string
 	usedBytes int64
+	// Negative answers keep their own FIFO so they neither evict values nor
+	// lose their TTL to value churn.
+	errEntries map[string]*cacheEntry[V]
+	errOrder   []string
 
 	flightMu sync.Mutex
 	flight   map[string]*flightCall[V]
@@ -61,7 +66,7 @@ func newPersistentCache[V any](store *localStore, kind string, fetchSlots chan s
 	return &cache[V]{
 		maxEntries: persistentLocalEntryCap, maxBytes: maxLocalBytes, fetchSlots: fetchSlots,
 		store: store, storeKind: kind, workTimeout: cacheSharedWorkTimeout,
-		entries: map[string]*cacheEntry[V]{}, flight: map[string]*flightCall[V]{},
+		entries: map[string]*cacheEntry[V]{}, errEntries: map[string]*cacheEntry[V]{}, flight: map[string]*flightCall[V]{},
 	}
 }
 
@@ -77,6 +82,11 @@ func (c *cache[V]) get(ctx context.Context, key string, meta *fetchMeta, fetch f
 	c.flightMu.Lock()
 	call, exists := c.flight[key]
 	if !exists {
+		// A flight that ended since the check above stored its entry first.
+		if e, ok := c.localGet(key); ok {
+			c.flightMu.Unlock()
+			return e.value, e.err
+		}
 		call = &flightCall[V]{done: make(chan struct{})}
 		c.flight[key] = call
 		go c.runFlight(ctx, key, call, fetch)
@@ -114,12 +124,13 @@ func (c *cache[V]) runFlight(
 ) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(requestCtx), c.workTimeout)
 	defer cancel()
-	defer func() {
+	release := sync.OnceFunc(func() {
 		c.flightMu.Lock()
 		close(call.done)
 		delete(c.flight, key)
 		c.flightMu.Unlock()
-	}()
+	})
+	defer release()
 
 	if entry, ok := c.persistentGet(ctx, key); ok {
 		call.entry = entry
@@ -136,8 +147,14 @@ func (c *cache[V]) runFlight(
 		return
 	}
 
-	value, ttl, persist, err := func() (V, time.Duration, bool, *AppError) {
+	value, ttl, persist, err := func() (value V, ttl time.Duration, persist bool, err *AppError) {
 		defer func() { <-c.fetchSlots }()
+		defer func() {
+			if r := recover(); r != nil {
+				logger(ctx).ErrorContext(ctx, "cache fetch panicked", "cache_kind", c.storeKind, "panic", r, "stack", string(debug.Stack()))
+				err = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "upstream fetch failed")
+			}
+		}()
 		return fetch(ctx)
 	}()
 	if err != nil && ctx.Err() != nil {
@@ -156,7 +173,8 @@ func (c *cache[V]) runFlight(
 			return
 		}
 	} else {
-		cloned := jsonClone(*err)
+		cloned := *err
+		cloned.Cause = nil
 		err = &cloned
 		ttl = time.Duration(errorCacheSeconds(err.Code)) * time.Second
 	}
@@ -171,10 +189,16 @@ func (c *cache[V]) runFlight(
 	entry := &cacheEntry[V]{value: value, err: err, expiresAt: time.Now().Add(ttl)}
 	call.entry = entry
 	call.err = err
-	if c.store != nil && err == nil && persist {
-		c.persistentPut(ctx, key, entry)
-	}
 	c.storeLocal(key, entry)
+	release()
+	if c.store != nil && err == nil && persist {
+		// The fetch may have spent most of the shared deadline; the disk write gets its own.
+		// Waiters are already released: putAfterFlight only follows a flight
+		// that ended in an error, and errors are never persisted.
+		putCtx, cancelPut := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancelPut()
+		c.persistentPut(putCtx, key, entry)
+	}
 }
 
 // put stores a value fetched outside get, replacing any cached entry,
@@ -189,6 +213,22 @@ func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Durati
 		c.persistentPut(ctx, key, entry)
 	}
 	c.storeLocal(key, entry)
+}
+
+// putAfterFlight lets a running lookup of key store its verdict first, so that
+// verdict cannot replace value.
+func (c *cache[V]) putAfterFlight(ctx context.Context, key string, value V, ttl time.Duration, persist bool) {
+	c.flightMu.Lock()
+	call := c.flight[key]
+	c.flightMu.Unlock()
+	if call != nil {
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return
+		}
+	}
+	c.put(ctx, key, value, ttl, persist)
 }
 
 func cacheErrorIsUncacheable(err *AppError) bool {
@@ -239,18 +279,13 @@ func (c *cache[V]) logError(ctx context.Context, operation, errorType string, er
 	logger(ctx).WarnContext(ctx, "cache request failed", attrs...)
 }
 
-func (c *cache[V]) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries = map[string]*cacheEntry[V]{}
-	c.order = nil
-	c.usedBytes = 0
-}
-
 func (c *cache[V]) localGet(key string) (*cacheEntry[V], bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
+	if !ok {
+		entry, ok = c.errEntries[key]
+	}
 	if !ok {
 		return nil, false
 	}
@@ -262,30 +297,46 @@ func (c *cache[V]) localGet(key string) (*cacheEntry[V], bool) {
 }
 
 func (c *cache[V]) removeLocalLocked(key string, entry *cacheEntry[V]) {
-	delete(c.entries, key)
-	c.usedBytes = max(c.usedBytes-entry.size, 0)
-	if i := slices.Index(c.order, key); i >= 0 {
-		c.order = slices.Delete(c.order, i, i+1)
+	entries, order := c.entries, &c.order
+	if entry.err != nil {
+		entries, order = c.errEntries, &c.errOrder
+	} else {
+		c.usedBytes = max(c.usedBytes-entry.size, 0)
+	}
+	delete(entries, key)
+	if i := slices.Index(*order, key); i >= 0 {
+		*order = slices.Delete(*order, i, i+1)
 	}
 }
 
 func (c *cache[V]) storeLocal(key string, entry *cacheEntry[V]) {
-	size := cacheEntryMemorySize(key, entry)
-	if size <= 0 || size > c.maxBytes {
-		return
+	if entry.err == nil {
+		entry.size = cacheEntryMemorySize(key, entry)
+		if entry.size <= 0 || entry.size > c.maxBytes {
+			return
+		}
 	}
-	entry.size = size
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if old, exists := c.entries[key]; exists {
-		c.usedBytes -= old.size
-	} else {
-		key = strings.Clone(key)
-		c.order = append(c.order, key)
+	for _, old := range []*cacheEntry[V]{c.entries[key], c.errEntries[key]} {
+		if old != nil {
+			c.removeLocalLocked(key, old)
+		}
+	}
+	key = strings.Clone(key)
+	if entry.err != nil {
+		c.errEntries[key] = entry
+		c.errOrder = append(c.errOrder, key)
+		if len(c.errOrder) > errorLocalEntryCap {
+			delete(c.errEntries, c.errOrder[0])
+			c.errOrder = c.errOrder[1:]
+		}
+		return
 	}
 	c.entries[key] = entry
-	c.usedBytes += size
+	c.order = append(c.order, key)
+	c.usedBytes += entry.size
 
 	for (c.usedBytes > c.maxBytes || len(c.entries) > c.maxEntries) && len(c.order) > 0 {
 		oldest := c.order[0]
@@ -304,13 +355,16 @@ func validSourceModel[V any](key string) func(V, *AppError) (V, *AppError) {
 		if err == nil {
 			if _, ok := cloneAndValidateCacheValue(key, v); !ok {
 				var zero V
-				return zero, ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "upstream returned an invalid cache model")
+				return zero, igErr(http.StatusBadGateway, errorCodeUpstream, "upstream returned an invalid cache model")
 			}
 		}
 		return v, err
 	}
 }
 
+// ponytail: a cold fetch round-trips the model through JSON 4-6 times. jsonClone
+// must stay to break aliasing into upstream bodies; if CPU profiles ever show it,
+// validate a shallow copy in validSourceModel instead.
 func cloneAndValidateCacheValue[V any](key string, value V) (V, bool) {
 	value = jsonClone(value)
 	switch typed := any(value).(type) {
@@ -411,15 +465,12 @@ func validOptionalCachedURL(raw string) bool {
 
 func validCachedURL(raw string) bool {
 	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	return err == nil && trustedMediaURL(parsed)
 }
 
 func cacheEntryMemorySize[V any](key string, entry *cacheEntry[V]) int64 {
 	size := int64(cacheEntryMemoryOverhead) + int64(len(key))*2
 	if encoded, err := json.Marshal(entry.value); err == nil {
-		size += int64(len(encoded)) * 2
-	}
-	if encoded, err := json.Marshal(entry.err); entry.err != nil && err == nil {
 		size += int64(len(encoded)) * 2
 	}
 	return size

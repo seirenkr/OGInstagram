@@ -8,14 +8,11 @@ import (
 	"strings"
 )
 
-const (
-	maxSnowcodeDigits     = 256
-	maxSnowcodeMediaIndex = 100
-)
+const maxSnowcodeDigits = 256
 
 type snowcodePost struct {
 	Username   string
-	Shortcode  string
+	Shortcode  string // the story ID when Story is set
 	PostType   string
 	MediaIndex int
 	Specified  bool
@@ -24,7 +21,15 @@ type snowcodePost struct {
 }
 
 func profileSnowcode(username string) string {
-	return encodeSnowcodePayload(`"u":"` + username + `"`)
+	return profileStatusSnowcode(username, false)
+}
+
+func profileStatusSnowcode(username string, gallery bool) string {
+	payload := `"u":"` + username + `"`
+	if gallery {
+		payload += `,"g":1`
+	}
+	return encodeSnowcodePayload(payload)
 }
 
 func storyStatusSnowcode(username, id string, gallery bool) string {
@@ -61,7 +66,8 @@ func parseStatusSnowcode(code string) snowcodePost {
 		}
 		if u, isStr := data["u"].(string); isStr && u != "" {
 			if validUsername(u) {
-				return snowcodePost{Username: u}
+				g, _ := data["g"].(float64)
+				return snowcodePost{Username: u, Gallery: g == 1}
 			}
 			return snowcodePost{}
 		}
@@ -77,7 +83,7 @@ func parseStatusSnowcode(code string) snowcodePost {
 				p.PostType = normalizePostType(pt)
 			}
 			if n, isNum := data["n"].(float64); isNum {
-				if math.Trunc(n) != n || n < 1 || n > maxSnowcodeMediaIndex {
+				if math.Trunc(n) != n || n < 1 || n > maxCachedMediaItems {
 					return snowcodePost{}
 				}
 				idx := int(n) - 1
@@ -89,7 +95,7 @@ func parseStatusSnowcode(code string) snowcodePost {
 			return p
 		}
 	}
-	return snowcodePost{Shortcode: code, PostType: "p"}
+	return snowcodePost{}
 }
 
 func encodeSnowcodePayload(payload string) string {

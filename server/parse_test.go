@@ -46,7 +46,7 @@ func TestParseCarousel(t *testing.T) {
 }
 
 func TestParseNotFound(t *testing.T) {
-	_, err := parseInstagramPost(`{"data":{"xdt_shortcode_media":null}}`)
+	_, err := parseInstagramPost(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`)
 	if err == nil || err.Status != 404 {
 		t.Fatalf("want 404, got %v", err)
 	}
@@ -58,6 +58,7 @@ func TestParseGraphQLErrors(t *testing.T) {
 		{`{"data":null,"errors":[{"message":"Rate limited","code":1675004}]}`, errorCodeRateLimited},
 		{`{"data":null,"errors":[{"message":"Please wait a few minutes before you try again.","code":1}]}`, errorCodeRateLimited},
 		{`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`, errorCodeMediaNotFound},
+		{`{"data":{"xdt_shortcode_media":null}}`, errorCodeGraphQL},
 	} {
 		if _, err := parseInstagramPost(tc.body); err == nil || err.Code != tc.code {
 			t.Errorf("%s: got %v, want %s", tc.body, err, tc.code)
@@ -66,6 +67,40 @@ func TestParseGraphQLErrors(t *testing.T) {
 	// A GraphQL field_exception is not proof of absence: it must not be cached as permanent.
 	if !isTransient(errorCodeGraphQL) {
 		t.Fatal("graphql_error must stay transient")
+	}
+}
+
+func TestParseV1MissingMedia(t *testing.T) {
+	post, err := parseInstagramPost(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"V","media_type":2,"comment_count":3,` +
+		`"user":{"username":"u"},"image_versions2":{"candidates":[{"url":"https://cdn/cover.jpg"}]}}]}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := post.Attachments[0]; a.Kind != "image" || a.URL != "https://cdn/cover.jpg" || post.StatsLine != "💬 3" {
+		t.Fatalf("video without URL: %+v, stats %q", a, post.StatsLine)
+	}
+	imageless := strings.Replace(sampleCarousel, `"url":"https://cdn/img1.jpg"`, `"url":""`, 1)
+	if _, err := parseInstagramPost(imageless); err == nil || err.Code != errorCodeUpstream {
+		t.Fatalf("carousel child without image: got %v, want upstream error", err)
+	}
+}
+
+func TestParseProfileShapes(t *testing.T) {
+	for _, body := range []string{`{}`, `{"data":null}`, `{"graphql":{"user":{}}}`, `{"data":{"user":{"id":"1"}}}`} {
+		if _, err := parseProfile(body); err == nil || !isTransient(err.Code) {
+			t.Errorf("parseProfile(%s) = %v, want transient", body, err)
+		}
+	}
+	if _, err := parseEmbedProfile(wrapEmbed(`{"context":{"user_name":"nasa"}}`)); err == nil || !isTransient(err.Code) {
+		t.Errorf("embed profile without username = %v, want transient", err)
+	}
+	if _, err := parseProfile(`{"data":{"user":null}}`); err == nil || err.Code != errorCodeNotFound {
+		t.Errorf("user null = %v, want not_found", err)
+	}
+	p, err := parseProfile(`{"data":{"user":{"username":"u","edge_owner_to_timeline_media":{"edges":[{"node":{"id":"1",` +
+		`"thumbnail_src":"https://cdn/square.jpg","display_url":"https://cdn/full.jpg","dimensions":{"width":1080,"height":1350},"taken_at_timestamp":1790870385}}]}}}}`)
+	if err != nil || len(p.RecentMedia) != 1 || p.RecentMedia[0].Thumbnail != "https://cdn/full.jpg" || p.RecentMedia[0].TakenAt.Unix() != 1790870385 {
+		t.Fatalf("gallery = %+v, %v; want display_url", p.RecentMedia, err)
 	}
 }
 

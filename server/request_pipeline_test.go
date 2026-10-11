@@ -19,16 +19,20 @@ func TestPausedEmbedFailureIsCached(t *testing.T) {
 	previous := externalHelperPostImpl
 	t.Cleanup(func() { externalHelperPostImpl = previous })
 	var helpers atomic.Int32
-	externalHelperPostImpl = func(_ *App, _ context.Context, _ string) (Post, bool) { helpers.Add(1); return Post{}, false }
+	externalHelperPostImpl = func(_ *App, _ context.Context, _ string) (Post, *AppError) {
+		helpers.Add(1)
+		return Post{}, igErr(http.StatusBadGateway, errorCodeUpstream, "external helper post unparseable")
+	}
 	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if !strings.Contains(r.URL.Path, "get_ruling_for_content") {
-			t.Error("paused embed unexpectedly fetched")
-		}
-		return mediaTestResponse(r, 200, nil, []byte(`{"status":"ok"}`)), nil
+		t.Error("paused embed unexpectedly fetched")
+		return mediaTestResponse(r, http.StatusInternalServerError, nil, nil), nil
 	}))
 	synctest.Test(t, func(t *testing.T) {
 		var gql, oembed atomic.Int32
 		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+				return mediaTestResponse(r, 200, nil, []byte(`{"status":"ok"}`)), nil
+			}
 			if r.URL.Path == "/api/v1/oembed/" {
 				oembed.Add(1)
 				return mediaTestResponse(r, 200, nil, []byte(`{"status":"fail"}`)), nil
@@ -36,7 +40,7 @@ func TestPausedEmbedFailureIsCached(t *testing.T) {
 			gql.Add(1)
 			return mediaTestResponse(r, 200, nil, []byte(`{"data":null,"errors":[{"message":"field_exception","code":1675030}]}`)), nil
 		})}
-		pool := &SessionPool{sessions: []*Session{{client: client}}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+		pool := &SessionPool{sessions: []*Session{{client: client}}}
 		a := newApp(Config{}, pool, offloadSigner{})
 		a.embedPausedUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
 		for n := 0; n < 2; n++ {
@@ -60,33 +64,79 @@ func TestPausedEmbedFailureIsCached(t *testing.T) {
 	})
 }
 
-func TestSlowRulingRetainsOneHelperAndFillsCache(t *testing.T) {
+func TestOembedNotFoundIsPermanentOnlyAfterHelperAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ruling    int
+		helperErr *AppError
+		want      string
+	}{
+		{"helper answered", http.StatusUnauthorized, igErr(http.StatusNotFound, errorCodeUpstream, "external helper found no post"), errorCodeMediaNotFound},
+		{"ruling says it exists", http.StatusOK, igErr(http.StatusNotFound, errorCodeUpstream, "external helper found no post"), errorCodeGraphQL},
+		{"helper captcha", http.StatusUnauthorized, ephemeralErr(http.StatusBadGateway, errorCodeCaptchaRequired, "external helper paused: captcha"), errorCodeGraphQL},
+		{"helper outage", http.StatusUnauthorized, igErr(http.StatusServiceUnavailable, errorCodeUpstream, "Service Unavailable"), errorCodeGraphQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := externalHelperPostImpl
+			t.Cleanup(func() { externalHelperPostImpl = previous })
+			externalHelperPostImpl = func(*App, context.Context, string) (Post, *AppError) { return Post{}, tc.helperErr }
+			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				t.Error("paused embed unexpectedly fetched")
+				return mediaTestResponse(r, http.StatusInternalServerError, nil, nil), nil
+			}))
+			synctest.Test(t, func(t *testing.T) {
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+						return mediaTestResponse(r, tc.ruling, nil, []byte(`{"status":"ok"}`)), nil
+					}
+					if r.URL.Path == "/api/v1/oembed/" {
+						return mediaTestResponse(r, 404, nil, []byte(`{"message":"Media cannot be found","status":"fail"}`)), nil
+					}
+					return mediaTestResponse(r, 200, nil, []byte(`{"data":null,"errors":[{"message":"field_exception","code":1675030}]}`)), nil
+				})}
+				pool := &SessionPool{sessions: []*Session{{client: client}}}
+				a := newApp(Config{}, pool, offloadSigner{})
+				a.embedPausedUntil.Store(time.Now().Add(time.Minute).UnixNano())
+				if _, err := a.getPost(context.Background(), "ABC123", nil); err == nil || err.Code != tc.want {
+					t.Fatalf("getPost error = %#v, want %s", err, tc.want)
+				}
+			})
+		})
+	}
+}
+
+func TestLateFinalVerdictKeepsHelperAndFillsCache(t *testing.T) {
+	const graphQLDelay = externalHelperHedgeDelay + 100*time.Millisecond
 	previous := externalHelperPostImpl
 	t.Cleanup(func() { externalHelperPostImpl = previous })
 	var helpers atomic.Int32
-	externalHelperPostImpl = func(_ *App, ctx context.Context, key string) (Post, bool) {
+	externalHelperPostImpl = func(_ *App, ctx context.Context, key string) (Post, *AppError) {
 		helpers.Add(1)
 		select {
 		case <-time.After(1500 * time.Millisecond):
-			return Post{Shortcode: key, Username: "instagram", Attachments: []Attachment{{Kind: "image", URL: "https://scontent.cdninstagram.com/x.jpg"}}}, true
+			return Post{Shortcode: key, Username: "instagram", Attachments: []Attachment{{Kind: "image", URL: "https://scontent.cdninstagram.com/x.jpg"}}}, nil
 		case <-ctx.Done():
-			return Post{}, false
+			return Post{}, contextAppError(ctx)
 		}
 	}
 	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return mediaTestResponse(r, 404, nil, []byte(`{"status":"fail","message":"Media cannot be found"}`)), nil
+		t.Error("paused embed unexpectedly fetched")
+		return mediaTestResponse(r, http.StatusInternalServerError, nil, nil), nil
 	}))
 	synctest.Test(t, func(t *testing.T) {
 		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			time.Sleep(2100 * time.Millisecond)
+			if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+				return mediaTestResponse(r, 404, nil, []byte(`{"status":"fail","message":"Media cannot be found"}`)), nil
+			}
+			time.Sleep(graphQLDelay)
 			return mediaTestResponse(r, 200, nil, []byte(`{"data":null,"errors":[{"message":"field_exception","code":1675030}]}`)), nil
 		})}
-		pool := &SessionPool{sessions: []*Session{{client: client}}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+		pool := &SessionPool{sessions: []*Session{{client: client}}}
 		a := newApp(Config{}, pool, offloadSigner{})
 		a.embedPausedUntil.Store(time.Now().Add(time.Minute).UnixNano())
 		started := time.Now()
 		_, err := a.getPost(context.Background(), "ABC123", nil)
-		if err == nil || !err.Final || time.Since(started) != 2100*time.Millisecond {
+		if err == nil || !err.Final || time.Since(started) != graphQLDelay {
 			t.Fatal("missing verdict should return without waiting for helper")
 		}
 		time.Sleep(2 * time.Second)
@@ -99,20 +149,25 @@ func TestSlowRulingRetainsOneHelperAndFillsCache(t *testing.T) {
 }
 
 func TestHelperCancelledWhenGraphQLWins(t *testing.T) {
+	const graphQLDelay = externalHelperHedgeDelay + 100*time.Millisecond
 	previous := externalHelperPostImpl
 	t.Cleanup(func() { externalHelperPostImpl = previous })
 	helperCancelled := make(chan struct{})
-	externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, bool) {
+	externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, *AppError) {
 		<-ctx.Done()
 		close(helperCancelled)
-		return Post{}, false
+		return Post{}, contextAppError(ctx)
 	}
+	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Error("paused embed unexpectedly fetched")
+		return mediaTestResponse(r, http.StatusInternalServerError, nil, nil), nil
+	}))
 	synctest.Test(t, func(t *testing.T) {
 		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			time.Sleep(2100 * time.Millisecond)
-			return mediaTestResponse(r, 200, nil, []byte(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://cdn.example/image.jpg","media_type":1}]}}}`)), nil
+			time.Sleep(graphQLDelay)
+			return mediaTestResponse(r, 200, nil, []byte(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}]}}}`)), nil
 		})}
-		pool := &SessionPool{sessions: []*Session{{client: client}}, budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+		pool := &SessionPool{sessions: []*Session{{client: client}}}
 		a := newApp(Config{}, pool, offloadSigner{})
 		a.embedPausedUntil.Store(time.Now().Add(time.Minute).UnixNano())
 		if _, err := a.getPost(context.Background(), "ABC123", nil); err != nil {

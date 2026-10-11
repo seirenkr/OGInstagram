@@ -22,7 +22,6 @@ import (
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "check the local server readiness")
 	backup := flag.String("backup", "", "write SQLite backups into a new destination directory")
-	exhaustBudget := flag.Bool("exhaust-budget", false, "exhaust today's proxy budget after restoring a backup")
 	flag.Parse()
 	cfg := configFromEnv()
 	if *healthcheck {
@@ -44,23 +43,19 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
-	store, err := openLocalStore(cfg.DataDir, cfg.BudgetStartDate)
+	store, err := openLocalStore(cfg.DataDir)
 	if err != nil {
 		slog.Error("cannot open local storage", "error", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 	cfg.Store = store
-	if *backup != "" || *exhaustBudget {
+	if *backup != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		if *exhaustBudget {
-			err = store.ExhaustBudget(ctx)
-		} else {
-			err = store.Backup(ctx, *backup)
-			if err == nil {
-				err = backupOffloadKeys(cfg.DataDir, *backup)
-			}
+		err = store.Backup(ctx, *backup)
+		if err == nil {
+			err = backupOffloadKeys(cfg.DataDir, *backup)
 		}
 		if err != nil {
 			slog.Error("storage maintenance failed", "error", err)
@@ -73,25 +68,24 @@ func main() {
 		slog.Error("frontend assets unavailable", "error", err)
 		os.Exit(1)
 	}
-	keys := cfg.OffloadSigningKeys
+	keys, keySource := cfg.OffloadSigningKeys, "env"
 	if keys == "" {
+		keySource = "file"
 		if keys, err = loadOrCreateOffloadKeys(cfg.DataDir); err != nil {
-			slog.Error("cannot create offload signing keys", "error", err)
+			slog.Error("cannot load offload signing keys", "source", keySource, "error", err)
 			os.Exit(1)
 		}
 	}
 	signer, err := parseOffloadSigner(keys)
 	if err != nil {
-		slog.Error("invalid OFFLOAD_SIGNING_KEYS", "error", err)
+		slog.Error("invalid offload signing keys", "source", keySource, "error", err)
 		os.Exit(1)
 	}
 	app := newApp(cfg, newSessionPool(cfg), signer)
-	if app.helper != nil {
-		defer app.helper.close()
-	}
 
-	slog.Info("server started", "service", serviceName, "version", cfg.Version,
-		"proxies", len(app.pool.sessions), "port", cfg.Port)
+	slog.Info("server starting", "service", serviceName, "version", cfg.Version,
+		"proxies", len(app.pool.sessions), "port", cfg.Port,
+		"offload_keys", keySource, "offload_kid", signer.active)
 
 	srv := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
@@ -106,6 +100,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+	// stop restores default handling, so a second signal ends a stuck drain.
+	go func() { <-ctx.Done(); stop() }()
+	if app.helper != nil {
+		// Close Chrome at the signal, not after the drain: the other slot is starting.
+		context.AfterFunc(ctx, app.helper.close)
+		defer app.helper.close()
+	}
 	if err := serveHTTP(ctx, srv); err != nil {
 		slog.Error("server exited", "error", err)
 		os.Exit(1)
@@ -192,6 +193,8 @@ func tagFetch(r resp, meta *fetchMeta) resp {
 
 type requestIDKey struct{}
 
+type publicOriginKey struct{}
+
 func logger(ctx context.Context) *slog.Logger {
 	if id, _ := ctx.Value(requestIDKey{}).(string); id != "" {
 		return slog.Default().With("request_id", id)
@@ -239,20 +242,20 @@ func (a *App) handleActivity(req *http.Request, code string) resp {
 	if sp.Story {
 		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
 		if err != nil {
-			return textResp(err.Status, err.PublicMessage)
+			return statusErrorResp(err, false)
 		}
 		return activityJSONResp(200, a.buildStoryActivityStatus(baseURL, story, sp.Gallery))
 	}
 	if sp.Username != "" {
 		p, err := a.getProfile(req.Context(), sp.Username, nil)
 		if err != nil {
-			return textResp(err.Status, err.PublicMessage)
+			return statusErrorResp(err, false)
 		}
-		return activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p))
+		return activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p, sp.Gallery))
 	}
 	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
 	if err != nil {
-		return textResp(err.Status, err.PublicMessage)
+		return statusErrorResp(err, false)
 	}
 	body := a.buildActivityStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
 	return activityJSONResp(200, body)
@@ -264,27 +267,41 @@ func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
 	if sp.Story {
 		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
 		if err != nil {
-			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
+			return statusErrorResp(err, true)
 		}
 		return jsonResp(200, a.buildStoryMastodonStatus(baseURL, story, sp.Gallery))
 	}
 	if sp.Username != "" {
 		p, err := a.getProfile(req.Context(), sp.Username, nil)
 		if err != nil {
-			return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
+			return statusErrorResp(err, true)
 		}
-		return jsonResp(200, a.buildMastodonProfileStatus(baseURL, p))
-	}
-
-	if !validShortcode(sp.Shortcode) {
-		return jsonResp(404, jsonBytes(map[string]any{"error": "Record not found"}))
+		return jsonResp(200, a.buildMastodonProfileStatus(baseURL, p, sp.Gallery))
 	}
 	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
 	if err != nil {
-		return jsonResp(err.Status, jsonBytes(map[string]any{"error": err.PublicMessage}))
+		return statusErrorResp(err, true)
 	}
 	body := a.buildMastodonStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
 	return jsonResp(200, body)
+}
+
+// Federated clients get a fixed verdict, never upstream statuses or helper messages.
+func statusErrorResp(err *AppError, mastodon bool) resp {
+	status, text := http.StatusNotFound, "Record not found"
+	if isTransient(err.Code) {
+		status, text = http.StatusServiceUnavailable, "Temporarily unavailable"
+	} else if err.Status == http.StatusForbidden || err.Status == http.StatusUnavailableForLegalReasons {
+		status = err.Status
+	}
+	r := textResp(status, text)
+	if mastodon {
+		r = jsonResp(status, jsonBytes(map[string]any{"error": text}))
+	}
+	if status == http.StatusServiceUnavailable {
+		r.headers["Retry-After"] = strconv.Itoa(transientErrorCacheSeconds)
+	}
+	return r
 }
 
 func (a *App) handleProfile(req *http.Request, username string, gallery bool) resp {
@@ -351,7 +368,7 @@ func (a *App) handleOffload(req *http.Request, shortcode string, index int, avat
 	if !avatar {
 		media := post.Attachments[mediaIndexFor(post, index)]
 		target = media.URL
-		if req.URL.Query().Has("thumbnail") && media.Thumbnail != "" {
+		if req.URL.Query().Has("thumbnail") {
 			target = media.Thumbnail
 		}
 	}
@@ -381,9 +398,12 @@ func (a *App) handleProfileOffload(req *http.Request, username string, n int) re
 	return tagFetch(redirectResp(target, 302), meta)
 }
 
-// The gateway has already matched Host against ALLOWED_HOSTS (or development
-// localhost), so it is the request's public origin.
+// Gateway.ServeHTTP stores the origin it validated; the host rule below is
+// reached only by handler tests that bypass the gateway.
 func (a *App) publicBaseURL(req *http.Request) string {
+	if origin, _ := req.Context().Value(publicOriginKey{}).(string); origin != "" {
+		return origin
+	}
 	host := req.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h

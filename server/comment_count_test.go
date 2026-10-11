@@ -6,9 +6,10 @@ import (
 )
 
 func TestSimpleCommentCount(t *testing.T) {
-	for page, want := range map[string]int{
-		"":                        0,
-		"1 comment":               0,
+	for comments, want := range map[string]int{
+		"":                        -1,
+		"Add a comment...":        -1,
+		"1 comment":               1,
 		"View all 1,234 comments": 1234,
 		"12 \t\r\n\fcomments":     12,
 		"12comments 34 comments":  34,
@@ -17,12 +18,14 @@ func TestSimpleCommentCount(t *testing.T) {
 		"0 comments 99 comments":  0,
 		"２ comments 5 comments":   5,
 	} {
+		page := `<div class="Caption">500 comments<div class="CaptionComments">` + comments
 		if got := simpleCommentCount(page); got != want {
 			t.Errorf("simpleCommentCount(%q) = %d, want %d", page, got, want)
 		}
 	}
-	post, err := parseEmbedPost(strings.ReplaceAll(simpleEmbedImagePage, "19 comments", "1,234 comments"))
-	if err != nil || post.StatsLine != "❤️ 4,809  💬 1,234" {
+	page := strings.NewReplacer("4,809 likes", "1 like", "line2", "line2 500 comments", "19 comments", "1 comment").Replace(simpleEmbedImagePage)
+	post, err := parseEmbedPost(page)
+	if err != nil || post.StatsLine != "❤️ 1  💬 1" {
 		t.Fatalf("embed stats=%q, err=%v", post.StatsLine, err)
 	}
 }

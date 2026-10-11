@@ -1,12 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,19 +13,22 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const maxGatewayInFlight = 256
+const (
+	maxGatewayInFlight = 256
+	// Far above one hour of genuine limited-bot IPs; a flood of fresh addresses
+	// is refused instead of growing the map without bound.
+	maxBotLimiterKeys = 100_000
+)
 
-var gatewayBotPattern = regexp.MustCompile(`(?i)bot|facebook|whatsapp|embed|got|firefox/92|curl|wget|go-http|yahoo|generator|revoltchat|preview|link|proxy|vkshare|images|analyzer|index|crawl|spider|python|node|deno|mastodon|http\.rb|ruby|bun/|fiddler|iframely|bluesky|matrix|cardyb|resolver|feedly|rss|reader|atom|thunderbird|axios`)
-var statusCodePattern = regexp.MustCompile(`^[0-9]{1,256}$`)
-
-func gatewayIsBot(ua string) bool { return gatewayBotPattern.MatchString(ua) }
+func validStatusCode(code string) bool {
+	return code != "" && len(code) <= maxSnowcodeDigits && strings.Trim(code, "0123456789") == ""
+}
 
 type Gateway struct {
 	cfg    Config
@@ -59,17 +59,22 @@ type botLimiter struct {
 }
 
 // allow counts one request from ip, or reports how long until the next window.
+// An IPv6 client usually holds a whole /64, so that is one visitor.
 func (l *botLimiter) allow(ip string, now time.Time) (bool, time.Duration) {
+	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
+		ip = netip.PrefixFrom(a, 64).Masked().String()
+	}
 	hour := now.Unix() / 3600
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if hour != l.hour || l.counts == nil {
-		l.hour, l.counts = hour, map[string]int{} // memory stays bounded by one hour of IPs
+		l.hour, l.counts = hour, map[string]int{}
 	}
-	if l.counts[ip] >= botHourlyLimit {
+	n, seen := l.counts[ip]
+	if n >= botHourlyLimit || !seen && len(l.counts) >= maxBotLimiterKeys {
 		return false, time.Unix((hour+1)*3600, 0).Sub(now)
 	}
-	l.counts[ip]++
+	l.counts[ip] = n + 1
 	return true, 0
 }
 
@@ -86,7 +91,7 @@ func newGateway(cfg Config, app *App, home map[string]string) *Gateway {
 	return g
 }
 
-// One writer keeps SQLite metric inserts off every response's critical path.
+// One writer keeps the bucket-rollover SQLite flush off every response's critical path.
 func (g *Gateway) writeMetrics() {
 	for m := range g.metrics {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -135,7 +140,7 @@ func (g *Gateway) publicOrigin(r *http.Request) (string, bool) {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setPublicSecurityHeaders(w.Header())
 	w.Header().Set("Cache-Control", "no-store")
-	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+	if r.URL.Path == "/readyz" {
 		if !peerAddress(r).IsLoopback() {
 			g.problem(w, r, 404, "not found")
 			return
@@ -143,13 +148,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !allowMethod(w, r, http.MethodGet, http.MethodHead) {
 			return
 		}
-		if r.URL.Path == "/readyz" {
-			ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-			defer cancel()
-			if g.cfg.Store.Healthy(ctx) != nil {
-				g.problem(w, r, 503, "storage unavailable")
-				return
-			}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := g.cfg.Store.Healthy(ctx); err != nil {
+			g.problemCause(w, r, 503, "storage unavailable", err)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
@@ -168,15 +171,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cloudflare's preview WAF rule matches the public URI path. Reject encoded
 	// aliases rather than dispatching a decoded path that escaped that rule.
-	if (r.URL.Path == "/api/embed" || r.URL.Path == "/api/status" || r.URL.Path == "/api/admin/purge") && r.URL.EscapedPath() != r.URL.Path {
+	if (r.URL.Path == "/api/embed" || r.URL.Path == "/api/status") && r.URL.EscapedPath() != r.URL.Path {
 		g.problem(w, r, 404, "not found")
 		return
 	}
-	requestID := rand.Text()
-	if ray := r.Header.Get("Cf-Ray"); len(ray) > 0 && len(ray) <= 128 {
-		requestID = ray
+	requestID := r.Header.Get("Cf-Ray")
+	if requestID == "" || len(requestID) > 128 {
+		requestID = rand.Text()
 	}
-	r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
+	r = r.WithContext(context.WithValue(context.WithValue(r.Context(), requestIDKey{}, requestID), publicOriginKey{}, origin))
 	if r.URL.Path == "/" {
 		if allowMethod(w, r, "GET", "HEAD") {
 			g.serveHome(w, r)
@@ -201,9 +204,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/status":
 		g.serveStatus(w, r)
 		return
-	case "/api/admin/purge":
-		g.servePurge(w, r)
-		return
 	}
 	if !allowMethod(w, r, "GET", "HEAD") {
 		return
@@ -227,18 +227,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if route.offload && !g.app.offloadSigner.authorize(r.URL, time.Now()) {
-		// A link that fails verification never becomes valid; let the edge keep the 404.
-		w.Header().Set("Cloudflare-CDN-Cache-Control", "max-age=86400")
+		// A link that fails verification under a known key never becomes valid; let
+		// the edge keep the 404. An unknown kid may be a key an operator restores.
+		ttl := "60"
+		if g.app.offloadSigner.keys[r.URL.Query().Get("kid")] != nil {
+			ttl = "86400"
+		}
+		w.Header().Set("Cloudflare-CDN-Cache-Control", "max-age="+ttl)
 		g.problem(w, r, 404, "not found")
 		return
 	}
 	started := time.Now()
 	result := g.render(r, route)
-	if route.offload && result.status == http.StatusFound {
+	// An error fallback (originStatus set) points at Instagram, not media, and
+	// must not outlive the origin's own short error cache.
+	if route.offload && result.status == http.StatusFound && result.originStatus == 0 {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, result.headers["Location"], time.Now()))
 	}
 	elapsed := time.Since(started)
-	g.recordMetric(r, route, result, elapsed)
+	g.recordMetric(route, result, elapsed)
 	w.Header().Set("Server-Timing", "origin;dur="+strconv.FormatFloat(float64(elapsed.Microseconds())/1000, 'f', 2, 64))
 	g.writeResult(w, r, result)
 }
@@ -265,8 +272,17 @@ func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool
 }
 
 func (g *Gateway) problem(w http.ResponseWriter, r *http.Request, status int, detail string) {
-	if status == http.StatusForbidden || status == http.StatusMisdirectedRequest || status >= 500 {
-		slog.Warn("request rejected", "status", status, "detail", detail, "method", r.Method,
+	g.problemCause(w, r, status, detail, nil)
+}
+
+func (g *Gateway) problemCause(w http.ResponseWriter, r *http.Request, status int, detail string, cause error) {
+	// nginx already logs every overload rejection; one Warn each would flood.
+	if (status == http.StatusForbidden || status == http.StatusMisdirectedRequest || status >= 500) && detail != "overloaded" {
+		l := logger(r.Context())
+		if cause != nil {
+			l = l.With("error", cause)
+		}
+		l.Warn("request rejected", "status", status, "detail", detail, "method", r.Method,
 			"host", r.Host, "path", r.URL.Path, "peer", peerAddress(r).String(), "cf_ray", r.Header.Get("Cf-Ray"))
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
@@ -315,7 +331,8 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		route.offload = true
 		return route, true
 	}
-	if len(segments) == 3 && segments[0] == "stories" && validUsername(segments[1]) && validStoryID(segments[2]) {
+	// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
+	if len(segments) == 3 && segments[0] == "stories" && segments[1] != "highlights" && validUsername(segments[1]) && validStoryID(segments[2]) {
 		username, id := segments[1], segments[2]
 		route.category = "stories"
 		if direct {
@@ -329,12 +346,12 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
 		code := segments[3]
 		route.handle = func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }
-		return route, statusCodePattern.MatchString(code)
+		return route, validStatusCode(code)
 	}
 	if len(segments) == 4 && segments[0] == "users" && validUsername(segments[1]) && segments[2] == "statuses" {
 		code := segments[3]
 		route.handle = func(a *App, r *http.Request) resp { return a.handleActivity(r, code) }
-		return route, statusCodePattern.MatchString(code)
+		return route, validStatusCode(code)
 	}
 	if len(segments) == 3 && segments[0] == "users" && validUsername(segments[1]) && (segments[2] == "inbox" || segments[2] == "outbox") {
 		username, name := segments[1], segments[2]
@@ -422,39 +439,6 @@ func offloadHandler(s []string) func(*App, *http.Request) resp {
 	return func(a *App, r *http.Request) resp { return a.handleOffload(r, s[1], max(n-1, 0), avatar) }
 }
 
-func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
-	path, ok := canonicalOffloadPath(u)
-	if !ok {
-		return false
-	}
-	values, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return false
-	}
-	for _, name := range []string{"v", "kid", "exp", "sig"} {
-		if len(values[name]) != 1 {
-			return false
-		}
-	}
-	if values.Get("v") != offloadSignatureVersion {
-		return false
-	}
-	kid := values.Get("kid")
-	key := s.keys[kid]
-	if len(key) != offloadSigningKeySize {
-		return false
-	}
-	expires, err := strconv.ParseInt(values.Get("exp"), 10, 64)
-	if err != nil || strconv.FormatInt(expires, 10) != values.Get("exp") || expires <= now.Unix() || expires > now.Unix()+int64(offloadCapabilityTTL/time.Second) {
-		return false
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(values.Get("sig"))
-	if err != nil || len(signature) != sha256.Size || base64.RawURLEncoding.EncodeToString(signature) != values.Get("sig") {
-		return false
-	}
-	return hmac.Equal(signature, offloadMAC(key, kid, path, expires))
-}
-
 func (g *Gateway) render(r *http.Request, route gatewayRoute) resp {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
@@ -476,7 +460,7 @@ func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, b
 	internal.URL = u
 	internal.Header.Set("User-Agent", "OGInstagramPreviewBot/1.0")
 	route, ok := resolveGatewayRoute(internal)
-	if !ok || route.category == "" || !previewQuery(u.RawQuery, route.category == "posts") {
+	if !ok || route.category == "" || reservedAssetPath(u.Path) || !previewQuery(u.RawQuery, route.category == "posts") {
 		return nil, gatewayRoute{}, false
 	}
 	return internal, route, true
@@ -501,7 +485,9 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 	}
 	// Siteverify can take ten seconds before the four-second render begins.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(20 * time.Second))
-	if r.Header.Get("Origin") != origin || r.Header.Get("Sec-Fetch-Site") != "same-origin" {
+	// Safari before 16.4 sends no Sec-Fetch-Site; the exact Origin and the JSON
+	// content type still keep cross-origin requests out.
+	if site := r.Header.Get("Sec-Fetch-Site"); r.Header.Get("Origin") != origin || site != "" && site != "same-origin" {
 		g.problem(w, r, 403, "forbidden")
 		return
 	}
@@ -549,7 +535,7 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 	}
 	started := time.Now()
 	result := g.render(internal, route)
-	g.recordMetric(internal, route, result, time.Since(started))
+	g.recordMetric(route, result, time.Since(started))
 	if status := result.originStatus; status >= 400 && status <= 599 {
 		if status == 429 {
 			status = 502
@@ -557,8 +543,22 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 		if status == 499 {
 			status = 504
 		}
+		// A gated post gets the page's "unavailable" copy (404/451), not a generic error.
+		if result.errorType == errorCodeRestricted {
+			status = http.StatusUnavailableForLegalReasons
+		}
 		g.problem(w, r, status, "preview unavailable")
 		return
+	}
+	// Inline the Mastodon status the card links to (an L1 hit by now), so the
+	// page needs no second request that the bot limiter would count.
+	if head, _, ok := bytes.Cut(result.body, []byte(`" rel="alternate" type="application/activity+json">`)); ok && result.status == http.StatusOK && result.originStatus == 0 {
+		code := string(head[bytes.LastIndexByte(head, '/')+1:])
+		if status := g.render(internal, gatewayRoute{handle: func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }}); status.status == http.StatusOK {
+			var escaped bytes.Buffer
+			json.HTMLEscape(&escaped, status.body)
+			result.body = append(result.body, `<script type="application/json" id="og-status">`+escaped.String()+`</script>`...)
+		}
 	}
 	g.writeResult(w, r, result)
 }
@@ -603,9 +603,9 @@ func (g *Gateway) verifyTurnstile(r *http.Request, origin, token string) bool {
 	return true
 }
 
-func (g *Gateway) recordMetric(r *http.Request, route gatewayRoute, result resp, duration time.Duration) {
-	// Only origin outcomes for bots: cache hits say nothing about upstream health.
-	if route.category == "" || result.cacheHit || !gatewayIsBot(r.UserAgent()) {
+func (g *Gateway) recordMetric(route gatewayRoute, result resp, duration time.Duration) {
+	// Only origin outcomes: cache hits say nothing about upstream health.
+	if route.category == "" || result.cacheHit {
 		return
 	}
 	status := result.status
@@ -631,7 +631,7 @@ func (g *Gateway) serveStatus(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err != nil {
 			g.statusMu.Unlock()
-			g.problem(w, r, 503, "status unavailable")
+			g.problemCause(w, r, 503, "status unavailable", err)
 			return
 		}
 		g.statusBody, g.statusAt = jsonBytes(report), time.Now()
@@ -642,25 +642,4 @@ func (g *Gateway) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(body)
 	}
-}
-
-func (g *Gateway) servePurge(w http.ResponseWriter, r *http.Request) {
-	if !allowMethod(w, r, "POST") {
-		return
-	}
-	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	actual, expected := sha256.Sum256([]byte(provided)), sha256.Sum256([]byte(g.cfg.AdminPurgeToken))
-	if !ok || g.cfg.AdminPurgeToken == "" || subtle.ConstantTimeCompare(actual[:], expected[:]) != 1 {
-		g.problem(w, r, 403, "forbidden")
-		return
-	}
-	if err := g.cfg.Store.PurgeModels(r.Context()); err != nil {
-		g.problem(w, r, 503, "local purge failed")
-		return
-	}
-	g.app.posts.clear()
-	g.app.profiles.clear()
-	g.app.stories.clear()
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

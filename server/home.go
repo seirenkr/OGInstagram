@@ -22,6 +22,9 @@ var homeLocales = map[string]bool{
 
 var homeQualityPattern = regexp.MustCompile(`^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$`)
 
+// Must match the Pretendard stylesheets in web/index.html; their fonts load from the same roots.
+const pretendardSources = "https://cdn.jsdelivr.net/npm/pretendard@1.3.9/ https://cdn.jsdelivr.net/gh/orioncactus/pretendard@5c41199ea0024a9e0b2cb31735265056e5472d76/"
+
 func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	base, _ := url.Parse(g.cfg.BaseURL) // validated at startup
 	if !g.cfg.Development && !strings.EqualFold(r.Host, base.Host) {
@@ -61,7 +64,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	// Every page carries a fresh nonce and can depend on the language cookie.
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("Vary", "Accept-Language, Cookie")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net https://cdn.jsdelivr.net/npm/@twemoji/; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 	if forced != "" && forced != cookieLocale {
 		http.SetCookie(w, &http.Cookie{Name: "hl", Value: forced, Path: "/", MaxAge: 31536000, SameSite: http.SameSiteLaxMode, Secure: base.Scheme == "https"})
 	}
@@ -113,6 +116,9 @@ func resolveHomeLocale(acceptLanguage string) string {
 	for _, candidate := range ranges {
 		tag := candidate.tag
 		if tag == "zh" || strings.HasPrefix(tag, "zh-") {
+			if strings.Contains(tag, "hans") {
+				return "zh-hans"
+			}
 			if strings.Contains(tag, "hant") || strings.HasSuffix(tag, "-tw") || strings.HasSuffix(tag, "-hk") || strings.HasSuffix(tag, "-mo") {
 				return "zh-hant"
 			}
@@ -126,21 +132,29 @@ func resolveHomeLocale(acceptLanguage string) string {
 	return "en"
 }
 
+func publishedAsset(file string) (allowed, immutable bool) {
+	immutable = strings.HasPrefix(file, "assets/") || strings.HasPrefix(file, "preview/") || file == "PPMori-Regular.woff2" || file == "PPMori-Semibold.woff2"
+	return immutable || file == "default-avatar.jpg" || file == "favicon-192.png" || file == "favicon-64.png", immutable
+}
+
+// reservedAssetPath reports whether serveAsset answers path (with the file or a
+// 404) before the router sees it.
+func reservedAssetPath(path string) bool {
+	file := strings.TrimPrefix(path, "/")
+	allowed, _ := publishedAsset(file)
+	// Root files crawlers probe would otherwise parse as Instagram usernames.
+	return file != ".well-known/webfinger" && (allowed || file == "assets" || file == "preview" || file == "twemoji" || file == "home" || strings.HasPrefix(file, "home/") || strings.HasPrefix(file, ".") ||
+		file == "robots.txt" || file == "favicon.ico" || file == "sitemap.xml")
+}
+
 // serveAsset serves only published build artifacts. Templates and build control
 // files remain private, and directories never produce a listing or an index.
 func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request) bool {
+	if !reservedAssetPath(r.URL.Path) {
+		return false
+	}
 	file := strings.TrimPrefix(r.URL.Path, "/")
-	if file == ".well-known/webfinger" {
-		return false
-	}
-	immutable := strings.HasPrefix(file, "assets/") || strings.HasPrefix(file, "preview/") || strings.HasPrefix(file, "twemoji/") || file == "PPMori-Regular.woff2" || file == "PPMori-Semibold.woff2"
-	allowed := immutable || file == "default-avatar.jpg" || file == "favicon-192.png" || file == "favicon-64.png"
-	// Root files crawlers probe would otherwise parse as Instagram usernames.
-	reserved := file == "assets" || file == "preview" || file == "twemoji" || file == "home" || strings.HasPrefix(file, "home/") || strings.HasPrefix(file, ".") ||
-		file == "robots.txt" || file == "favicon.ico" || file == "sitemap.xml"
-	if !allowed && !reserved {
-		return false
-	}
+	allowed, immutable := publishedAsset(file)
 	if !allowMethod(w, r, http.MethodGet, http.MethodHead) {
 		return true
 	}
@@ -154,6 +168,7 @@ func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 		return true
 	}
+	// ponytail: one OpenRoot per request; open it once in loadHomeTemplates if asset serving shows in profiles.
 	root, err := os.OpenRoot(g.cfg.AssetsDir)
 	if err != nil {
 		http.NotFound(w, r)

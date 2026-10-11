@@ -8,15 +8,22 @@ const storyIdPattern = /^[0-9]{1,32}$/;
 
 const maxPostMediaItems = 50;
 
+// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
 function isStoriesPath(segments: string[]): boolean {
-  return segments.length === 3 && segments[0] === "stories" && usernamePattern.test(segments[1]) && storyIdPattern.test(segments[2]);
+  return segments.length === 3 && segments[0] === "stories" && segments[1] !== "highlights" && usernamePattern.test(segments[1]) && storyIdPattern.test(segments[2]);
 }
 
 // Accepts /{p|reel|reels}/{shortcode}[/{index}] with an optional leading /{username}.
+// /share/{p|reel}/X carries a share token, not a shortcode.
 function parseEmbedSegments(segments: string[]): EmbedRoute | null {
   for (const offset of [0, 1]) {
     const length = segments.length - offset;
-    if ((length === 2 || length === 3) && isPostRouteType(segments[offset]) && shortcodePattern.test(segments[offset + 1])) {
+    if (
+      (length === 2 || length === 3)
+      && (offset === 0 || (segments[0] !== "share" && usernamePattern.test(segments[0])))
+      && isPostRouteType(segments[offset])
+      && shortcodePattern.test(segments[offset + 1])
+    ) {
       if (length === 2) return { pathIndex: null };
       const pathIndex = parseCanonicalDecimal(segments[offset + 2]);
       return pathIndex === null ? null : { pathIndex };
@@ -51,18 +58,16 @@ function boundedMediaIndex(value: number): number {
   return Math.min(maxPostMediaItems - 1, Math.max(0, value));
 }
 
+// Like Go's splitPath(url.Path): decode the whole path, then split.
 function splitPath(path: string): string[] {
-  const trimmed = path.replace(/^\/+|\/+$/g, "");
-  if (!trimmed) {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
     return [];
   }
-  return trimmed.split("/").map(segment => {
-    try {
-      return decodeURIComponent(segment);
-    } catch {
-      return segment;
-    }
-  });
+  const trimmed = decoded.replace(/^\/+|\/+$/g, "");
+  return trimmed ? trimmed.split("/") : [];
 }
 
 export function validEmbedPath(path: string): boolean {
@@ -80,7 +85,12 @@ export function validEmbedPath(path: string): boolean {
     return false;
   }
   if (url.origin !== origin) return false;
-  const segments = splitPath(url.pathname);
+  // The server splits the path as sent; url.pathname would resolve dot segments.
+  const segments = splitPath(path.split("?")[0]);
+  // The gateway routes these to offload and ActivityPub handlers before embeds.
+  if (segments[0] === "offload" || (segments[0] === "users" && (segments.length === 3
+    ? segments[2] === "inbox" || segments[2] === "outbox"
+    : segments.length === 4 && segments[2] === "statuses"))) return false;
   const embed = parseEmbedSegments(segments);
   const query = Array.from(url.searchParams);
   const imgIndex = query.length === 1 && query[0][0] === "img_index"
@@ -114,26 +124,6 @@ export function instagramEmbedPath(raw: string): string | null {
   const selected = embed?.pathIndex === null ? mediaSelection(url.searchParams, null) : null;
   const canonical = selected === null ? path : `${path}?img_index=${selected + 1}`;
   return validEmbedPath(canonical) ? canonical : null;
-}
-
-export function mastodonStatusPathFromAlternate(href: string, origin: string): string | null {
-  try {
-    const url = new URL(href, origin);
-    const segments = splitPath(url.pathname);
-    if (
-      url.origin !== new URL(origin).origin
-      || segments.length !== 4
-      || segments[0] !== "users"
-      || !usernamePattern.test(segments[1])
-      || segments[2] !== "statuses"
-      || !/^\d{1,256}$/.test(segments[3])
-    ) {
-      return null;
-    }
-    return `/api/v1/statuses/${segments[3]}`;
-  } catch {
-    return null;
-  }
 }
 
 // Collapse the public service variants to the host displayed in the UI.

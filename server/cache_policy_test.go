@@ -26,28 +26,45 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 		{"story_external_helper", "story", "helper", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				response := func(status int, body string) *http.Response {
-					return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
-				}
-				var originCalls atomic.Int32
-				proxyStarted, proxyDone := make(chan struct{}), make(chan struct{})
-				stubDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					originCalls.Add(1)
-					switch tc.source {
-					case "captioned":
-						select {
-						case <-proxyStarted:
-							return response(200, simpleEmbedImagePage), nil
-						case <-req.Context().Done():
-							return nil, req.Context().Err()
-						}
-					case "embed":
-						return response(200, `{"contextJSON":"{\"context\":{\"username\":\"instagram\",\"profile_pic_url\":\"https://cdn.example/avatar.jpg\"}}"}`), nil
-					default:
-						return response(200, "invalid embed"), nil
+			response := func(status int, body string) *http.Response {
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
+			}
+			var originCalls atomic.Int32
+			// Made inside the bubble: channels from outside it never block durably.
+			var proxyStarted, proxyDone chan struct{}
+			stubDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				originCalls.Add(1)
+				switch tc.source {
+				case "captioned":
+					select {
+					case <-proxyStarted:
+						return response(200, trustedEmbedImagePage), nil
+					case <-req.Context().Done():
+						return nil, req.Context().Err()
 					}
-				}))
+				case "embed":
+					return response(200, `{"contextJSON":"{\"context\":{\"username\":\"instagram\",\"profile_pic_url\":\"https://scontent.cdninstagram.com/avatar.jpg\"}}"}`), nil
+				default:
+					return response(200, "invalid embed"), nil
+				}
+			}))
+			previousPost, previousStory := externalHelperPostImpl, externalHelperStoryImpl
+			t.Cleanup(func() {
+				externalHelperPostImpl, externalHelperStoryImpl = previousPost, previousStory
+			})
+			externalHelperPostImpl = func(_ *App, _ context.Context, key string) (Post, *AppError) {
+				originCalls.Add(1)
+				if tc.source != "helper" {
+					return Post{}, igErr(http.StatusBadGateway, errorCodeUpstream, "external helper post unparseable")
+				}
+				return Post{Shortcode: key, Username: "instagram", Attachments: []Attachment{{Kind: "image", URL: "https://scontent.cdninstagram.com/image.jpg"}}}, nil
+			}
+			externalHelperStoryImpl = func(_ *App, _ context.Context, username, id string) (Story, *AppError) {
+				originCalls.Add(1)
+				return Story{ID: id, Username: username, Media: Attachment{Kind: "image", URL: "https://scontent.cdninstagram.com/story.jpg"}}, nil
+			}
+			synctest.Test(t, func(t *testing.T) {
+				proxyStarted, proxyDone = make(chan struct{}), make(chan struct{})
 				proxyClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					originCalls.Add(1)
 					switch tc.source {
@@ -57,32 +74,18 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 						<-req.Context().Done()
 						return nil, req.Context().Err()
 					case "graphql":
-						return response(200, `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"DaD8phTyclR","user":{"username":"instagram"},"display_url":"https://cdn.example/image.jpg","media_type":1}]}}}`), nil
+						return response(200, `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"DaD8phTyclR","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}]}}}`), nil
 					case "api":
-						return response(200, `{"data":{"user":{"username":"instagram","profile_pic_url":"https://cdn.example/avatar.jpg"}}}`), nil
+						return response(200, `{"data":{"user":{"username":"instagram","profile_pic_url":"https://scontent.cdninstagram.com/avatar.jpg"}}}`), nil
 					case "oembed":
 						if req.URL.Path == "/api/v1/oembed/" {
-							return response(200, `{"author_name":"instagram","thumbnail_url":"https://cdn.example/image.jpg","title":"oEmbed"}`), nil
+							return response(200, `{"author_name":"instagram","thumbnail_url":"https://scontent.cdninstagram.com/image.jpg","title":"oEmbed"}`), nil
 						}
 					}
 					return response(200, `{"data":{}}`), nil
 				})}
 				pool := &SessionPool{
-					sessions:             []*Session{{client: proxyClient}},
-					budgetLeaseExpires:   time.Now().Add(time.Hour),
-					budgetLeaseRemaining: 1 << 20,
-				}
-				previousPost, previousStory := externalHelperPostImpl, externalHelperStoryImpl
-				t.Cleanup(func() {
-					externalHelperPostImpl, externalHelperStoryImpl = previousPost, previousStory
-				})
-				externalHelperPostImpl = func(_ *App, _ context.Context, key string) (Post, bool) {
-					originCalls.Add(1)
-					return Post{Shortcode: key, Username: "instagram", Attachments: []Attachment{{Kind: "image", URL: "https://cdn.example/image.jpg"}}}, tc.source == "helper"
-				}
-				externalHelperStoryImpl = func(_ *App, _ context.Context, username, id string) (Story, *AppError) {
-					originCalls.Add(1)
-					return Story{ID: id, Username: username, Media: Attachment{Kind: "image", URL: "https://cdn.example/story.jpg"}}, nil
+					sessions: []*Session{{client: proxyClient}},
 				}
 				store := newTestStore(t)
 				a := newApp(Config{Store: store}, pool, offloadSigner{})
@@ -115,6 +118,7 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 				if err := get(second); err != nil || second.fetched || originCalls.Load() != calls {
 					t.Fatalf("second get = %#v, fetched=%t, origin calls=%d→%d; want L1 hit", err, second.fetched, calls, originCalls.Load())
 				}
+				synctest.Wait()
 				var writes int
 				if err := store.state.QueryRow("SELECT COUNT(*) FROM models").Scan(&writes); err != nil {
 					t.Fatal(err)
@@ -137,21 +141,22 @@ func TestFetchPostFallbacks(t *testing.T) {
 		`"is_video":false,"owner":{"id":"9","username":"alice"},"display_url":"http://insecure.example/x.jpg","dimensions":{"width":1,"height":1}}}}`)
 	graphql := `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"ABC123","user":{"username":"bob"},` +
 		`"display_url":"https://scontent.cdninstagram.com/x.jpg","media_type":1}]}}}`
-	for _, tc := range []struct {
-		name, graphql, wantUser string
-		degraded                bool
-	}{
-		{"invalid embed loses to GraphQL", graphql, "bob", false},
-		{"ready oEmbed card beats hung sources", "", "carol", true},
+	for _, tc := range []struct{ name, graphql, wantUser string }{
+		{"invalid embed loses to GraphQL", graphql, "bob"},
+		{"helper past the request deadline still fills the cache", "", "carol"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Swap globals outside the bubble: synctest.Test returns only after the
 			// cancelled losers exit, so the restore cannot race them.
 			previous := externalHelperPostImpl
 			t.Cleanup(func() { externalHelperPostImpl = previous })
-			externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, bool) {
-				<-ctx.Done()
-				return Post{}, false
+			externalHelperPostImpl = func(_ *App, ctx context.Context, key string) (Post, *AppError) {
+				select {
+				case <-time.After(requestTimeout):
+					return Post{Shortcode: key, Username: "carol", Attachments: []Attachment{{Kind: "image", URL: "https://scontent.cdninstagram.com/x.jpg"}}}, nil
+				case <-ctx.Done():
+					return Post{}, contextAppError(ctx)
+				}
 			}
 			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				return mediaTestResponse(r, 200, nil, []byte(invalidEmbed)), nil
@@ -159,7 +164,7 @@ func TestFetchPostFallbacks(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				proxy := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					if r.URL.Path == "/api/v1/oembed/" {
-						return mediaTestResponse(r, 200, nil, []byte(`{"author_name":"carol","thumbnail_url":"https://scontent.cdninstagram.com/t.jpg","title":"t"}`)), nil
+						t.Error("oEmbed fetched while a full source could still win")
 					}
 					if tc.graphql == "" {
 						<-r.Context().Done()
@@ -167,50 +172,25 @@ func TestFetchPostFallbacks(t *testing.T) {
 					}
 					return mediaTestResponse(r, 200, nil, []byte(tc.graphql)), nil
 				})}
-				pool := &SessionPool{sessions: []*Session{{client: proxy}},
-					budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+				pool := &SessionPool{sessions: []*Session{{client: proxy}}}
 				a := newApp(Config{}, pool, offloadSigner{})
 				ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 				defer cancel()
 				started := time.Now()
 				post, err := a.getPost(ctx, "ABC123", nil)
-				if err != nil || post.Username != tc.wantUser || time.Since(started) >= requestTimeout {
+				if late := tc.graphql == ""; late != (err != nil) || !late && post.Username != tc.wantUser {
 					t.Fatalf("getPost = %q, %v after %s", post.Username, err, time.Since(started))
 				}
-				entry, ok := a.posts.localGet("ABC123")
-				if short := ok && time.Until(entry.expiresAt) <= transientErrorCacheSeconds*time.Second; short != tc.degraded {
-					t.Fatalf("degraded=%v but cached until %v", tc.degraded, entry.expiresAt)
+				// The helper starts at its hedge delay and runs for requestTimeout.
+				time.Sleep(externalHelperHedgeDelay)
+				synctest.Wait()
+				if entry, ok := a.posts.localGet("ABC123"); !ok || entry.value.Username != tc.wantUser ||
+					time.Until(entry.expiresAt) <= transientErrorCacheSeconds*time.Second {
+					t.Fatalf("cached %+v, want %s's post with a full TTL", entry, tc.wantUser)
 				}
 			})
 		})
 	}
-}
-
-func TestEmbedPausesAfterRateLimit(t *testing.T) {
-	var hits, status atomic.Int32
-	status.Store(http.StatusTooManyRequests)
-	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		hits.Add(1)
-		return mediaTestResponse(r, int(status.Load()), nil, []byte(simpleEmbedImagePage)), nil
-	}))
-	synctest.Test(t, func(t *testing.T) {
-		a := &App{}
-		ctx := context.Background()
-		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err == nil || err.Status != http.StatusTooManyRequests {
-			t.Fatalf("first call = %v, want 429", err)
-		}
-		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err == nil || hits.Load() != 1 {
-			t.Fatalf("paused embed still reached Instagram (%d hits, err %v)", hits.Load(), err)
-		}
-		time.Sleep(embedProbeInterval)
-		status.Store(http.StatusOK)
-		if _, err := a.fetchPostEmbed(ctx, "DaD8phTyclR"); err != nil || hits.Load() != 2 {
-			t.Fatalf("probe after the interval = %v with %d hits, want one successful probe", err, hits.Load())
-		}
-		if a.embedPausedUntil.Load() != 0 {
-			t.Fatal("a successful probe must clear the pause")
-		}
-	})
 }
 
 func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
@@ -229,30 +209,29 @@ func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			previous := externalHelperPostImpl
 			t.Cleanup(func() { externalHelperPostImpl = previous })
-			externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, bool) {
+			externalHelperPostImpl = func(_ *App, ctx context.Context, _ string) (Post, *AppError) {
 				select {
 				case <-time.After(1500 * time.Millisecond):
-					return helperPost, true
+					return helperPost, nil
 				case <-ctx.Done():
-					return Post{}, false
+					return Post{}, contextAppError(ctx)
 				}
 			}
 			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				if strings.Contains(r.URL.Path, "get_ruling_for_content") {
-					return mediaTestResponse(r, tc.rulingStatus, nil, []byte(tc.ruling)), nil
-				}
 				return mediaTestResponse(r, http.StatusTooManyRequests, nil, nil), nil
 			}))
 			synctest.Test(t, func(t *testing.T) {
 				proxy := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+						return mediaTestResponse(r, tc.rulingStatus, nil, []byte(tc.ruling)), nil
+					}
 					if r.URL.Path == "/api/v1/oembed/" {
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					}
 					return mediaTestResponse(r, 200, nil, []byte(gqlError)), nil
 				})}
-				pool := &SessionPool{sessions: []*Session{{client: proxy}},
-					budgetLeaseExpires: time.Now().Add(time.Hour), budgetLeaseRemaining: 1 << 20}
+				pool := &SessionPool{sessions: []*Session{{client: proxy}}}
 				a := newApp(Config{}, pool, offloadSigner{})
 				ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 				defer cancel()

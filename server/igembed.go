@@ -23,7 +23,6 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 		logOutbound(ctx, operation, "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
 	}()
 	client := *http.DefaultClient
-	checkRedirect := client.CheckRedirect
 	loginRedirect := errors.New("Instagram redirected to login or verification")
 	loginStatus := 0
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -36,9 +35,6 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 					return loginRedirect
 				}
 			}
-		}
-		if checkRedirect != nil {
-			return checkRedirect(req, via)
 		}
 		if len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
@@ -60,25 +56,27 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 	return
 }
 
+const rulingAsbdID = "359341"
+
 // mediaMissing asks Instagram's content-ruling endpoint (~200 B) whether a post
-// exists for logged-out viewers. Only a definite "Media cannot be found" counts;
-// gated posts, errors and timeouts all report false.
-func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
+// exists for logged-out viewers. Only a definite "Media cannot be found" counts
+// as missing; answered is false when errors or timeouts left the question open.
+func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answered bool) {
 	pk := shortcodePK(shortcode)
 	if pk == nil {
-		return false
+		return false, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, rulingTimeout)
 	defer cancel()
-	rawURL := instagramOrigin + "/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=" + pk.String()
-	started := time.Now()
-	status, out, ferr := fetchRequest(ctx, http.DefaultClient, fetchSpec{
-		operation: "ruling",
-		method:    http.MethodGet,
-		url:       rawURL,
-		subject:   "Instagram",
+	_, out, ferr := a.fetchViaProxy(ctx, fetchSpec{
+		operation:  "ruling",
+		method:     http.MethodGet,
+		url:        instagramOrigin + "/api/v1/web/get_ruling_for_content/?content_type=MEDIA&target_id=" + pk.String(),
+		subject:    "Instagram",
+		expectJSON: true,
+		advisory:   true,
 		headers: map[string]string{
-			"User-Agent": "Mozilla/5.0", "X-IG-App-ID": instagramAppID, "X-ASBD-ID": "359341", "X-IG-WWW-Claim": "0",
+			"User-Agent": "Mozilla/5.0", "X-IG-App-ID": instagramAppID, "X-ASBD-ID": rulingAsbdID, "X-IG-WWW-Claim": "0",
 		},
 		// "Media cannot be found" arrives as 404 with a JSON body.
 		interpret: func(status int, raw []byte) *AppError {
@@ -88,22 +86,25 @@ func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
 			return statusOnly(status, raw)
 		},
 	})
-	logOutbound(ctx, "ruling", "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
-	return ferr == nil && gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found"
+	return ferr == nil && gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found", ferr == nil
 }
 
-func embedContextJSON(html string) (string, *AppError) {
+func embedContextJSON(page string) (string, *AppError) {
 	const key = `"contextJSON":`
-	i := strings.Index(html, key)
+	i := strings.Index(page, key)
 	if i < 0 {
 		return "", igErr(502, errorCodeUpstream, "embed contextJSON not found")
 	}
 	var inner string
-	if err := json.NewDecoder(strings.NewReader(html[i+len(key):])).Decode(&inner); err != nil || inner == "" {
+	if err := json.NewDecoder(strings.NewReader(page[i+len(key):])).Decode(&inner); err != nil || inner == "" {
 		return "", igErr(502, errorCodeUpstream, "embed contextJSON decode failed")
 	}
 	return inner, nil
 }
+
+// Returned as is, never copied or mutated: stagedFetch tells a skip from a
+// failure by this pointer.
+var errEmbedPaused = ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "embed temporarily paused after Instagram blocked requests")
 
 func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
 	// While Instagram blocks the embed, skip it and let one probe through per
@@ -112,23 +113,25 @@ func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppE
 	until := a.embedPausedUntil.Load()
 	if until != 0 {
 		if now < until || !a.embedPausedUntil.CompareAndSwap(until, now+int64(embedProbeInterval)) {
-			return Post{}, ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "embed temporarily paused after Instagram blocked requests")
+			return Post{}, errEmbedPaused
 		}
 		until = now + int64(embedProbeInterval)
 	}
-	html, err := a.directGet(ctx, "post", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
+	html, err := a.directGet(ctx, "post_embed", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
 	if err != nil {
 		if err.Status == http.StatusTooManyRequests || err.Code == errorCodeLoginRequired {
-			a.embedPausedUntil.Store(time.Now().Add(embedProbeInterval).UnixNano())
+			if a.embedPausedUntil.Swap(time.Now().Add(embedProbeInterval).UnixNano()) == 0 {
+				logger(ctx).WarnContext(ctx, "post embed paused", "error_type", err.errorType(), "app_status", err.Status)
+			}
 		}
 		return Post{}, err
 	}
 	post, perr := parseEmbedPost(html)
 	if perr != nil {
 		logEmbedParseFailure(ctx, "post", html, perr)
-	} else {
+	} else if until != 0 && a.embedPausedUntil.CompareAndSwap(until, 0) {
 		// A response started before a newer block must not reopen the embed path.
-		a.embedPausedUntil.CompareAndSwap(until, 0)
+		logger(ctx).InfoContext(ctx, "post embed resumed")
 	}
 	return post, perr
 }
@@ -163,8 +166,7 @@ var (
 	simpleSrcRE          = regexp.MustCompile(`\bsrc="([^"]*)"`)
 	simpleSrcsetRE       = regexp.MustCompile(`\bsrcset="([^"]*)"`)
 	simpleFrameRatioRE   = regexp.MustCompile(`EmbedFrame"[^>]*padding-bottom:\s*([\d.]+)%`)
-	simpleLikesRE        = regexp.MustCompile(`>([\d,]+)\s+likes<`)
-	simpleCaptionOpenRE  = regexp.MustCompile(`<div class="Caption">`)
+	simpleLikesRE        = regexp.MustCompile(`>([\d,]+)\s+likes?<`)
 	simpleCaptionUserRE  = regexp.MustCompile(`(?s)^\s*<a class="CaptionUsername"[^>]*>[^<]*</a>`)
 	simpleBrRE           = regexp.MustCompile(`(?i)<br\s*/?>`)
 	simpleTagRE          = regexp.MustCompile(`<[^>]+>`)
@@ -226,16 +228,24 @@ func firstGroup(re *regexp.Regexp, s string) string {
 }
 
 func parseCount(s string) int {
-	n, _ := strconv.Atoi(strings.ReplaceAll(s, ",", ""))
+	n, err := strconv.Atoi(strings.ReplaceAll(s, ",", ""))
+	if err != nil {
+		return -1
+	}
 	return n
 }
 
 // Find the literal first; digits and whitespace are matched as ASCII only.
+// The caption comes earlier in the page and may itself contain "N comments".
 func simpleCommentCount(page string) int {
+	_, page, ok := strings.Cut(page, `<div class="CaptionComments"`)
+	if !ok {
+		return -1
+	}
 	for {
-		i := strings.Index(page, "comments")
+		i := strings.Index(page, "comment")
 		if i < 0 {
-			return 0
+			return -1
 		}
 		end := i
 		for end > 0 && strings.ContainsRune(" \t\r\n\f", rune(page[end-1])) {
@@ -248,7 +258,7 @@ func simpleCommentCount(page string) int {
 		if start < end && end < i {
 			return parseCount(page[start:end])
 		}
-		page = page[i+len("comments"):]
+		page = page[i+len("comment"):]
 	}
 }
 
@@ -271,11 +281,10 @@ func bestSrcset(srcset string) (string, int) {
 }
 
 func simpleCaption(page string) string {
-	loc := simpleCaptionOpenRE.FindStringIndex(page)
-	if loc == nil {
+	_, rest, ok := strings.Cut(page, `<div class="Caption">`)
+	if !ok {
 		return ""
 	}
-	rest := page[loc[1]:]
 	end := len(rest)
 	if i := strings.Index(rest, `<div class="CaptionComments">`); i >= 0 {
 		end = i
@@ -296,28 +305,20 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 	}
 
 	var atts []Attachment
-	var blocked bool
-	add := func(n gjson.Result) {
-		att, ok, b := graphAttachment(n)
-		if b {
-			blocked = true
-		} else if ok {
-			atts = append(atts, att)
-		}
+	var err *AppError
+	add := func(n gjson.Result) bool {
+		var att Attachment
+		att, err = graphAttachment(n)
+		atts = append(atts, att)
+		return err == nil
 	}
 	if kids := sm.Get("edge_sidecar_to_children.edges"); len(kids.Array()) > 0 {
-		kids.ForEach(func(_, e gjson.Result) bool {
-			add(e.Get("node"))
-			return !blocked
-		})
+		kids.ForEach(func(_, e gjson.Result) bool { return add(e.Get("node")) })
 	} else {
 		add(sm)
 	}
-	if blocked {
-		return Post{}, igErr(502, errorCodeUpstream, "embed video blocked")
-	}
-	if len(atts) == 0 {
-		return Post{}, igErr(502, errorCodeUpstream, "embed had no attachments")
+	if err != nil {
+		return Post{}, err
 	}
 
 	return Post{
@@ -328,26 +329,26 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		ProfilePic:  owner.Get("profile_pic_url").String(),
 		IsVerified:  owner.Get("is_verified").Type == gjson.True,
 		Caption:     sm.Get("edge_media_to_caption.edges.0.node.text").String(),
-		StatsLine:   statsLine(v1StatsPrefix(sm), uintOf(sm, "edge_liked_by.count"), uintOf(sm, "edge_media_to_comment.count")),
+		StatsLine:   statsLine(v1StatsPrefix(sm), countOf(sm, "edge_liked_by.count"), countOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
 	}, nil
 }
 
-func graphAttachment(n gjson.Result) (att Attachment, ok, blocked bool) {
+func graphAttachment(n gjson.Result) (Attachment, *AppError) {
 	img := bestGraphImageURL(n)
 	if img == "" {
-		return Attachment{}, false, false
+		return Attachment{}, igErr(502, errorCodeUpstream, "embed media had no image")
 	}
 	w, h := uintOf(n, "dimensions.width"), uintOf(n, "dimensions.height")
 	id := cmp.Or(n.Get("id").String(), n.Get("pk").String())
 	if n.Get("is_video").Bool() {
 		u := n.Get("video_url").String()
 		if u == "" {
-			return Attachment{}, false, true
+			return Attachment{}, igErr(502, errorCodeUpstream, "embed video blocked")
 		}
-		return Attachment{ID: id, Kind: "video", URL: u, Thumbnail: img, Width: w, Height: h}, true, false
+		return Attachment{ID: id, Kind: "video", URL: u, Thumbnail: img, Width: w, Height: h}, nil
 	}
-	return Attachment{ID: id, Kind: "image", URL: img, Thumbnail: img, Width: w, Height: h}, true, false
+	return Attachment{ID: id, Kind: "image", URL: img, Thumbnail: img, Width: w, Height: h}, nil
 }
 
 func bestGraphImageURL(n gjson.Result) string {
@@ -355,7 +356,7 @@ func bestGraphImageURL(n gjson.Result) string {
 }
 
 func (a *App) fetchProfileEmbed(ctx context.Context, username string) (Profile, *AppError) {
-	html, err := a.directGet(ctx, "profile", instagramOrigin+"/"+url.PathEscape(username)+"/embed/")
+	html, err := a.directGet(ctx, "profile_embed", instagramOrigin+"/"+url.PathEscape(username)+"/embed/")
 	if err != nil {
 		return Profile{}, err
 	}
@@ -374,7 +375,7 @@ func parseEmbedProfile(html string) (Profile, *AppError) {
 	ctx := gjson.Get(inner, "context")
 	username := ctx.Get("username").String()
 	if username == "" {
-		return Profile{}, igErr(404, errorCodeNotFound, "embed profile missing username")
+		return Profile{}, igErr(502, errorCodeUpstream, "embed profile missing username")
 	}
 	p := Profile{
 		Username:      username,

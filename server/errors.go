@@ -20,9 +20,8 @@ const (
 
 	errorCodeCaptchaRequired = "captcha_required"
 
-	errorCodeBudgetExhausted = "budget_exhausted"
-	errorCodeBudgetBackend   = "budget_backend_error"
-	errorCodeGeoBlocked      = "geo_block_required"
+	errorCodeGeoBlocked = "geo_block_required"
+	errorCodeRestricted = "restricted"
 )
 
 func shouldRotate(code string) bool {
@@ -37,7 +36,7 @@ func shouldRotate(code string) bool {
 
 func isTransient(code string) bool {
 	switch code {
-	case errorCodeBadRequest, errorCodeNotFound, errorCodeMediaNotFound, errorCodeGeoBlocked:
+	case errorCodeNotFound, errorCodeMediaNotFound, errorCodeGeoBlocked, errorCodeRestricted:
 		return false
 	default:
 		return true
@@ -95,6 +94,12 @@ func errorCard(kind, errorCode string) (title, desc string) {
 		return "Account unavailable", "This account isn't available - it may not exist, be deactivated, or the username is incorrect."
 	case "story":
 		return "Story unavailable", "This story isn't available - stories expire after 24 hours, and it may also be from a private account or the link may be incorrect."
+	}
+	switch errorCode {
+	case errorCodeGeoBlocked:
+		return "Post unavailable", "This post isn't available in this region."
+	case errorCodeRestricted:
+		return "Post unavailable", "This post is restricted by Instagram (age or audience limit)."
 	}
 	return "Post unavailable", "This post isn't available - it may be deleted, set to private, or the link is incorrect."
 }

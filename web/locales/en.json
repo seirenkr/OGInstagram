@@ -41,6 +41,7 @@
     "placeholder": "Paste an Instagram link",
     "invalid": "Enter a valid Instagram post, reel, profile, or story link.",
     "fetchError": "Couldn't load the preview. Please try again in a moment.",
+    "unavailable": "This link can't be previewed. It may be private, deleted, or restricted.",
     "submit": "Create preview",
     "previewDesc": "An Instagram URL transformed into an OGInstagram URL with a rich preview",
     "you": "You",

@@ -28,9 +28,13 @@ func isPostRouteType(value string) bool {
 
 // parseEmbedSegments accepts /p/X[/n] and /user/p/X[/n]. A shape match with a
 // non-canonical index rejects the path instead of trying the other shape.
+// /share/{p|reel}/X carries a share token, not a shortcode.
 func parseEmbedSegments(segments []string) *EmbedRoute {
-	for i, s := range [][]string{segments, segments[min(1, len(segments)):]} {
-		if i == 1 && !validUsername(segments[0]) {
+	if len(segments) == 0 {
+		return nil
+	}
+	for i, s := range [][]string{segments, segments[1:]} {
+		if i == 1 && (segments[0] == "share" || !validUsername(segments[0])) {
 			continue
 		}
 		if len(s) < 2 || len(s) > 3 || !isPostRouteType(s[0]) || !validShortcode(s[1]) {

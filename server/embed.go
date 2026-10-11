@@ -71,12 +71,8 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	originURL := instagramPostURL(postType, post.Shortcode, selectedIndex, specified)
 	title := displayTitle(post.FullName, post.Username)
 	imageAlt := truncateFlat(post.Caption, 420)
-	useActivity := post.Username != ""
 
-	indicator := singleAttachmentIndicator(post, selectedIndex)
-	if useActivity {
-		indicator = selectActivityAttachments(post, mediaIndex, specified).indicator
-	}
+	indicator := selectActivityAttachments(post, mediaIndex, specified).indicator
 	description := postDescription(post.Caption, withIndicator(indicator, post.StatsLine))
 	if gallery {
 		imageAlt = ""
@@ -92,7 +88,7 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 		component = a.postComponentEmbed(baseURL, post, postType, mediaIndex, specified, gallery, variant == discordComponentsSupport)
 	}
 	activityHref := ""
-	if useActivity && component == "" {
+	if component == "" {
 		activityHref = statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	}
 
@@ -158,7 +154,7 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool, var
 	if variant != discordLegacy {
 		component = a.profileComponentEmbed(baseURL, p, gallery, variant == discordComponentsSupport)
 	}
-	activityHref := profileStatusURL(baseURL, p.Username)
+	activityHref := profileStatusURL(baseURL, p.Username, gallery)
 	if component != "" {
 		activityHref = ""
 	}

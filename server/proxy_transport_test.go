@@ -26,8 +26,6 @@ func TestProxyTransportResumesTLSAcrossClients(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(upstream.Certificate())
 	pool := newSessionPool(Config{ProxyUser: "test", ProxyPass: "test"})
-	pool.budgetLeaseExpires = time.Now().Add(time.Hour)
-	pool.budgetLeaseRemaining = 1 << 20
 	t.Cleanup(func() {
 		for _, session := range pool.sessions {
 			session.getClient().CloseIdleConnections()

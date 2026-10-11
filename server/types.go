@@ -49,12 +49,10 @@ type Config struct {
 	DiscordVerifiedEmojiID string
 	DataDir                string
 	AssetsDir              string
-	BudgetStartDate        string
 	AllowedHosts           []string
 	TrustedProxies         []netip.Prefix
 	TurnstileSiteKey       string
 	TurnstileSecretKey     string
-	AdminPurgeToken        string
 	Development            bool
 	Store                  *localStore
 }

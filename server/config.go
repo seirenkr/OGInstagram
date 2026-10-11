@@ -24,12 +24,6 @@ const (
 	proxyCountry      = "us"
 	proxySessionCount = 10
 
-	proxyByteLeaseSize int64 = 1 << 20
-
-	// Bound durable budget grants; errors stop proxy traffic until retry.
-	budgetRequestTimeout    = time.Second
-	budgetBackendRetryDelay = time.Second
-
 	transientErrorCacheSeconds = 60
 	permanentErrorCacheSeconds = 3600
 
@@ -41,14 +35,12 @@ const (
 	postHedgeDelay           = time.Second
 	profileHedgeDelay        = time.Second
 	externalHelperHedgeDelay = 2 * time.Second
-	oembedHedgeDelay         = 2500 * time.Millisecond
-	// A ready oEmbed card ends a still-running staged race this early, so the
-	// degraded card is served instead of a timeout.
-	oembedFallbackAt = requestTimeout - 500*time.Millisecond
 	// After a direct embed 429 or login redirect, skip embed until one probe is due.
 	embedProbeInterval = 3 * time.Hour
-	// The content-ruling check is a small JSON GET; past this it is no signal.
-	rulingTimeout = time.Second
+	// The content-ruling check is a small JSON GET through the DC proxy; past
+	// this it is no signal. It stays under the 3 s after which a 504 marks the
+	// exit IP hung.
+	rulingTimeout = 2 * time.Second
 
 	rotateCooldown        = 3 * time.Second
 	helperCaptchaCooldown = time.Minute
@@ -69,7 +61,7 @@ const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 10 * time.Second
-	idleTimeout       = 120 * time.Second // > cloudflared keepAliveTimeout (90s), so the proxy closes idle conns first
+	idleTimeout       = 120 * time.Second // > nginx upstream keepalive_timeout (60s default), so nginx closes idle conns first
 	shutdownTimeout   = 30 * time.Second
 	maxHeaderBytes    = 32 << 10
 
@@ -119,21 +111,18 @@ func configFromEnv() Config {
 		proxies = append(proxies, p)
 	}
 	return Config{
-		Port:               port,
-		Version:            cmp.Or(env("OG_VERSION"), "dev"),
-		ProxyUser:          env("PROXY_USERNAME"),
-		ProxyPass:          env("PROXY_PASSWORD"),
-		BaseURL:            strings.TrimRight(baseURL, "/"),
-		OffloadSigningKeys: env("OFFLOAD_SIGNING_KEYS"),
-		DataDir:            cmp.Or(env("DATA_DIR"), "./data"),
-		AssetsDir:          cmp.Or(env("ASSETS_DIR"), "../web/dist"),
-		// The ledger only moves the start forward (MAX), so today is a safe default.
-		BudgetStartDate:        cmp.Or(env("PROXY_BUDGET_START_DATE"), time.Now().UTC().Format(time.DateOnly)),
+		Port:                   port,
+		Version:                cmp.Or(env("OG_VERSION"), "dev"),
+		ProxyUser:              env("PROXY_USERNAME"),
+		ProxyPass:              env("PROXY_PASSWORD"),
+		BaseURL:                strings.TrimRight(baseURL, "/"),
+		OffloadSigningKeys:     env("OFFLOAD_SIGNING_KEYS"),
+		DataDir:                cmp.Or(env("DATA_DIR"), "./data"),
+		AssetsDir:              cmp.Or(env("ASSETS_DIR"), "../web/dist"),
 		AllowedHosts:           hosts,
 		TrustedProxies:         proxies,
 		TurnstileSiteKey:       env("TURNSTILE_SITE_KEY"),
 		TurnstileSecretKey:     env("TURNSTILE_SECRET_KEY"),
-		AdminPurgeToken:        env("ADMIN_PURGE_TOKEN"),
 		DiscordBrandEmojiID:    cmp.Or(env("DISCORD_BRAND_EMOJI_ID"), defaultDiscordBrandEmojiID),
 		DiscordVerifiedEmojiID: cmp.Or(env("DISCORD_VERIFIED_EMOJI_ID"), defaultDiscordVerifiedEmojiID),
 		Development:            env("DEVELOPMENT") == "true",
@@ -172,9 +161,6 @@ func (cfg Config) validate() error {
 			return fmt.Errorf("TRUSTED_PROXIES must contain explicit IP addresses or bounded CIDRs")
 		}
 	}
-	if _, err := time.Parse("2006-01-02", cfg.BudgetStartDate); err != nil {
-		return fmt.Errorf("PROXY_BUDGET_START_DATE is required in YYYY-MM-DD UTC format")
-	}
 	if (cfg.ProxyUser == "") != (cfg.ProxyPass == "") {
 		return fmt.Errorf("PROXY_USERNAME and PROXY_PASSWORD must be set together")
 	}
@@ -200,7 +186,7 @@ func (cfg Config) validate() error {
 
 func proxyURL(user, pass, sessionID string) string {
 	username := user + "__cr." + proxyCountry + ";sessid." + sessionID
-	return "http://" + url.QueryEscape(username) + ":" + url.QueryEscape(pass) + "@" + proxyGateEndpoint
+	return (&url.URL{Scheme: "http", User: url.UserPassword(username, pass), Host: proxyGateEndpoint}).String()
 }
 
 func newSessionID() string {

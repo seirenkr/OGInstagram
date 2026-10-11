@@ -83,8 +83,16 @@ func fmtCount(value int) string {
 	return s
 }
 
+// A count of -1 is unknown (hidden or absent upstream) and is left out rather than shown as 0.
 func statsLine(prefix string, likes, comments int) string {
-	return prefix + "❤️ " + fmtCount(likes) + "  \U0001f4ac " + fmtCount(comments)
+	line := prefix
+	if likes >= 0 {
+		line += "❤️ " + fmtCount(likes) + "  "
+	}
+	if comments >= 0 {
+		line += "\U0001f4ac " + fmtCount(comments) + "  "
+	}
+	return strings.TrimSuffix(line, "  ")
 }
 
 func truncateFlat(text string, limit int) string {
@@ -238,8 +246,8 @@ func singleAttachmentIndicator(post Post, selectedIndex int) string {
 }
 
 func withIndicator(indicator, statsLine string) string {
-	if indicator != "" {
+	if indicator != "" && statsLine != "" {
 		return indicator + "  " + statsLine
 	}
-	return statsLine
+	return indicator + statsLine
 }

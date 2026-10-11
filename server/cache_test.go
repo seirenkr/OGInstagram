@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,10 @@ const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichE
 	`<div class="SocialProof"><a href="/x">4,809 likes</a></div>` +
 	`<div class="Caption"><a class="CaptionUsername" href="/x">instagram</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
 	`<div class="CaptionComments"><a href="/x">View all 19 comments</a></div></div>`
+
+// trustedEmbedImagePage is simpleEmbedImagePage with media on an Instagram CDN host,
+// for tests whose parsed post must pass cached-model validation.
+var trustedEmbedImagePage = strings.ReplaceAll(simpleEmbedImagePage, "https://cdn/", "https://scontent.cdninstagram.com/")
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
@@ -100,6 +105,10 @@ func TestCacheModelBoundaryNormalizesCDNHosts(t *testing.T) {
 			t.Fatalf("cache boundary did not normalize CDN URL: %q", got)
 		}
 	}
+	post.Attachments[0].URL = "https://evil.example/video.mp4"
+	if _, valid := cloneAndValidateCacheValue("Ab_12", post); valid {
+		t.Fatal("non-CDN media URL accepted into the cache")
+	}
 }
 
 func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
@@ -117,16 +126,11 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	store := newTestStore(t)
 
 	directCalls := 0
-	slots := make(chan struct{}, 1)
 	stubDefaultTransport(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 		directCalls++
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(simpleEmbedImagePage))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(trustedEmbedImagePage))}, nil
 	}))
-	a := &App{
-		cfg:           Config{BaseURL: "https://example.test"},
-		offloadSigner: mustOffloadSigner(testOffloadSigningKeys),
-		posts:         newPersistentCache[Post](store, "post", slots, localPostCacheBytes),
-	}
+	a := newApp(Config{BaseURL: "https://example.test", Store: store}, &SessionPool{}, mustOffloadSigner(testOffloadSigningKeys))
 
 	code := statusSnowcode("p", "DaD8phTyclR", 0, false, false)
 	status := serveApp(t, a, httptest.NewRequest(http.MethodGet, "https://example.test/users/instagram/statuses/"+code, nil))
@@ -145,23 +149,20 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}
 }
 
-func TestEdgeAuthorizedDirectOffloadMayFetchOrigin(t *testing.T) {
+func TestOffloadMissFetchesOrigin(t *testing.T) {
 	var originFetches atomic.Int32
-	postCache := newPersistentCache[Post](nil, "test", make(chan struct{}, 1), 1<<20)
 	stubDefaultTransport(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 		originFetches.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(simpleEmbedImagePage)),
+			Body:       io.NopCloser(strings.NewReader(trustedEmbedImagePage)),
 		}, nil
 	}))
-	a := &App{
-		posts: postCache,
-	}
+	a := newApp(Config{}, &SessionPool{}, mustOffloadSigner(testOffloadSigningKeys))
 	req := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
 	result := serveApp(t, a, req)
-	if result.status != http.StatusFound {
-		t.Fatalf("authorized offload status = %d, want 302", result.status)
+	if want := "https://scontent.cdninstagram.com/big.jpg?oe=1"; result.status != http.StatusFound || result.headers["Location"] != want {
+		t.Fatalf("offload = %d to %q, want 302 to %q", result.status, result.headers["Location"], want)
 	}
 	if got := originFetches.Load(); got != 1 {
 		t.Fatalf("origin fetches = %d, want 1", got)
@@ -468,5 +469,101 @@ func validTestPost(shortcode, caption string) Post {
 			Width:     1080,
 			Height:    1080,
 		}},
+	}
+}
+
+func TestLocalCacheByteAccounting(t *testing.T) {
+	c := newPersistentCache[string](nil, "test", nil, 0)
+	entry := func(value string) *cacheEntry[string] {
+		return &cacheEntry[string]{value: value, expiresAt: time.Now().Add(time.Hour)}
+	}
+	c.maxBytes = 3*cacheEntryMemorySize("a", entry("1")) + 8
+	check := func(step string, want ...string) {
+		t.Helper()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		var sum int64
+		for _, e := range c.entries {
+			sum += e.size
+		}
+		if c.usedBytes != sum || c.usedBytes > c.maxBytes {
+			t.Fatalf("%s: usedBytes = %d, entry sizes = %d, maxBytes = %d", step, c.usedBytes, sum, c.maxBytes)
+		}
+		if len(c.entries) != len(want) || len(c.order) != len(want) {
+			t.Fatalf("%s: entries = %d, order = %v, want %v", step, len(c.entries), c.order, want)
+		}
+		for _, key := range want {
+			if _, ok := c.entries[key]; !ok {
+				t.Fatalf("%s: %q missing, order = %v", step, key, c.order)
+			}
+		}
+	}
+
+	for _, key := range []string{"a", "b", "c"} {
+		c.storeLocal(key, entry("1"))
+	}
+	check("fill", "a", "b", "c")
+	c.storeLocal("d", entry("1"))
+	check("evict oldest", "b", "c", "d")
+	c.storeLocal("c", entry("1234567890"))
+	check("overwrite grows", "c", "d")
+	c.mu.Lock()
+	c.entries["d"].expiresAt = time.Now().Add(-time.Second)
+	c.mu.Unlock()
+	if _, ok := c.localGet("d"); ok {
+		t.Fatal("expired entry returned")
+	}
+	check("expire", "c")
+	c.storeLocal("f", entry(strings.Repeat("x", int(c.maxBytes))))
+	check("oversize ignored", "c")
+
+	gone := &cacheEntry[string]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: time.Now().Add(time.Hour)}
+	for i := range errorLocalEntryCap + 1 {
+		c.storeLocal("gone"+strconv.Itoa(i), gone)
+	}
+	check("errors never evict values", "c")
+	if e, ok := c.localGet("gone1"); !ok || e.err == nil || len(c.errEntries) != errorLocalEntryCap {
+		t.Fatalf("error entries = %d, want cap %d with gone1 kept", len(c.errEntries), errorLocalEntryCap)
+	}
+	c.storeLocal("gone1", entry("1"))
+	check("value replaces error", "c", "gone1")
+	if len(c.errEntries) != errorLocalEntryCap-1 || len(c.errOrder) != errorLocalEntryCap-1 {
+		t.Fatalf("error entries = %d, order = %d after a value replaced one", len(c.errEntries), len(c.errOrder))
+	}
+}
+
+func TestPutAfterFlightWaitsForRunningLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newPersistentCache[int](nil, "test", nil, 1<<20)
+		call := &flightCall[int]{done: make(chan struct{})}
+		c.flight["k"] = call
+		go c.putAfterFlight(context.Background(), "k", 2, time.Hour, false)
+		synctest.Wait()
+		if _, ok := c.localGet("k"); ok {
+			t.Fatal("put ran before the running lookup finished")
+		}
+		c.storeLocal("k", &cacheEntry[int]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: time.Now().Add(time.Hour)})
+		close(call.done)
+		synctest.Wait()
+		if e, ok := c.localGet("k"); !ok || e.err != nil || e.value != 2 {
+			t.Fatalf("entry after lookup = %+v, want the put value", e)
+		}
+	})
+}
+
+func TestCacheFetchPanicBecomesUncachedError(t *testing.T) {
+	c := newPersistentCache[int](nil, "test", make(chan struct{}, 1), 1<<20)
+	var fetches atomic.Int32
+	for range 2 {
+		_, appErr := c.get(context.Background(), "panic", nil, func(context.Context) (int, time.Duration, bool, *AppError) {
+			fetches.Add(1)
+			panic("parser bug")
+		})
+		if appErr == nil || appErr.Status != http.StatusBadGateway || !appErr.Ephemeral {
+			t.Fatalf("panicking fetch error = %#v, want ephemeral 502", appErr)
+		}
+	}
+	if got := fetches.Load(); got != 2 {
+		t.Fatalf("fetches = %d, want 2 because a panic is not cached", got)
 	}
 }

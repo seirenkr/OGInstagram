@@ -3,7 +3,6 @@ package main
 import (
 	"html"
 	"net/url"
-	"strings"
 )
 
 const (
@@ -21,14 +20,14 @@ func emptyOrderedCollection(id string) []byte {
 	})
 }
 
-func noteObject(id string, attributedTo any, content, url, published string, attachment []any) []byte {
+func noteObject(id, attributedTo, content, href, published string, attachment []any) []byte {
 	n := map[string]any{
 		"@context":     asContext,
 		"id":           id,
 		"type":         "Note",
 		"attributedTo": attributedTo,
 		"content":      content,
-		"url":          url,
+		"url":          href,
 		"to":           []any{asPublic},
 		"attachment":   attachment,
 	}
@@ -38,11 +37,11 @@ func noteObject(id string, attributedTo any, content, url, published string, att
 	return jsonBytes(n)
 }
 
-func mediaObject(mediaType, url string, width, height int) map[string]any {
+func mediaObject(mediaType, href string, width, height int) map[string]any {
 	m := map[string]any{
 		"type":      "Document",
 		"mediaType": mediaType,
-		"url":       url,
+		"url":       href,
 	}
 	if width > 0 {
 		m["width"] = width
@@ -69,6 +68,14 @@ func statusContent(prefix, caption string, gallery bool) string {
 	return prefix + captionParagraphHTML(caption)
 }
 
+func postStatusContent(post Post, indicator string, gallery bool) string {
+	var stats string
+	if line := withIndicator(indicator, post.StatsLine); line != "" {
+		stats = "<p><b>" + html.EscapeString(line) + "</b></p>"
+	}
+	return statusContent(stats, post.Caption, gallery)
+}
+
 func (a *App) buildActivityStatus(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool) []byte {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 
@@ -76,7 +83,7 @@ func (a *App) buildActivityStatus(baseURL string, post Post, postType string, me
 	id := statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
 	selection := selectActivityAttachments(post, mediaIndex, specified)
 
-	content := statusContent("<p><b>"+html.EscapeString(withIndicator(selection.indicator, post.StatsLine))+"</b></p>", post.Caption, gallery)
+	content := postStatusContent(post, selection.indicator, gallery)
 
 	attachment := make([]any, 0, len(selection.items))
 	for _, it := range selection.items {
@@ -91,28 +98,11 @@ func activityAttachment(mediaURL string, att Attachment) map[string]any {
 	if att.Kind == "video" {
 		return mediaObject("video/mp4", mediaURL, width, height)
 	}
-	return mediaObject(imageMediaType(att.URL), mediaURL, width, height)
+	return mediaObject("image/jpeg", mediaURL, width, height)
 }
 
-func imageMediaType(rawURL string) string {
-	u := rawURL
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		u = u[:i]
-	}
-	switch {
-	case strings.HasSuffix(u, ".png"):
-		return "image/png"
-	case strings.HasSuffix(u, ".webp"):
-		return "image/webp"
-	case strings.HasSuffix(u, ".heic"):
-		return "image/heic"
-	default:
-		return "image/jpeg"
-	}
-}
-
-func profileStatusURL(baseURL, username string) string {
-	return actorURL(baseURL, username) + "/statuses/" + profileSnowcode(username)
+func profileStatusURL(baseURL, username string, gallery bool) string {
+	return actorURL(baseURL, username) + "/statuses/" + profileStatusSnowcode(username, gallery)
 }
 
 func storyStatusURL(baseURL, username, id string, gallery bool) string {
@@ -126,7 +116,10 @@ func (a *App) buildStoryActivityStatus(baseURL string, story Story, gallery bool
 		statusContent("", story.Caption, gallery), storyOriginURL(story.Username, story.ID), isoTime(story.CreatedAt), []any{media})
 }
 
-func profileDigestContent(p Profile) string {
+func profileDigestContent(p Profile, gallery bool) string {
+	if gallery {
+		return ""
+	}
 	content := "<p><b>" + html.EscapeString(profileStatsLine(p)) + "</b></p>"
 	content += captionParagraphHTML(p.Biography)
 	if p.IsPrivate {
@@ -135,13 +128,13 @@ func profileDigestContent(p Profile) string {
 	return content
 }
 
-func (a *App) buildProfileActivityStatus(baseURL string, p Profile) []byte {
+func (a *App) buildProfileActivityStatus(baseURL string, p Profile, gallery bool) []byte {
 	attachment := make([]any, 0, len(p.RecentMedia))
 	for i, m := range p.RecentMedia {
-		attachment = append(attachment, mediaObject(imageMediaType(m.Thumbnail), a.profileMediaOffloadURL(baseURL, p.Username, i), m.Width, m.Height))
+		attachment = append(attachment, mediaObject("image/jpeg", a.profileMediaOffloadURL(baseURL, p.Username, i), m.Width, m.Height))
 	}
-	return noteObject(profileStatusURL(baseURL, p.Username), actorURL(baseURL, p.Username),
-		profileDigestContent(p), baseURL+"/"+url.PathEscape(p.Username), "", attachment)
+	return noteObject(profileStatusURL(baseURL, p.Username, gallery), actorURL(baseURL, p.Username),
+		profileDigestContent(p, gallery), baseURL+"/"+url.PathEscape(p.Username), "", attachment)
 }
 
 func (a *App) buildFallbackAccount(baseURL, username string) []byte {

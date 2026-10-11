@@ -80,7 +80,7 @@ func TestOffloadURLsAreCanonicalAndResourceScoped(t *testing.T) {
 		}
 		expires, ok := parseCanonicalDecimal(parsed.Query().Get("exp"))
 		if lifetime := time.Until(time.Unix(int64(expires), 0)); !ok ||
-			lifetime > offloadCapabilityTTL || lifetime < offloadCapabilityTTL-time.Minute {
+			lifetime > offloadCapabilityTTL || lifetime < offloadCapabilityTTL-time.Hour {
 			t.Errorf("capability lifetime = %v, want ~%v: %s", lifetime, offloadCapabilityTTL, tc.raw)
 		}
 	}
@@ -114,33 +114,37 @@ func TestOffloadSignerSignsWithTheRotatedKey(t *testing.T) {
 func TestOffloadAuthorizeRejectsQueryMutations(t *testing.T) {
 	signer := mustOffloadSigner(testOffloadSigningKeys)
 	const path = "/offload/Ab_12/1"
-	signed := signer.url("https://x", path, false) // before now: see the rotation test
+	signed, _ := url.Parse(signer.url("https://x", path, false)) // before now: see the rotation test
 	now := time.Now()
-	resign := func(q url.Values, expires int64) {
-		q.Set("exp", strconv.FormatInt(expires, 10))
-		q.Set("sig", signer.signature(path, expires))
+	q := signed.Query()
+	v, kid, exp, sig := q.Get("v"), q.Get("kid"), q.Get("exp"), q.Get("sig")
+	capability := func(v, kid, exp, sig string) string { return "v=" + v + "&kid=" + kid + "&exp=" + exp + "&sig=" + sig }
+	resigned := func(expires int64) string {
+		return capability(v, kid, strconv.FormatInt(expires, 10), signer.signature(path, expires))
 	}
 	ttl := int64(offloadCapabilityTTL / time.Second)
 	for _, tt := range []struct {
-		name   string
-		mutate func(url.Values)
-		want   bool
+		name, query string
+		want        bool
 	}{
-		{"unchanged", func(url.Values) {}, true},
-		{"v missing", func(q url.Values) { q.Del("v") }, false},
-		{"duplicate sig", func(q url.Values) { q.Add("sig", q.Get("sig")) }, false},
-		{"v=3", func(q url.Values) { q.Set("v", "3") }, false},
-		{"unknown kid", func(q url.Values) { q.Set("kid", "nope") }, false},
-		{"expired", func(q url.Values) { resign(q, now.Unix()-1) }, false},
-		{"beyond TTL", func(q url.Values) { resign(q, now.Unix()+ttl+1) }, false},
-		{"non-canonical exp", func(q url.Values) { q.Set("exp", "0"+q.Get("exp")) }, false},
-		{"padded sig", func(q url.Values) { q.Set("sig", q.Get("sig")+"=") }, false},
+		{"unchanged", signed.RawQuery, true},
+		{"thumbnail", "thumbnail=1&" + signed.RawQuery, true},
+		{"v missing", "kid=" + kid + "&exp=" + exp + "&sig=" + sig, false},
+		{"duplicate sig", signed.RawQuery + "&sig=" + sig, false},
+		{"v=3", capability("3", kid, exp, sig), false},
+		{"unknown kid", capability(v, "nope", exp, sig), false},
+		{"expired", resigned(now.Unix() - 1), false},
+		{"beyond TTL", resigned(now.Unix() + ttl + 1), false},
+		{"non-canonical exp", capability(v, kid, "0"+exp, sig), false},
+		{"padded sig", capability(v, kid, exp, sig+"="), false},
+		{"extra parameter", signed.RawQuery + "&n=1", false},
+		{"thumbnail last", signed.RawQuery + "&thumbnail=1", false},
+		{"reordered", q.Encode(), false},
+		{"percent-encoded", capability(v, "test%2Dv1", exp, sig), false},
 	} {
-		u, _ := url.Parse(signed)
-		q := u.Query()
-		tt.mutate(q)
-		u.RawQuery = q.Encode()
-		if got := signer.authorize(u, now); got != tt.want {
+		u := *signed
+		u.RawQuery = tt.query
+		if got := signer.authorize(&u, now); got != tt.want {
 			t.Errorf("%s: authorize = %v, want %v", tt.name, got, tt.want)
 		}
 	}

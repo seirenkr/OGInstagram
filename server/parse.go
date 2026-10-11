@@ -29,7 +29,8 @@ func parseInstagramPost(body string) (Post, *AppError) {
 		}
 		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", cause)
 	}
-	if data.Exists() {
+	// Only an explicitly empty items list proves absence; any other shape is schema drift.
+	if items := data.Get("xdt_api__v1__media__shortcode__web_info.items"); items.IsArray() && len(items.Array()) == 0 {
 		return Post{}, igErr(404, errorCodeMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
 	}
 	return Post{}, igErr(502, errorCodeGraphQL, "Instagram response did not include media")
@@ -43,19 +44,18 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	username := user.Get("username").String()
 	fullName := user.Get("full_name").String()
 
-	var attachments []Attachment
-	carousel := item.Get("carousel_media").Array()
-	if len(carousel) > 0 {
-		for _, child := range carousel {
-			if att, ok := parseV1Attachment(child); ok {
-				attachments = append(attachments, att)
-			}
-		}
-	} else if att, ok := parseV1Attachment(item); ok {
-		attachments = append(attachments, att)
+	media := item.Get("carousel_media").Array()
+	if len(media) == 0 {
+		media = []gjson.Result{item}
 	}
-	if len(attachments) == 0 {
-		return Post{}, igErr(502, errorCodeUpstream, "v1 media had no usable attachments")
+	// Dropping an unusable child would shift every later img_index, so let the next source try.
+	var attachments []Attachment
+	for _, child := range media {
+		att, ok := parseV1Attachment(child)
+		if !ok {
+			return Post{}, igErr(502, errorCodeUpstream, "v1 media had an attachment without an image")
+		}
+		attachments = append(attachments, att)
 	}
 
 	return Post{
@@ -66,7 +66,7 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		ProfilePic:  user.Get("profile_pic_url").String(),
 		IsVerified:  user.Get("is_verified").Type == gjson.True,
 		Caption:     cmp.Or(item.Get("caption.text").String(), item.Get("caption_text").String()),
-		StatsLine:   statsLine(v1StatsPrefix(item), uintOf(item, "like_count"), uintOf(item, "comment_count")),
+		StatsLine:   statsLine(v1StatsPrefix(item), countOf(item, "like_count"), countOf(item, "comment_count")),
 		Attachments: attachments,
 		CreatedAt:   unixTime(cmp.Or(item.Get("taken_at").Int(), item.Get("taken_at_timestamp").Int())),
 	}, nil
@@ -79,8 +79,8 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 	}
 	w, h := mediaWidth(item), mediaHeight(item)
 	id := cmp.Or(item.Get("pk").String(), item.Get("id").String())
-	if uintOf(item, "media_type") == 2 {
-		return Attachment{ID: id, Kind: "video", URL: cmp.Or(bestVideoURL(item), thumbnail), Thumbnail: thumbnail, Width: w, Height: h}, true
+	if video := bestVideoURL(item); video != "" && uintOf(item, "media_type") == 2 {
+		return Attachment{ID: id, Kind: "video", URL: video, Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
 	return Attachment{ID: id, Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
 }
@@ -164,6 +164,13 @@ func uintOf(value gjson.Result, path string) int {
 		return 0
 	}
 	return int(n)
+}
+
+func countOf(value gjson.Result, path string) int {
+	if !present(value.Get(path)) {
+		return -1
+	}
+	return uintOf(value, path)
 }
 
 func unixTime(seconds int64) time.Time {

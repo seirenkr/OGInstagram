@@ -16,14 +16,25 @@
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/PPMori-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/PPMori-Semibold.woff2">
   <link rel="icon" href="/favicon-64.png" sizes="64x64" type="image/png">
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-jp-dynamic-subset.min.css">
-  <link rel="stylesheet" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <script nonce="__OG_CSP_NONCE__">
     (function () {
-      var saved = localStorage.getItem("theme");
+      var saved;
+      try { saved = localStorage.getItem("theme"); } catch (e) {}
       var dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
       document.documentElement.dataset.mode = dark ? "dark" : "light";
+      // Script-inserted stylesheets never block rendering. pretendard-jp exceeds
+      // jsDelivr's npm size limit, so it is pinned to the v1.3.9 commit instead.
+      [
+        ["https://cdn.jsdelivr.net/gh/orioncactus/pretendard@5c41199ea0024a9e0b2cb31735265056e5472d76/dist/web/variable/pretendardvariable-jp-dynamic-subset.css", "sha384-rSelq/kximCvEmDjno942LJlLokxEhaLMQ+RV+sB5dKi5omUYEHVbvXLysAoOzwV"],
+        ["https://cdn.jsdelivr.net/npm/pretendard@1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.css", "sha384-uR1wgObmx89ZQ4VVXHdzjbDJZ1PvBK01K+E3GebmaBKdZ87qRJvBWPoPbzWeEd5T"]
+      ].forEach(function (font) {
+        var link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = font[0];
+        link.integrity = font[1];
+        link.crossOrigin = "anonymous";
+        document.head.append(link);
+      });
     })();
   </script>
 </head>

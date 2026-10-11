@@ -2,14 +2,15 @@ package main
 
 import (
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 )
 
 func validProductionConfig() Config {
-	return Config{Port: 8080, BaseURL: "https://oginstagram.com", BudgetStartDate: "2026-10-06", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret", AdminPurgeToken: "token"}
+	return Config{Port: 8080, BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret"}
 }
 
 func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.T) {
@@ -24,9 +25,6 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 		{"half proxy", func(c *Config) { c.ProxyPass = "" }},
 		{"no trusted peer", func(c *Config) { c.TrustedProxies = nil }},
 		{"trust everyone", func(c *Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")} }},
-		{"host with port", func(c *Config) { c.AllowedHosts = []string{"oginstagram.com:80"} }},
-		{"malformed host", func(c *Config) { c.AllowedHosts = []string{"oginstagram.com\t"} }},
-		{"no quota start", func(c *Config) { c.BudgetStartDate = "" }},
 		{"base host not allowed", func(c *Config) { c.AllowedHosts = []string{"www.oginstagram.com"} }},
 		{"base URL with port", func(c *Config) { c.BaseURL = "https://oginstagram.com:8443" }},
 		{"HTTP production", func(c *Config) { c.BaseURL = "http://oginstagram.com" }},
@@ -39,6 +37,13 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 			}
 		})
 	}
+	for _, host := range []string{"g.oginstagram.com:443", "g.oginstagram.com\t"} {
+		cfg := validProductionConfig()
+		cfg.AllowedHosts = append(cfg.AllowedHosts, host)
+		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "hostnames without ports") {
+			t.Errorf("ALLOWED_HOSTS %q: %v", cfg.AllowedHosts, err)
+		}
+	}
 	cfg := validProductionConfig()
 	cfg.Development, cfg.ProxyUser, cfg.ProxyPass = true, "", ""
 	if err := cfg.validate(); err != nil {
@@ -46,9 +51,18 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 	}
 }
 
+func TestProxyURLRoundTripsCredentials(t *testing.T) {
+	u, err := url.Parse(proxyURL("user;x", "pass word", "abc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pass, _ := u.User.Password(); u.User.Username() != "user;x__cr.us;sessid.abc" || pass != "pass word" {
+		t.Fatalf("proxy credentials = %q", u.User)
+	}
+}
+
 func TestConfigRejectsMalformedPortAndTrustedProxy(t *testing.T) {
 	t.Setenv("PORT", "not-a-port")
-	t.Setenv("PROXY_BUDGET_START_DATE", "2026-10-06")
 	t.Setenv("DEVELOPMENT", "true")
 	if err := configFromEnv().validate(); err == nil {
 		t.Fatal("invalid port accepted")
@@ -110,16 +124,6 @@ func TestLoadHomeTemplatesRequiresEveryLocale(t *testing.T) {
 }
 
 func TestOptionalSettingsHaveSafeDefaults(t *testing.T) {
-	t.Setenv("PROXY_BUDGET_START_DATE", "")
-	if got, want := configFromEnv().BudgetStartDate, time.Now().UTC().Format(time.DateOnly); got != want {
-		t.Errorf("default budget start = %q, want today %q", got, want)
-	}
-	cfg := validProductionConfig()
-	cfg.AdminPurgeToken = ""
-	if err := cfg.validate(); err != nil {
-		t.Errorf("ADMIN_PURGE_TOKEN must be optional (purge disabled): %v", err)
-	}
-
 	dir := t.TempDir()
 	first, err := loadOrCreateOffloadKeys(dir)
 	if err != nil {

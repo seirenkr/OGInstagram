@@ -36,7 +36,7 @@ func (a *App) storyOffloadURL(baseURL, username, id string, thumbnail bool) stri
 
 func (a *App) storyAvatarURL(baseURL string, story Story) string {
 	if story.ProfilePic == "" {
-		return ""
+		return baseURL + defaultAvatarPath
 	}
 	path := "/offload/story/" + url.PathEscape(strings.ToLower(story.Username)) + "/" + url.PathEscape(story.ID) + "/avatar"
 	return a.offloadSigner.url(baseURL, path, false)
@@ -69,7 +69,7 @@ func (a *App) handleStoryOffload(req *http.Request, username, id string, avatar 
 	switch {
 	case avatar:
 		target = story.ProfilePic
-	case req.URL.Query().Has("thumbnail") && story.Media.Thumbnail != "":
+	case req.URL.Query().Has("thumbnail"):
 		target = story.Media.Thumbnail
 	}
 	if target == "" {
@@ -99,9 +99,7 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(story.Username)+`/">`,
 	)
 	h = append(h, dimensionTags("property", "og:image", media.Width, media.Height)...)
-	if avatar := a.storyAvatarURL(baseURL, story); avatar != "" {
-		h = append(h, `<link rel="apple-touch-icon" href="`+html.EscapeString(avatar)+`">`)
-	}
+	h = append(h, `<link rel="apple-touch-icon" href="`+html.EscapeString(a.storyAvatarURL(baseURL, story))+`">`)
 	if published := isoTime(story.CreatedAt); published != "" {
 		h = append(h, `<meta property="article:published_time" content="`+html.EscapeString(published)+`">`)
 	}
