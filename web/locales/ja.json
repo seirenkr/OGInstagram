@@ -41,6 +41,7 @@
     "placeholder": "Instagram のリンクを貼り付けてみてください",
     "invalid": "正しい Instagram の投稿・リール・プロフィール・ストーリーズのリンクを入力してください。",
     "fetchError": "プレビューを読み込めませんでした。しばらくしてからもう一度お試しください。",
+    "unavailable": "このリンクはプレビューできません。非公開・削除済み・制限付きの可能性があります。",
     "submit": "プレビューを作成",
     "previewDesc": "Instagram URLがOGInstagram URLに変わり、リッチプレビューが表示されるプレビュー",
     "you": "自分",

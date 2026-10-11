@@ -41,6 +41,7 @@
     "placeholder": "貼上一個 Instagram 連結試試",
     "invalid": "請輸入有效的 Instagram 貼文、Reels、個人檔案或限時動態連結。",
     "fetchError": "無法載入預覽，請稍後再試。",
+    "unavailable": "無法預覽此連結，內容可能是私人、已刪除或受限制的。",
     "submit": "建立預覽",
     "previewDesc": "Instagram 網址變成 OGInstagram 網址並顯示豐富預覽",
     "you": "我",

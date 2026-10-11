@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Badge } from "@cloudflare/kumo/components/badge";
 import { Banner } from "@cloudflare/kumo/components/banner";
-import { Button, LinkButton } from "@cloudflare/kumo/components/button";
+import { Button, LinkButton, buttonVariants } from "@cloudflare/kumo/components/button";
 import { Grid, GridItem } from "@cloudflare/kumo/components/grid";
 import { LayerCard } from "@cloudflare/kumo/components/layer-card";
-import { DropdownMenu } from "@cloudflare/kumo/components/dropdown";
 import { Text } from "@cloudflare/kumo/components/text";
 import { Tooltip, TooltipProvider } from "@cloudflare/kumo/components/tooltip";
 import { CheckIcon as Check } from "@phosphor-icons/react/Check";
@@ -72,7 +71,7 @@ function ThemeToggle({ dark, onChange }: { dark: boolean; onChange: (dark: boole
   function setTheme(nextDark: boolean) {
     const apply = () => {
       document.documentElement.dataset.mode = nextDark ? "dark" : "light";
-      localStorage.setItem("theme", nextDark ? "dark" : "light");
+      try { localStorage.setItem("theme", nextDark ? "dark" : "light"); } catch { /* blocked storage: the choice lasts until reload */ }
       onChange(nextDark);
     };
     if (document.startViewTransition) document.startViewTransition(apply);
@@ -148,18 +147,21 @@ export function App() {
           <a className="brand-link font-semibold no-underline rounded-sm focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-kumo-focus"
             href="/" translate="no">{data.brand}</a>
           <div className="flex items-center gap-2">
-          <DropdownMenu>
+          <details className="relative" onKeyDown={(event) => { if (event.key === "Escape") event.currentTarget.open = false; }}
+            onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}>
             <Tooltip content={data.js.language} side="bottom" render={
-              <DropdownMenu.Trigger render={<Button shape="square" variant="ghost" icon={Translate} aria-label={data.js.language} />} />
+              <summary className={`${buttonVariants({ variant: "ghost", shape: "square" })} list-none [&::-webkit-details-marker]:hidden`} aria-label={data.js.language}><Translate /></summary>
             } />
-            <DropdownMenu.Content>
+            <ul className="absolute right-0 z-50 mt-1 min-w-36 rounded-lg bg-kumo-control p-1.5 text-kumo-default shadow-lg ring ring-kumo-line">
               {Object.entries(languages).map(([code, label]) => {
                 const current = code === data.lang.toLowerCase();
-                return <DropdownMenu.LinkItem key={code} href={`/?hl=${code}`} translate="no" aria-current={current ? "page" : undefined}
-                  icon={<Check weight="bold" size={12} className={current ? "mr-2" : "mr-2 invisible"} />}>{label}</DropdownMenu.LinkItem>;
+                const tag = code.replace("-han", "-Han");
+                return <li key={code}><a href={`/?hl=${code}`} lang={tag} hrefLang={tag} translate="no" aria-current={current ? "page" : undefined}
+                  className="flex items-center rounded-md px-2 py-1.5 no-underline hover:bg-kumo-overlay focus-visible:ring-2 focus-visible:ring-kumo-brand focus-visible:outline-hidden">
+                  <Check weight="bold" size={12} className={current ? "mr-2" : "mr-2 invisible"} />{label}</a></li>;
               })}
-            </DropdownMenu.Content>
-          </DropdownMenu>
+            </ul>
+          </details>
           <ThemeToggle dark={dark} onChange={setDark} />
           </div>
         </div>
@@ -228,7 +230,7 @@ export function App() {
             ]} />}
           {statusFailed ? <Banner icon={<WarningCircle weight="fill" />} variant="error" title={data.js.statsUnavailable} /> : showCharts
             ? <ChartBoundary><React.Suspense fallback={<StatusChartsFallback />}>
-                <StatusCharts status={status ? status[statusTab] : null} dark={dark} lang={data.lang} requests={data.requests} responseTime={data.responseTime} copy={data.js} />
+                <StatusCharts key={statusTab} status={status ? status[statusTab] : null} dark={dark} lang={data.lang} requests={data.requests} responseTime={data.responseTime} copy={data.js} />
               </React.Suspense></ChartBoundary>
             : <StatusChartsFallback />}
         </Reveal>

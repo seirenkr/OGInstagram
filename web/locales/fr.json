@@ -41,6 +41,7 @@
     "placeholder": "Collez un lien Instagram",
     "invalid": "Saisissez un lien valide de publication, reel, profil ou story Instagram.",
     "fetchError": "Impossible de charger l'aperçu. Réessayez dans un instant.",
+    "unavailable": "Impossible d'afficher l'aperçu de ce lien. Il est peut-être privé, supprimé ou restreint.",
     "submit": "Créer l'aperçu",
     "previewDesc": "Une URL Instagram transformée en URL OGInstagram avec un aperçu riche",
     "you": "Moi",

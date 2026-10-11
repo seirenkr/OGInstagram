@@ -41,6 +41,7 @@
     "placeholder": "Cole um link do Instagram",
     "invalid": "Insira um link válido de publicação, reel, perfil ou story do Instagram.",
     "fetchError": "Não foi possível carregar a prévia. Tente novamente em instantes.",
+    "unavailable": "Não é possível gerar a prévia deste link. Ele pode ser privado, ter sido excluído ou ter restrições.",
     "submit": "Criar prévia",
     "previewDesc": "Uma URL do Instagram se transforma em uma URL do OGInstagram com prévia rica",
     "you": "Você",

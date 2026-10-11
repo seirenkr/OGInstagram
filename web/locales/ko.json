@@ -41,6 +41,7 @@
     "placeholder": "Instagram 링크를 붙여넣어 보세요",
     "invalid": "올바른 Instagram 게시물, 릴스, 프로필, 스토리 링크를 입력해 주세요.",
     "fetchError": "미리보기를 불러오지 못했어요. 잠시 후 다시 시도해 주세요.",
+    "unavailable": "이 링크는 미리볼 수 없어요. 비공개이거나 삭제되었거나 제한된 콘텐츠일 수 있어요.",
     "submit": "미리보기 만들기",
     "previewDesc": "Instagram URL이 OGInstagram URL로 바뀌고 리치 미리보기가 나타나는 미리보기",
     "you": "나",

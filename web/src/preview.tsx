@@ -5,7 +5,7 @@ import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/Pa
 import { PlayIcon as Play } from "@phosphor-icons/react/Play";
 import { parse as parseEmoji } from "@twemoji/parser";
 import { version as twemojiVersion } from "@twemoji/svg/package.json";
-import { canonicalServiceHost, instagramEmbedPath, mastodonStatusPathFromAlternate } from "../../shared/routes.ts";
+import { canonicalServiceHost, instagramEmbedPath } from "../../shared/routes.ts";
 import type en from "../locales/en.json";
 import { requestPreview } from "./preview-request.ts";
 
@@ -60,7 +60,7 @@ type PreviewProps = {
 
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onloadTurnstileCallback";
 const STATS_EMOJI_RE = /❤️|💬|📝|👤|▶️/;
-const TWEMOJI_BASE = `/twemoji/v${twemojiVersion}/`;
+const TWEMOJI_BASE = `https://cdn.jsdelivr.net/npm/@twemoji/svg@${twemojiVersion}/`;
 let turnstileReady: Promise<void> | null = null;
 
 function loadTurnstile(): Promise<void> {
@@ -117,11 +117,7 @@ const TwemojiText = React.memo(function TwemojiText({ children }: { children: st
   return <>{parts}</>;
 });
 
-function previewMediaUrl(
-  raw: string,
-  serviceHost: string,
-  video = false
-): string | undefined {
+function previewMediaUrl(raw: string, serviceHost: string): string | undefined {
   if (!raw) return undefined;
   let url: URL;
   try { url = new URL(raw, location.origin); } catch { return undefined; }
@@ -130,13 +126,6 @@ function previewMediaUrl(
   const urlHost = canonicalServiceHost(url.hostname.toLowerCase());
   if (localHost && urlHost === localHost) {
     url = new URL(`${url.pathname}${url.search}`, location.origin);
-  } else if (url.hostname.endsWith(".fbcdn.net") || url.hostname.endsWith(".cdninstagram.com")) {
-    url.hostname = "scontent.cdninstagram.com";
-  }
-  // The browser follows /offload's redirect to Instagram's CDN, which allows
-  // cross-origin images; a video shows its thumbnail.
-  if (video && url.origin === location.origin && url.pathname.startsWith("/offload/")) {
-    url.searchParams.set("thumbnail", "1");
   }
   return url.href;
 }
@@ -172,26 +161,23 @@ function renderStatusContent(input: string): React.ReactNode[] {
   return Array.from(body.childNodes, (node, index) => renderStatusNode(node, `content-${index}`));
 }
 
-async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
-  const href = doc.querySelector('link[rel="alternate"][type="application/activity+json"]')?.getAttribute("href");
-  const statusPath = href ? mastodonStatusPathFromAlternate(href, location.origin) : null;
-  if (!statusPath) throw new Error("missing Mastodon status metadata");
-  const response = await fetch(statusPath, { signal });
-  if (!response.ok) throw new Error(`status ${response.status}`);
-  const status = await response.json() as {
+// The preview API inlines the card's Mastodon status as JSON.
+function parseStatusPreview(doc: Document, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Partial<PreviewPost> {
+  const status = JSON.parse(doc.getElementById("og-status")?.textContent ?? "null") as {
     content?: unknown;
     created_at?: unknown;
     media_attachments?: unknown;
     account?: { url?: unknown; avatar?: unknown };
-  };
-  if (typeof status.content !== "string") throw new Error("invalid Mastodon status");
+  } | null;
+  if (typeof status?.content !== "string") throw new Error("invalid Mastodon status");
   const captionNodes = status.content ? renderStatusContent(status.content) : [];
   const media = Array.isArray(status.media_attachments) ? status.media_attachments.flatMap((raw): PreviewMedia[] => {
     if (!raw || typeof raw !== "object") return [];
     const item = raw as Record<string, unknown>;
     const kind = item.type === "image" ? "image" : item.type === "video" || item.type === "gifv" ? "video" : null;
-    if (!kind || typeof item.url !== "string") return [];
-    const mediaUrl = previewMediaUrl(item.url, serviceHost, kind === "video");
+    // preview_url is the image itself, or a video's thumbnail.
+    if (!kind || typeof item.preview_url !== "string") return [];
+    const mediaUrl = previewMediaUrl(item.preview_url, serviceHost);
     if (!mediaUrl) return [];
     const original = (item.meta as Record<string, unknown> | undefined)?.original as Record<string, unknown> | undefined;
     return [{
@@ -204,9 +190,7 @@ async function fetchStatusPreview(doc: Document, signal: AbortSignal, serviceHos
   const account = status.account;
   return {
     profileUrl: typeof account?.url === "string" ? safeHref(account.url) ?? undefined : undefined,
-    authorIconUrl: typeof account?.avatar === "string"
-      ? previewMediaUrl(account.avatar, serviceHost, false)
-      : undefined,
+    authorIconUrl: typeof account?.avatar === "string" ? previewMediaUrl(account.avatar, serviceHost) : undefined,
     captionNodes: captionNodes.length ? captionNodes : undefined,
     media: media.length ? media : undefined,
     date: previewDate(status.created_at, dateFormatter),
@@ -219,18 +203,22 @@ function previewDate(raw: unknown, dateFormatter: Intl.DateTimeFormat): string |
   return Number.isNaN(date.getTime()) ? undefined : dateFormatter.format(date);
 }
 
-async function parseHTMLPreview(doc: Document, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
+function parseHTMLPreview(doc: Document, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Partial<PreviewPost> {
   const meta = (key: string) => doc.querySelector(`meta[property="${key}"], meta[name="${key}"]`)?.getAttribute("content") ?? "";
   const title = meta("og:title");
   if (!title) throw new Error("no embed metadata");
-  const status = await fetchStatusPreview(doc, signal, serviceHost, dateFormatter)
-    .catch((error: unknown): Partial<PreviewPost> => { if (signal.aborted) throw error; return {}; });
+  let status: Partial<PreviewPost> = {};
+  try {
+    status = parseStatusPreview(doc, serviceHost, dateFormatter);
+  } catch {
+    // The Open Graph tags alone still make a preview.
+  }
   const description = meta("og:description");
   const [firstBlock = "", ...restBlocks] = description.split("\n\n");
   const hasStats = STATS_EMOJI_RE.test(firstBlock);
   const isProfile = meta("og:type") === "profile";
   const isVideo = Boolean(meta("og:video"));
-  const image = previewMediaUrl(meta("og:image"), serviceHost, isVideo);
+  const image = previewMediaUrl(meta("og:image"), serviceHost);
   const authorIcon = previewMediaUrl(
     doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "",
     serviceHost
@@ -253,11 +241,12 @@ async function parseHTMLPreview(doc: Document, signal: AbortSignal, serviceHost:
 async function fetchPreview(path: string, token: string | undefined, signal: AbortSignal, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Promise<Partial<PreviewPost>> {
   const response = await requestPreview(path, token, signal);
   if (response.status === 429) throw new Error("rate-limited");
+  if (response.status === 404 || response.status === 451) throw new Error("unavailable");
   if (!response.ok) throw new Error(`status ${response.status}`);
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!contentType.includes("text/html")) throw new Error("invalid preview response");
   const doc = new DOMParser().parseFromString(await response.text(), "text/html");
-  return parseHTMLPreview(doc, signal, serviceHost, dateFormatter);
+  return parseHTMLPreview(doc, serviceHost, dateFormatter);
 }
 
 function PreviewMediaGrid({ items = [], videoUnavailable }: { items?: PreviewMedia[]; videoUnavailable: string }) {
@@ -310,19 +299,18 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
   const [typewriterState, setTypewriterState] = useState<"typing" | "paused" | "done">("typing");
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [loading, setLoading] = useState(false);
   const composer = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
   const typewriterText = useRef<HTMLSpanElement>(null);
   const typewriterCaret = useRef<HTMLSpanElement>(null);
-  const nextPostId = useRef(1);
+  const lastPostId = useRef(0);
   const previewAbort = useRef<AbortController | null>(null);
   const turnstileHost = useRef<HTMLDivElement>(null);
   const turnstileWidget = useRef<string | null>(null);
   const pendingPath = useRef<string | null>(null);
   const verificationAttempt = useRef(0);
-
-  useEffect(() => {
-    if (turnstileSiteKey) void loadTurnstile().catch(() => {});
-  }, [turnstileSiteKey]);
+  const wasVerifying = useRef(false);
 
   useEffect(() => () => {
     verificationAttempt.current++;
@@ -344,6 +332,7 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
     if (hadPendingVerification) setVerifying(false);
     previewAbort.current?.abort();
     previewAbort.current = null;
+    setLoading(false);
   }
 
   function failVerification() {
@@ -413,6 +402,12 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
     };
   }, [baseHost, previewActive, reduceMotion, samplePost]);
 
+  // The disabled input dropped focus to <body> while verifying.
+  useEffect(() => {
+    if (wasVerifying.current && !verifying && document.activeElement === document.body) input.current?.focus();
+    wasVerifying.current = verifying;
+  }, [verifying]);
+
   useEffect(() => {
     if (postId === undefined || reduceMotion) return;
     const morphTimer = window.setTimeout(() => setStage("morph"), 900);
@@ -425,13 +420,17 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
 
   async function runPreview(path: string, token?: string): Promise<void> {
     previewAbort.current?.abort();
-    const id = nextPostId.current++;
     const controller = new AbortController();
     previewAbort.current = controller;
+    setLoading(true);
     setError(null);
-    setInputValue("");
-    setStage("sent");
-    setPost({ id, author: copy.you, avatar: "/preview/v1/avatar-3.svg", time: timeFormatter.format(new Date()), path });
+    // A token retry fills in the message already on screen.
+    const id = token === undefined ? ++lastPostId.current : lastPostId.current;
+    if (token === undefined) {
+      setInputValue("");
+      setStage("sent");
+      setPost({ id, author: copy.you, avatar: "/preview/v1/avatar-3.svg", time: timeFormatter.format(new Date()), path });
+    }
     try {
       const live = await fetchPreview(path, token, controller.signal, host, dateFormatter);
       if (!controller.signal.aborted) setPost((current) => current && current.id === id ? { ...current, ...live } : current);
@@ -442,14 +441,19 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
         pendingPath.current = path;
         setVerifying(true);
         const current = () => verificationAttempt.current === attempt && pendingPath.current === path;
-        void loadTurnstile()
+        const timeout = new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("Turnstile load timed out")), 15_000));
+        void Promise.race([loadTurnstile(), timeout])
           .then(() => { if (current()) executeTurnstile(); })
           .catch(() => { if (current()) failVerification(); });
         return;
       }
-      setError(reason instanceof Error && reason.message === "rate-limited" ? copy.rateLimited : copy.fetchError);
+      const message = reason instanceof Error ? reason.message : "";
+      setError(message === "rate-limited" ? copy.rateLimited : message === "unavailable" ? copy.unavailable : copy.fetchError);
     } finally {
-      if (previewAbort.current === controller) previewAbort.current = null;
+      if (previewAbort.current === controller) {
+        previewAbort.current = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -510,29 +514,30 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
             </div>
           </div> : null}
       </div>
-      <form className="flex flex-none flex-wrap items-start gap-2 border-t border-[color-mix(in_srgb,var(--color-kumo-hairline)_86%,transparent)] bg-[color-mix(in_srgb,var(--color-kumo-recessed)_55%,var(--color-kumo-elevated))] p-3 pb-3.5" onSubmit={submitLink}>
+      <form className="flex flex-none flex-wrap items-start gap-2 border-t border-[color-mix(in_srgb,var(--color-kumo-hairline)_86%,transparent)] bg-[color-mix(in_srgb,var(--color-kumo-recessed)_55%,var(--color-kumo-elevated))] p-3 pb-3.5" aria-busy={loading || verifying} onSubmit={submitLink}>
         <div ref={composer} className="composer-pulse relative min-w-0 flex-1 rounded-lg [&_label]:hidden">
-          <Input className={`w-full ${previewActive && !reduceMotion && typewriterState !== "done" ? "text-transparent caret-transparent placeholder:text-transparent" : ""}`}
+          <Input ref={input} className={`w-full ${previewActive && !reduceMotion && typewriterState !== "done" ? "text-transparent caret-transparent placeholder:text-transparent" : ""}`}
             value={inputValue} onChange={(event) => {
-              cancelPreviewWork();
               setInputValue(event.target.value);
               setPreviewActive(false);
               if (error) setError(null);
             }}
             onFocus={() => {
+              if (turnstileSiteKey) void loadTurnstile().catch(() => {});
               if (previewActive) {
                 cancelPreviewWork();
                 setPreviewActive(false);
                 setInputValue("");
               }
             }} placeholder={previewActive && !reduceMotion && typewriterState !== "done" ? "" : copy.placeholder}
-            aria-label={copy.placeholder} error={error ?? undefined} disabled={verifying} translate="no" passwordManagerIgnore autoComplete="off" spellCheck={false} inputMode="url" enterKeyHint="go" />
+            label={copy.placeholder} aria-label={copy.placeholder} error={error ?? undefined} disabled={verifying} translate="no" passwordManagerIgnore autoComplete="off" spellCheck={false} inputMode="url" enterKeyHint="go" />
           {previewActive && !reduceMotion && typewriterState !== "done" ? <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-3 right-3 flex items-center overflow-hidden whitespace-pre text-base text-kumo-default">
             <span className="relative inline-block max-w-full">
               <span ref={typewriterText} className="typewriter-text block truncate">{`https://${baseHost}${samplePost.path}`}</span>
               <span ref={typewriterCaret} className={`absolute top-[0.1em] left-[0.2em] inline-block h-[1em] w-[2px] bg-kumo-brand ${typewriterState === "paused" ? "typewriter-caret-blink" : ""}`} />
             </span>
           </span> : null}
+          <p role="alert" className="sr-only">{error}</p>
         </div>
         <Button type="submit" variant="primary" shape="square" icon={PaperPlaneRight} aria-label={copy.submit} disabled={!turnstileSiteKey || verifying} />
         <div ref={turnstileHost} className="basis-full empty:hidden" />

@@ -41,6 +41,7 @@
     "placeholder": "Pega un enlace de Instagram",
     "invalid": "Introduce un enlace válido de publicación, reel, perfil o historia de Instagram.",
     "fetchError": "No se pudo cargar la vista previa. Inténtalo de nuevo en un momento.",
+    "unavailable": "No se puede previsualizar este enlace. Puede ser privado, haberse eliminado o estar restringido.",
     "submit": "Crear vista previa",
     "previewDesc": "Una URL de Instagram se convierte en una URL de OGInstagram con vista previa enriquecida",
     "you": "Tú",

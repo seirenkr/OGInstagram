@@ -1,4 +1,6 @@
 @source "../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+/* Kumo components this site never imports only add render-blocking CSS; drop a name here before using it. */
+@source not "../../node_modules/@cloudflare/kumo/dist/chunks/{autocomplete,breadcrumbs,button-group,checkbox,clipboard-text,cloudflare-logo,code,collapsible,combobox,command-palette,date-picker,date-range-picker,dialog,dropdown,empty,flow,inline-copy-text,layer-dialog,menubar,meter,pagination,popover,radio,select,sensitive-input,sidebar,surface,switch,table,tag-input,toast,toolbar}-*.js";
 @import "@cloudflare/kumo/styles/tailwind";
 @import "tailwindcss";
 
