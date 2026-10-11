@@ -58,7 +58,7 @@ services:
 
   # Access log, visitor IP (realip), and preview rate limit.
   proxy:
-    image: nginxinc/nginx-unprivileged:1.30-alpine@sha256:15c994d10d6d78658721c3bcafff14cb281fba2a4bdf9d5ba92c416a472516e3
+    image: nginxinc/nginx-unprivileged:1.31-alpine@sha256:b9241c6e7b8e9a862f129d8d4199ab64b10390949a78bdd5603379b32c844083
     restart: unless-stopped
     read_only: true
     mem_limit: 64m
