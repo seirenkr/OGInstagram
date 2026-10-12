@@ -190,7 +190,7 @@ type unreadResponseBody struct {
 func (b *unreadResponseBody) Read([]byte) (int, error) { b.reads++; return 0, io.EOF }
 func (b *unreadResponseBody) Close() error             { b.closed = true; return nil }
 
-func TestJSONRejectsHTMLAndRedirectWithoutReading(t *testing.T) {
+func TestJSONRejectsHTMLAndRedirect(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -209,7 +209,7 @@ func TestJSONRejectsHTMLAndRedirectWithoutReading(t *testing.T) {
 				return &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": []string{tc.kind}, "Location": []string{instagramOrigin + "/accounts/login/"}}, Body: body, Request: r}, nil
 			})}
 			status, _, err := fetchRequest(context.Background(), client, webLoggedOutSpec("ABC123"))
-			if status != tc.status || err == nil || calls != 1 || redirects != 0 || body.reads != 0 || !body.closed {
+			if status != tc.status || err == nil || calls != 1 || redirects != 0 || (tc.status == 302) != (body.reads == 0) || !body.closed {
 				t.Fatalf("status=%d err=%v calls=%d redirects=%d reads=%d closed=%t", status, err, calls, redirects, body.reads, body.closed)
 			}
 			if err := client.CheckRedirect(nil, nil); err != nil || redirects != 1 {

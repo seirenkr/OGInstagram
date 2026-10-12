@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -272,6 +273,41 @@ func TestFetchRequestCountsWireBytes(t *testing.T) {
 		t.Fatalf("counted %d bytes, want the %d compressed bytes", got, len(wire))
 	}
 }
+
+func TestFetchRequestReadsJSONLabeledAsHTML(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		page       bool
+	}{
+		{"json error", `{"success":false,"response":4}`, false},
+		{"html page", "<html><title>x</title></html>", true},
+		{"oversized json", `{"x":"` + strings.Repeat("a", pageProbeBytes) + `"}`, true},
+	} {
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return mediaTestResponse(r, 200, http.Header{"Content-Type": {"text/html; charset=utf-8"}}, []byte(tt.body)), nil
+		})}
+		_, out, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodPost, url: "https://example.com/api", expectJSON: true, interpret: statusOnly})
+		if gotPage := err != nil && strings.Contains(err.PublicMessage, "page instead of JSON"); gotPage != tt.page || (!tt.page && (err != nil || out != tt.body)) {
+			t.Errorf("%s: out=%q err=%v, want page=%v", tt.name, out, err, tt.page)
+		}
+	}
+}
+
+func TestFetchRequestProbesHTMLWithinLimit(t *testing.T) {
+	var read int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		page := strings.NewReader("<html>" + strings.Repeat("x", 1<<20))
+		body := readerFunc(func(p []byte) (int, error) { n, err := page.Read(p); read += n; return n, err })
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/html"}}, Body: io.NopCloser(body), Request: r}, nil
+	})}
+	if _, _, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodGet, url: "https://example.com/api", expectJSON: true, interpret: statusOnly}); err == nil || read > pageProbeBytes+1 {
+		t.Fatalf("err=%v read=%d, want a page error after at most %d bytes", err, read, pageProbeBytes+1)
+	}
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
 func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
 	logOutbound(context.Background(), "op", "direct", http.MethodGet, "https://example.com/p#%zz", time.Now(), 0, 0,
