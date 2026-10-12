@@ -105,6 +105,49 @@ func TestOembedNotFoundIsPermanentOnlyAfterHelperAnswered(t *testing.T) {
 	}
 }
 
+func TestGatedVerdictIsShortWhileHelperCouldNotAsk(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		helperErr *AppError
+		code      string
+		ttl       time.Duration
+	}{
+		{"helper paused", ephemeralErr(http.StatusBadGateway, errorCodeCaptchaRequired, "external helper paused: verification failed"), errorCodeUpstream, transientErrorCacheSeconds * time.Second},
+		{"helper found no post", igErr(http.StatusNotFound, errorCodeUpstream, "external helper found no post"), errorCodeRestricted, permanentErrorCacheSeconds * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := externalHelperPostImpl
+			t.Cleanup(func() { externalHelperPostImpl = previous })
+			externalHelperPostImpl = func(*App, context.Context, string) (Post, *AppError) { return Post{}, tc.helperErr }
+			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				t.Error("paused embed unexpectedly fetched")
+				return mediaTestResponse(r, http.StatusInternalServerError, nil, nil), nil
+			}))
+			synctest.Test(t, func(t *testing.T) {
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if strings.Contains(r.URL.Path, "get_ruling_for_content") {
+						return mediaTestResponse(r, 200, nil, []byte(`{"status":"ok"}`)), nil
+					}
+					if r.URL.Path == "/api/v1/oembed/" {
+						return mediaTestResponse(r, 400, nil, []byte(`{"status":"fail","message":"geoblock_required","gating_type_thrift":3,"title":"Gated","description":"d"}`)), nil
+					}
+					return mediaTestResponse(r, 200, nil, []byte(`{"data":null,"errors":[{"message":"field_exception","code":1675030}]}`)), nil
+				})}
+				pool := &SessionPool{sessions: []*Session{{client: client}}}
+				a := newApp(Config{}, pool, offloadSigner{})
+				a.embedPausedUntil.Store(time.Now().Add(time.Minute).UnixNano())
+				_, err := a.getPost(context.Background(), "ABC123", nil)
+				if err == nil || err.Code != tc.code || err.CardCode != errorCodeRestricted || err.CardTitle != "Gated" {
+					t.Fatalf("getPost error = %#v, want code %s with the gated card", err, tc.code)
+				}
+				if entry, ok := a.posts.localGet("ABC123"); !ok || time.Until(entry.expiresAt) != tc.ttl {
+					t.Fatalf("cached verdict TTL wrong, want %s", tc.ttl)
+				}
+			})
+		})
+	}
+}
+
 func TestLateFinalVerdictKeepsHelperAndFillsCache(t *testing.T) {
 	const graphQLDelay = externalHelperHedgeDelay + 100*time.Millisecond
 	previous := externalHelperPostImpl
