@@ -49,6 +49,8 @@ func statusOnly(status int, _ []byte) *AppError {
 	return nil
 }
 
+const pageProbeBytes = 4 << 10
+
 func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (status int, out string, ferr *AppError) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -84,7 +86,8 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	wire := countingReader{resp.Body, outboundCounter(spec.operation)}
 	status = resp.StatusCode
 	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
-	if spec.expectJSON && ((status >= 300 && status < 400) || contentType == "text/html" || contentType == "application/xhtml+xml") {
+	isPage := spec.expectJSON && (contentType == "text/html" || contentType == "application/xhtml+xml")
+	pageError := func() (int, string, *AppError) {
 		// Cancel before closing: HTTP/2 can stop the stream without draining it.
 		cancel()
 		if status >= 400 {
@@ -97,6 +100,14 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 			code = errorCodeLoginRequired
 		}
 		return status, "", igErr(http.StatusBadGateway, code, spec.subject+" returned a page instead of JSON")
+	}
+	if spec.expectJSON && status >= 300 && status < 400 {
+		return pageError()
+	}
+	readLimit := int64(maxResponseBytes)
+	if isPage {
+		// Some APIs label small JSON errors text/html; a few KB tells them from a real page.
+		readLimit = pageProbeBytes
 	}
 	var body io.Reader = wire
 	switch strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))) {
@@ -116,9 +127,12 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	default:
 		return status, "", igErr(http.StatusBadGateway, errorCodeUpstream, spec.subject+" returned an unsupported encoding")
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	raw, readErr := io.ReadAll(io.LimitReader(body, readLimit+1))
 	if ctx.Err() != nil {
 		return status, "", contextAppError(ctx)
+	}
+	if isPage && (readErr != nil || len(raw) > pageProbeBytes || !gjson.ValidBytes(raw)) {
+		return pageError()
 	}
 	if readErr != nil {
 		return status, "", requestError(readErr, spec.subject+" response read failed")
