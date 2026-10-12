@@ -171,13 +171,22 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			// oEmbed also 404s posts it hides from logged-out viewers. Its 404 means
 			// "gone" only when the ruling could not tell and the external helper had
 			// no post either.
+			helperAsked := false
 			select {
 			case <-helperDone:
 				if outcome.status == http.StatusNotFound && isTransient(enrichedErr.Code) && !rulingAnswered.Load() &&
 					helperErr != nil && helperErr.Status == http.StatusNotFound && helperErr.Code == errorCodeUpstream {
 					return Post{}, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
 				}
+				helperAsked = helperErr != nil && !helperErr.Ephemeral &&
+					helperErr.Code != errorCodeConnection && helperErr.Code != errorCodeRateLimited
 			default:
+			}
+			// The external helper can still fetch gated posts. If it never got to ask,
+			// show the gate but cache it briefly so the next request can try again.
+			if externalHelperPostImpl != nil && !helperAsked &&
+				(enrichedErr.Code == errorCodeRestricted || enrichedErr.Code == errorCodeGeoBlocked) {
+				enrichedErr.Code = errorCodeUpstream
 			}
 			return Post{}, false, enrichedErr
 		}
