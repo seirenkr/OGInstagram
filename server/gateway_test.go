@@ -133,8 +133,8 @@ func TestGatewayBotHumanGalleryDirectRoutes(t *testing.T) {
 	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: Post{Shortcode: "ABC123", Username: "alice", Caption: "caption", ProfilePic: cdn + "pa.jpg", Attachments: media}, expiresAt: exp})
 	g.app.profiles.storeLocal("alice", &cacheEntry[Profile]{value: Profile{Username: "alice", Biography: "bio", ProfilePic: cdn + "a.jpg", RecentMedia: []ProfileMedia{{Thumbnail: cdn + "r1.jpg"}}}, expiresAt: exp})
 	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", Caption: "story caption", ProfilePic: cdn + "sa.jpg", Media: Attachment{Kind: "image", URL: cdn + "s.jpg"}}, expiresAt: exp})
-	// Direct hosts and offload paths redirect to the media; gallery hosts (never a
-	// client query) blank the description. Offload signatures are checked in ServeHTTP.
+	// Direct hosts and offload media paths redirect to the media; gallery hosts (never
+	// a client query) blank the description. Offload signatures are checked in ServeHTTP.
 	for _, tt := range []struct {
 		host, path, redirect, category, location string
 		gallery                                  bool
@@ -150,10 +150,7 @@ func TestGatewayBotHumanGalleryDirectRoutes(t *testing.T) {
 		{"g.oginstagram.com", "/alice", "https://www.instagram.com/alice/", "profile", "", true},
 		{"oginstagram.com", "/offload/ABC123/2", "", "", cdn + "2.jpg", false},
 		{"oginstagram.com", "/offload/ABC123/2?thumbnail=1", "", "", cdn + "t2.jpg", false},
-		{"oginstagram.com", "/offload/ABC123/avatar", "", "", cdn + "pa.jpg", false},
 		{"oginstagram.com", "/offload/@Alice/1", "", "", cdn + "r1.jpg", false},
-		{"oginstagram.com", "/offload/@alice", "", "", cdn + "a.jpg", false},
-		{"oginstagram.com", "/offload/story/alice/123/avatar", "", "", cdn + "sa.jpg", false},
 	} {
 		r := publicRequest("GET", tt.path)
 		r.Host = tt.host
@@ -545,6 +542,97 @@ func TestGatewayEdgeCachesOnlyURLKeyedSuccesses(t *testing.T) {
 			tt.maxAge == 0 && edge != "" || tt.maxAge > 0 && (m == nil || age < tt.maxAge-2 || age > tt.maxAge || (m[2] != "") != tt.revalidate) {
 			t.Errorf("%s %s%s = %d, Cache-Control %q, Cloudflare-CDN-Cache-Control %q", tt.method, tt.host, tt.target, w.Code, w.Header().Get("Cache-Control"), edge)
 		}
+	}
+}
+
+func TestGatewayServesAvatarsFromOrigin(t *testing.T) {
+	g := testGateway(t)
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	cdn := "https://scontent.cdninstagram.com/"
+	oe := "?oe=" + strconv.FormatInt(now.Add(3*time.Hour).Unix(), 16)
+	jpeg := "\xFF\xD8\xFF avatar"
+	var fetched []string
+	stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		fetched = append(fetched, r.URL.Host+r.URL.Path)
+		if !trustedMediaURL(r.URL) {
+			t.Errorf("fetched untrusted %s", r.URL)
+		}
+		reply := func(status int, contentType, body string) (*http.Response, error) {
+			h := http.Header{"Content-Type": {contentType}}
+			return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		switch r.URL.Path {
+		case "/pa.jpg":
+			return reply(200, "image/jpeg", jpeg)
+		case "/a.png":
+			return reply(200, "image/png; charset=binary", "png")
+		case "/sa.webp":
+			return reply(200, "image/webp", "webp")
+		case "/page.jpg":
+			return reply(200, "text/html", "<html>")
+		case "/big.jpg":
+			return reply(200, "image/jpeg", strings.Repeat("x", maxAvatarBytes+1))
+		case "/away.jpg":
+			return &http.Response{StatusCode: 302, Header: http.Header{"Location": {"https://attacker.example/x.jpg"}}, Body: http.NoBody}, nil
+		case "/slow.jpg":
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		return reply(404, "text/plain", "not found")
+	}))
+	posts := map[string]string{"ABC123": cdn + "pa.jpg" + oe, "PAGE12": cdn + "page.jpg", "BIG123": cdn + "big.jpg", "GONE12": cdn + "gone.jpg",
+		"AWAY12": cdn + "away.jpg", "FOREIG": "https://cdn.example/avatar.jpg", "NOPIC1": ""}
+	for code, pic := range posts {
+		g.app.posts.storeLocal(code, &cacheEntry[Post]{value: Post{Shortcode: code, Username: "alice", ProfilePic: pic, Attachments: []Attachment{{Kind: "image", URL: cdn + "1.jpg" + oe}}}, expiresAt: exp})
+	}
+	g.app.profiles.storeLocal("alice", &cacheEntry[Profile]{value: Profile{Username: "alice", ProfilePic: cdn + "a.png" + oe, RecentMedia: []ProfileMedia{{Thumbnail: cdn + "r1.jpg"}}}, expiresAt: exp})
+	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", ProfilePic: cdn + "sa.webp", Media: Attachment{Kind: "image", URL: cdn + "s.jpg"}}, expiresAt: exp})
+	for _, tt := range []struct {
+		method, path, contentType, body, location string
+		maxAge                                    int // 0: no Cloudflare-CDN-Cache-Control
+		fetch                                     bool
+	}{
+		{"GET", "/offload/ABC123/avatar", "image/jpeg", jpeg, "", 9000, true},
+		{"HEAD", "/offload/ABC123/avatar", "image/jpeg", "", "", 9000, true},
+		{"GET", "/offload/@alice/avatar", "image/png", "png", "", 9000, true},
+		{"GET", "/offload/@alice", "image/png", "png", "", 9000, true},
+		{"GET", "/offload/story/alice/123/avatar", "image/webp", "webp", "", 86400, true},
+		// A failed copy still redirects bots, and the edge asks again within a minute.
+		{"GET", "/offload/PAGE12/avatar", "", "", cdn + "page.jpg", 60, true},
+		{"GET", "/offload/BIG123/avatar", "", "", cdn + "big.jpg", 60, true},
+		{"GET", "/offload/GONE12/avatar", "", "", cdn + "gone.jpg", 60, true},
+		{"GET", "/offload/AWAY12/avatar", "", "", cdn + "away.jpg", 60, true},
+		{"GET", "/offload/FOREIG/avatar", "", "", "https://cdn.example/avatar.jpg", 86400, false},
+		{"GET", "/offload/NOPIC1/avatar", "", "", "https://oginstagram.com" + defaultAvatarPath, 86400, false},
+		{"GET", "/offload/ABC123/1", "", "", cdn + "1.jpg" + oe, 9000, false},
+		{"GET", "/offload/@alice/1", "", "", cdn + "r1.jpg", 86400, false},
+		{"GET", "/offload/story/alice/123", "", "", cdn + "s.jpg", 86400, false},
+	} {
+		fetched = nil
+		signed, _ := url.Parse(g.app.offloadSigner.url("https://oginstagram.com", tt.path, false))
+		r := publicRequest(tt.method, signed.RequestURI())
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		edge := w.Header().Get("Cloudflare-CDN-Cache-Control")
+		age := -1
+		if m := edgeCacheControl.FindStringSubmatch(edge); m != nil {
+			age, _ = strconv.Atoi(m[1])
+		}
+		status := 302
+		if tt.contentType != "" {
+			status = 200
+		}
+		if w.Code != status || w.Header().Get("Location") != tt.location || w.Body.String() != tt.body ||
+			tt.contentType != "" && w.Header().Get("Content-Type") != tt.contentType || w.Header().Get("Cache-Control") != "no-store" ||
+			tt.maxAge == 0 && edge != "" || tt.maxAge > 0 && (age < tt.maxAge-2 || age > tt.maxAge) || (len(fetched) > 0) != tt.fetch {
+			t.Errorf("%s %s = %d %q %v %.40q (fetched %v)", tt.method, tt.path, w.Code, edge, w.Header(), w.Body.String(), fetched)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if res := avatarResp(ctx, cdn+"slow.jpg"); res.status != 302 || res.headers["Location"] != cdn+"slow.jpg" || res.originStatus != http.StatusGatewayTimeout || res.headers["Cloudflare-CDN-Cache-Control"] != "max-age=60" {
+		t.Errorf("slow avatar = %d %v origin %d", res.status, res.headers, res.originStatus)
 	}
 }
 

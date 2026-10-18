@@ -168,6 +168,8 @@ type resp struct {
 	originStatus int
 	errorType    string
 	cacheHit     bool
+	// The CDN URL whose bytes an offload 200 carries; it bounds the edge TTL.
+	mediaURL string
 }
 
 func htmlResp(status int, body string) resp {
@@ -338,10 +340,7 @@ func (a *App) handleOffload(req *http.Request, shortcode string, index int, avat
 			target = media.Thumbnail
 		}
 	}
-	if target == "" {
-		target = a.publicBaseURL(req) + defaultAvatarPath
-	}
-	return tagFetch(redirectResp(target, 302), meta)
+	return tagFetch(a.offloadResp(req, target, avatar), meta)
 }
 
 // n selects the nth recent media item; 0 selects the profile picture.
@@ -358,10 +357,7 @@ func (a *App) handleProfileOffload(req *http.Request, username string, n int) re
 		}
 		target = p.RecentMedia[n-1].Thumbnail
 	}
-	if target == "" {
-		target = a.publicBaseURL(req) + defaultAvatarPath
-	}
-	return tagFetch(redirectResp(target, 302), meta)
+	return tagFetch(a.offloadResp(req, target, n == 0), meta)
 }
 
 // Gateway.ServeHTTP stores the origin it validated; the host rule below is

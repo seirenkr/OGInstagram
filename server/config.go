@@ -43,6 +43,8 @@ const (
 	// this it is no signal. It stays under the 3 s after which a 504 marks the
 	// exit IP hung.
 	rulingTimeout = 2 * time.Second
+	// Past this a profile picture copy gives way to the CDN redirect.
+	avatarTimeout = 2500 * time.Millisecond
 
 	rotateCooldown        = 3 * time.Second
 	helperCaptchaCooldown = time.Minute
@@ -59,6 +61,7 @@ const (
 	localStoryCacheBytes   = 4 << 20
 
 	maxResponseBytes = 1 << 20
+	maxAvatarBytes   = 512 << 10 // profile pictures are 5-30 KiB
 
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second

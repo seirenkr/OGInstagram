@@ -78,10 +78,7 @@ func (a *App) handleStoryOffload(req *http.Request, username, id string, avatar 
 	case req.URL.Query().Has("thumbnail"):
 		target = story.Media.Thumbnail
 	}
-	if target == "" {
-		target = a.publicBaseURL(req) + defaultAvatarPath
-	}
-	return tagFetch(redirectResp(target, 302), meta)
+	return tagFetch(a.offloadResp(req, target, avatar), meta)
 }
 
 func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref, thumbnailHref string, gallery, support bool) string {

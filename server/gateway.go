@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -235,10 +236,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	result := g.render(r, route)
-	// An error fallback (originStatus set) points at Instagram, not media, and
-	// must not outlive the origin's own short error cache.
-	if route.offload && result.status == http.StatusFound && result.originStatus == 0 {
-		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, result.headers["Location"], time.Now()))
+	// An error fallback (originStatus set) points at Instagram or at an avatar
+	// not yet copied, and keeps only the short edge TTL its handler set, if any.
+	if route.offload && (result.status == http.StatusFound || result.status == http.StatusOK) && result.originStatus == 0 {
+		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, cmp.Or(result.headers["Location"], result.mediaURL), time.Now()))
 	}
 	// must-revalidate: past the CDN URL's expiry Cloudflare must not serve the
 	// stale redirect when the origin errors.
@@ -261,7 +262,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // offloadEdgeTTL lets Cloudflare answer repeat hits on a signed link until the
-// CDN URL it redirects to nears expiry, and never past the link's own expiry.
+// CDN URL it redirects to or copies nears expiry, and never past the link's own expiry.
 func offloadEdgeTTL(link *url.URL, location string, now time.Time) int {
 	ttl := cacheTTLFromURLs(location)
 	if exp, err := strconv.ParseInt(link.Query().Get("exp"), 10, 64); err == nil {
