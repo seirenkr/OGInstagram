@@ -132,9 +132,10 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}))
 	a := newApp(Config{BaseURL: "https://example.test", Store: store}, &SessionPool{}, mustOffloadSigner(testOffloadSigningKeys))
 
-	code := statusSnowcode("p", "DaD8phTyclR", 0, false, false)
-	status := serveApp(t, a, httptest.NewRequest(http.MethodGet, "https://example.test/users/instagram/statuses/"+code, nil))
-	if status.status != http.StatusOK {
+	note := httptest.NewRequest(http.MethodGet, "https://example.test/p/DaD8phTyclR", nil)
+	note.Header.Set("Accept", asMediaType)
+	status := serveApp(t, a, note)
+	if status.status != http.StatusOK || status.headers["Content-Type"] != asMediaType {
 		t.Fatalf("status = %d, want 200", status.status)
 	}
 

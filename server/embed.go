@@ -33,7 +33,7 @@ func displayTitle(name, username string) string {
 	return name + " (@" + username + ")"
 }
 
-func (a *App) commonHead(baseURL, originURL, username, title, description, image, card, activityHref string) []string {
+func (a *App) commonHead(baseURL, originURL, username, title, description, image, card string) []string {
 	h := []string{
 		`<meta charset="utf-8">`,
 		`<link rel="canonical" href="` + html.EscapeString(originURL) + `">`,
@@ -50,22 +50,21 @@ func (a *App) commonHead(baseURL, originURL, username, title, description, image
 		`<link href="` + html.EscapeString(baseURL) + `/favicon-64.png" rel="icon" sizes="64x64" type="image/png">`,
 	}
 	if image != "" {
+		// Discord attaches later dimension and alt tags to the last og:image or
+		// twitter:image; secure_url does not count.
 		h = append(h,
+			`<meta name="twitter:image" content="`+html.EscapeString(image)+`">`,
 			`<meta property="og:image" content="`+html.EscapeString(image)+`">`,
 			`<meta property="og:image:secure_url" content="`+html.EscapeString(image)+`">`,
-			`<meta name="twitter:image" content="`+html.EscapeString(image)+`">`,
 		)
 	}
 	if username != "" {
 		h = append(h, `<meta name="twitter:creator" content="@`+html.EscapeString(username)+`">`)
 	}
-	if activityHref != "" {
-		h = append(h, `<link href="`+html.EscapeString(activityHref)+`" rel="alternate" type="application/activity+json">`)
-	}
 	return h
 }
 
-func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIndex int, specified, gallery bool, variant discordEmbedVariant) string {
+func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIndex int, specified, gallery, support bool) string {
 	selectedIndex := mediaIndexFor(post, mediaIndex)
 	first := post.Attachments[selectedIndex]
 	originURL := instagramPostURL(postType, post.Shortcode, selectedIndex, specified)
@@ -83,16 +82,7 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	thumbnailHref := a.offloadURL(baseURL, post.Shortcode, selectedIndex, true)
 	exposeVideo := first.Kind == "video" && first.URL != ""
 
-	component := ""
-	if variant != discordLegacy {
-		component = a.postComponentEmbed(baseURL, post, postType, mediaIndex, specified, gallery, variant == discordComponentsSupport)
-	}
-	activityHref := ""
-	if component == "" {
-		activityHref = statusURL(baseURL, post.Username, postType, post.Shortcode, selectedIndex, specified, gallery)
-	}
-
-	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, "summary_large_image", activityHref)
+	h := a.commonHead(baseURL, originURL, post.Username, title, description, thumbnailHref, "summary_large_image")
 	h = append(h,
 		`<meta property="og:type" content="article">`,
 		`<link rel="apple-touch-icon" href="`+html.EscapeString(a.postAvatarURL(baseURL, post))+`">`,
@@ -100,7 +90,7 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	)
 	h = append(h, dimensionTags("property", "og:image", first.Width, first.Height)...)
 	if published := isoTime(post.CreatedAt); published != "" {
-		h = append(h, `<meta property="article:published_time" content="`+html.EscapeString(published)+`">`)
+		h = append(h, `<meta property="article:published_time" content="`+published+`">`, `<meta property="og:pubdate" content="`+published+`">`)
 	}
 	if imageAlt != "" {
 		h = append(h,
@@ -111,10 +101,8 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 	if exposeVideo {
 		h = append(h, videoOGTags(mediaHref, first)...)
 	}
-	if component != "" {
-		h = append(h, component)
-	}
-
+	h = append(h, apLinkTags(postRefs(baseURL, post, postType, mediaIndex, specified))...)
+	h = append(h, a.postComponentEmbed(baseURL, post, postType, mediaIndex, specified, gallery, support))
 	return embedDocument(h)
 }
 
@@ -135,7 +123,7 @@ const embedBanner = `<!--
 
 -->`
 
-func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool, variant discordEmbedVariant) string {
+func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery, support bool) string {
 	origin := profileURL(p.Username)
 	title := displayTitle(p.FullName, p.Username)
 
@@ -150,27 +138,18 @@ func (a *App) buildProfileEmbedHTML(baseURL string, p Profile, gallery bool, var
 		}
 	}
 
-	component := ""
-	if variant != discordLegacy {
-		component = a.profileComponentEmbed(baseURL, p, gallery, variant == discordComponentsSupport)
-	}
-	activityHref := profileStatusURL(baseURL, p.Username, gallery)
-	if component != "" {
-		activityHref = ""
-	}
-	h := a.commonHead(baseURL, origin, p.Username, title, description, a.profileAvatarURL(baseURL, p), "summary", activityHref)
+	h := a.commonHead(baseURL, origin, p.Username, title, description, a.profileAvatarURL(baseURL, p), "summary")
 	h = append(h,
 		`<meta property="og:type" content="profile">`,
 		`<meta property="profile:username" content="`+html.EscapeString(p.Username)+`">`,
 	)
-	if component != "" {
-		h = append(h, component)
-	}
+	h = append(h, apLinkTags(actorID(baseURL, p.Username), "")...)
+	h = append(h, a.profileComponentEmbed(baseURL, p, gallery, support))
 	return embedDocument(h)
 }
 
 func (a *App) buildStatusEmbedHTML(baseURL, originURL, title, description string) string {
-	h := a.commonHead(baseURL, originURL, "", title, description, "", "summary", "")
+	h := a.commonHead(baseURL, originURL, "", title, description, "", "summary")
 	h = append(h, `<meta property="og:type" content="article">`)
 	return embedDocument(h)
 }

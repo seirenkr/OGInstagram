@@ -61,7 +61,6 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	return Post{
 		Shortcode:   cmp.Or(item.Get("code").String(), item.Get("shortcode").String()),
 		Username:    username,
-		OwnerID:     cmp.Or(user.Get("pk").String(), user.Get("id").String()),
 		FullName:    fullName,
 		ProfilePic:  user.Get("profile_pic_url").String(),
 		IsVerified:  user.Get("is_verified").Type == gjson.True,
@@ -78,11 +77,10 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 		return Attachment{}, false
 	}
 	w, h := mediaWidth(item), mediaHeight(item)
-	id := cmp.Or(item.Get("pk").String(), item.Get("id").String())
 	if video := bestVideoURL(item); video != "" && uintOf(item, "media_type") == 2 {
-		return Attachment{ID: id, Kind: "video", URL: video, Thumbnail: thumbnail, Width: w, Height: h}, true
+		return Attachment{Kind: "video", URL: video, Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
-	return Attachment{ID: id, Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
+	return Attachment{Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
 }
 
 func bestV1ImageURL(item gjson.Result) string {

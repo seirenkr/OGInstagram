@@ -47,15 +47,21 @@ func (a *App) handleStory(req *http.Request, username, id string, gallery bool) 
 	baseURL := a.publicBaseURL(req)
 	meta := &fetchMeta{}
 	story, err := a.getStory(req.Context(), username, id, meta)
+	activity := wantsActivity(req)
 	if err != nil {
+		if activity {
+			return tagFetch(activityErrorResp(err), meta)
+		}
 		title, desc := errorCard("story", err.Code)
 		return a.errorCardResp(baseURL, origin, title, desc, err.Code, err, meta)
 	}
-	variant := discordRequestVariant(req)
+	objectID, actor := storyRefs(baseURL, story)
+	if activity {
+		return tagFetch(activityResp(a.storyNote(baseURL, story, gallery), objectID, actor), meta)
+	}
 	html := a.buildStoryEmbedHTML(baseURL, origin, story,
-		a.storyOffloadURL(baseURL, username, id, false), a.storyOffloadURL(baseURL, username, id, true),
-		storyStatusURL(baseURL, username, id, gallery), gallery, variant)
-	return tagFetch(discordEmbedResponse(req, html, variant), meta)
+		a.storyOffloadURL(baseURL, username, id, false), a.storyOffloadURL(baseURL, username, id, true), gallery, discordSupport(req))
+	return tagFetch(cardResp(html, objectID, actor), meta)
 }
 
 func (a *App) handleStoryOffload(req *http.Request, username, id string, avatar bool) resp {
@@ -78,22 +84,15 @@ func (a *App) handleStoryOffload(req *http.Request, username, id string, avatar 
 	return tagFetch(redirectResp(target, 302), meta)
 }
 
-func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref, thumbnailHref, activityHref string, gallery bool, variant discordEmbedVariant) string {
+func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref, thumbnailHref string, gallery, support bool) string {
 	media := story.Media
 	title := displayTitle(story.FullName, story.Username)
 	description := postDescription(story.Caption, "")
 	if gallery {
 		description = ""
 	}
-	component := ""
-	if variant != discordLegacy {
-		component = a.storyComponentEmbed(baseURL, story, gallery, variant == discordComponentsSupport)
-	}
-	if component != "" {
-		activityHref = ""
-	}
 
-	h := a.commonHead(baseURL, origin, story.Username, title, description, thumbnailHref, "summary_large_image", activityHref)
+	h := a.commonHead(baseURL, origin, story.Username, title, description, thumbnailHref, "summary_large_image")
 	h = append(h,
 		`<meta property="og:type" content="article">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(story.Username)+`/">`,
@@ -101,13 +100,12 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 	h = append(h, dimensionTags("property", "og:image", media.Width, media.Height)...)
 	h = append(h, `<link rel="apple-touch-icon" href="`+html.EscapeString(a.storyAvatarURL(baseURL, story))+`">`)
 	if published := isoTime(story.CreatedAt); published != "" {
-		h = append(h, `<meta property="article:published_time" content="`+html.EscapeString(published)+`">`)
+		h = append(h, `<meta property="article:published_time" content="`+published+`">`, `<meta property="og:pubdate" content="`+published+`">`)
 	}
 	if media.Kind == "video" {
 		h = append(h, videoOGTags(mediaHref, media)...)
 	}
-	if component != "" {
-		h = append(h, component)
-	}
+	h = append(h, apLinkTags(storyRefs(baseURL, story))...)
+	h = append(h, a.storyComponentEmbed(baseURL, story, gallery, support))
 	return embedDocument(h)
 }

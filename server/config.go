@@ -26,7 +26,7 @@ const (
 
 	transientErrorCacheSeconds = 60
 	permanentErrorCacheSeconds = 3600
-	// Cards and statuses link only to signed offload URLs, which outlive this by days.
+	// Cards link only to signed offload URLs, which outlive this by days.
 	cardEdgeTTL = 3600
 
 	requestTimeout = 4 * time.Second

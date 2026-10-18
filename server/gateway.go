@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -13,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,10 +25,6 @@ const (
 	// is refused instead of growing the map without bound.
 	maxBotLimiterKeys = 100_000
 )
-
-func validStatusCode(code string) bool {
-	return code != "" && len(code) <= maxSnowcodeDigits && strings.Trim(code, "0123456789") == ""
-}
 
 type Gateway struct {
 	cfg    Config
@@ -251,9 +247,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(ttl) + ", must-revalidate"
 		}
 	}
-	// A card differs per User-Agent only in its Discord variant, and any variant
-	// serves any bot. Error cards are 200s too, hence originStatus.
-	if route.card && r.Method == http.MethodGet && result.status == http.StatusOK && result.originStatus == 0 {
+	// A card never depends on the User-Agent, so one copy serves every bot. The
+	// edge keys on the URL alone, so the AS2 object a card URL also serves must
+	// never be stored. Error cards are 200s too, hence originStatus.
+	if route.card && r.Method == http.MethodGet && result.status == http.StatusOK && result.originStatus == 0 &&
+		strings.HasPrefix(result.headers["Content-Type"], "text/html") {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(cardEdgeTTL)
 	}
 	elapsed := time.Since(started)
@@ -311,11 +309,7 @@ func (g *Gateway) problemCause(w http.ResponseWriter, r *http.Request, status in
 		l.Warn("request rejected", "status", status, "detail", detail, "method", r.Method,
 			"host", r.Host, "path", r.URL.Path, "peer", peerAddress(r).String(), "cf_ray", r.Header.Get("Cf-Ray"))
 	}
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	if r.Method != http.MethodHead {
-		_ = json.NewEncoder(w).Encode(map[string]any{"type": "about:blank", "title": http.StatusText(status), "status": status, "detail": detail})
-	}
+	g.writeResult(w, r, problemResp(status, detail))
 }
 
 func (g *Gateway) writeResult(w http.ResponseWriter, r *http.Request, result resp) {
@@ -374,30 +368,6 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		}
 		return route, true
 	}
-	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
-		code := segments[3]
-		route.card = true
-		route.handle = func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }
-		return route, validStatusCode(code)
-	}
-	if len(segments) == 4 && segments[0] == "users" && validUsername(segments[1]) && segments[2] == "statuses" {
-		code := segments[3]
-		route.card = true
-		route.handle = func(a *App, r *http.Request) resp { return a.handleActivity(r, code) }
-		return route, validStatusCode(code)
-	}
-	if len(segments) == 3 && segments[0] == "users" && validUsername(segments[1]) && (segments[2] == "inbox" || segments[2] == "outbox") {
-		username, name := segments[1], segments[2]
-		route.handle = func(a *App, r *http.Request) resp { return a.handleActivityCollection(r, username, name) }
-		return route, true
-	}
-	if len(segments) == 2 && segments[0] == "users" && validUsername(segments[1]) {
-		username := segments[1]
-		route.handle = func(a *App, r *http.Request) resp {
-			return activityJSONResp(http.StatusOK, a.buildFallbackAccount(a.publicBaseURL(r), username))
-		}
-		return route, true
-	}
 	if post := parseEmbedSegments(segments); post != nil {
 		route.category, route.direct, route.card = "posts", direct, !direct
 		index, specified := mediaSelection(r.URL.Query(), post.PathIndex)
@@ -409,6 +379,14 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 				return a.handlePost(r, post.PostType, post.Shortcode, index, specified, gallery)
 			}
 		}
+		return route, true
+	}
+	// Actor collections sit under the actor id, /{username}. Posts match first, so
+	// a collection never shadows a card; the names it loses (/p/inbox is a post)
+	// are Instagram's own routes, never accounts.
+	if len(segments) == 2 && validUsername(segments[0]) && slices.Contains([]string{"inbox", "outbox", "followers", "following"}, segments[1]) {
+		username, name := segments[0], segments[1]
+		route.handle = func(a *App, r *http.Request) resp { return a.handleActivityCollection(r, username, name) }
 		return route, true
 	}
 	if len(segments) == 1 && validUsername(segments[0]) {
@@ -478,7 +456,7 @@ func (g *Gateway) render(r *http.Request, route gatewayRoute) resp {
 	return route.handle(g.app, r.WithContext(ctx))
 }
 
-// previewTarget turns the client-supplied path into the internal bot GET the
+// previewTarget turns the client-supplied path into the internal GET the
 // preview renders. The gateway router decides which shapes are embeddable.
 func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, bool) {
 	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "#\\") || strings.IndexFunc(path, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
@@ -491,7 +469,7 @@ func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, b
 	internal := r.Clone(r.Context())
 	internal.Method = http.MethodGet
 	internal.URL = u
-	internal.Header.Set("User-Agent", "OGInstagramPreviewBot/1.0")
+	internal.Header.Del("Accept") // The preview always renders the card.
 	route, ok := resolveGatewayRoute(internal)
 	if !ok || route.category == "" || reservedAssetPath(u.Path) || !previewQuery(u.RawQuery, route.category == "posts") {
 		return nil, gatewayRoute{}, false
@@ -582,16 +560,6 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 		}
 		g.problem(w, r, status, "preview unavailable")
 		return
-	}
-	// Inline the Mastodon status the card links to (an L1 hit by now), so the
-	// page needs no second request that the bot limiter would count.
-	if head, _, ok := bytes.Cut(result.body, []byte(`" rel="alternate" type="application/activity+json">`)); ok && result.status == http.StatusOK && result.originStatus == 0 {
-		code := string(head[bytes.LastIndexByte(head, '/')+1:])
-		if status := g.render(internal, gatewayRoute{handle: func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }}); status.status == http.StatusOK {
-			var escaped bytes.Buffer
-			json.HTMLEscape(&escaped, status.body)
-			result.body = append(result.body, `<script type="application/json" id="og-status">`+escaped.String()+`</script>`...)
-		}
 	}
 	g.writeResult(w, r, result)
 }

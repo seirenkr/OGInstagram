@@ -427,7 +427,7 @@ func validCachedPost(key string, post Post) bool {
 func validCachedProfile(key string, profile Profile) bool {
 	if !validUsername(profile.Username) || !strings.EqualFold(profile.Username, key) ||
 		!validOptionalCachedURL(profile.ProfilePic) || len(profile.RecentMedia) > profileGalleryMax ||
-		profile.FollowerCount < 0 || profile.FollowingCount < 0 || profile.MediaCount < 0 {
+		profile.FollowerCount < 0 || profile.MediaCount < 0 {
 		return false
 	}
 	for _, media := range profile.RecentMedia {

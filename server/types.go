@@ -6,7 +6,6 @@ import (
 )
 
 type Attachment struct {
-	ID        string
 	Kind      string
 	URL       string
 	Thumbnail string
@@ -17,7 +16,6 @@ type Attachment struct {
 type Post struct {
 	Shortcode   string
 	Username    string
-	OwnerID     string
 	FullName    string
 	ProfilePic  string
 	IsVerified  bool

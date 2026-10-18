@@ -155,8 +155,6 @@ func parseEmbedPost(page string) (Post, *AppError) {
 
 var (
 	simpleMediaTypeRE = regexp.MustCompile(`data-media-type="([^"]*)"`)
-	simpleOwnerIDRE   = regexp.MustCompile(`data-owner-id="([^"]*)"`)
-	simpleMediaIDRE   = regexp.MustCompile(`data-media-id="([^"]*)"`)
 	simplePermalinkRE = regexp.MustCompile(`data-permalink="[^"]*?/p/([A-Za-z0-9_-]+)`)
 	simpleUsernameRE  = regexp.MustCompile(`class="UsernameText">([^<]*)<`)
 	simpleAvatarRE    = regexp.MustCompile(`(?s)class="Avatar[^"]*"[^>]*>\s*<img[^>]*\bsrc="([^"]*)"`)
@@ -200,7 +198,6 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 	}
 
 	att := Attachment{
-		ID:        firstGroup(simpleMediaIDRE, page),
 		Kind:      "image",
 		URL:       imgURL,
 		Thumbnail: imgURL,
@@ -211,7 +208,6 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 	return Post{
 		Shortcode:   firstGroup(simplePermalinkRE, page),
 		Username:    username,
-		OwnerID:     firstGroup(simpleOwnerIDRE, page),
 		FullName:    "",
 		ProfilePic:  html.UnescapeString(cmp.Or(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page))),
 		Caption:     simpleCaption(page),
@@ -324,7 +320,6 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 	return Post{
 		Shortcode:   sm.Get("shortcode").String(),
 		Username:    username,
-		OwnerID:     owner.Get("id").String(),
 		FullName:    owner.Get("full_name").String(),
 		ProfilePic:  owner.Get("profile_pic_url").String(),
 		IsVerified:  owner.Get("is_verified").Type == gjson.True,
@@ -340,15 +335,14 @@ func graphAttachment(n gjson.Result) (Attachment, *AppError) {
 		return Attachment{}, igErr(502, errorCodeUpstream, "embed media had no image")
 	}
 	w, h := uintOf(n, "dimensions.width"), uintOf(n, "dimensions.height")
-	id := cmp.Or(n.Get("id").String(), n.Get("pk").String())
 	if n.Get("is_video").Bool() {
 		u := n.Get("video_url").String()
 		if u == "" {
 			return Attachment{}, igErr(502, errorCodeUpstream, "embed video blocked")
 		}
-		return Attachment{ID: id, Kind: "video", URL: u, Thumbnail: img, Width: w, Height: h}, nil
+		return Attachment{Kind: "video", URL: u, Thumbnail: img, Width: w, Height: h}, nil
 	}
-	return Attachment{ID: id, Kind: "image", URL: img, Thumbnail: img, Width: w, Height: h}, nil
+	return Attachment{Kind: "image", URL: img, Thumbnail: img, Width: w, Height: h}, nil
 }
 
 func bestGraphImageURL(n gjson.Result) string {
@@ -379,7 +373,6 @@ func parseEmbedProfile(html string) (Profile, *AppError) {
 	}
 	p := Profile{
 		Username:      username,
-		UserID:        ctx.Get("owner_id").String(),
 		FullName:      ctx.Get("full_name").String(),
 		ProfilePic:    ctx.Get("profile_pic_url").String(),
 		FollowerCount: uintOf(ctx, "followers_count"),
@@ -392,11 +385,9 @@ func parseEmbedProfile(html string) (Profile, *AppError) {
 		thumb := bestGraphImageURL(sm)
 		if thumb != "" {
 			p.RecentMedia = append(p.RecentMedia, ProfileMedia{
-				ID:        cmp.Or(sm.Get("id").String(), sm.Get("shortcode").String()),
 				Thumbnail: thumb,
 				Width:     uintOf(sm, "dimensions.width"),
 				Height:    uintOf(sm, "dimensions.height"),
-				TakenAt:   unixTime(sm.Get("taken_at_timestamp").Int()),
 			})
 		}
 		return len(p.RecentMedia) < profileGalleryMax

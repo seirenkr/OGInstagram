@@ -11,7 +11,7 @@
     "dev": "node tools/dev.mjs",
     "build": "vite build --config web/vite.config.ts && node tools/build-home.mjs",
     "lint": "eslint web/src",
-    "check": "pnpm run lint && tsc -p web/tsconfig.json --noEmit && node --experimental-strip-types --test shared/routes.test.mjs web/src/preview-request.test.mjs && { test ! -f harvest/verify.test.mjs || node --test harvest/verify.test.mjs; } && cd server && go test ./...",
+    "check": "pnpm run lint && tsc -p web/tsconfig.json --noEmit && node --experimental-strip-types --test shared/routes.test.mjs web/src/preview-request.test.mjs web/src/component-embed.test.mjs && { test ! -f harvest/verify.test.mjs || node --test harvest/verify.test.mjs; } && cd server && go test ./...",
     "image:build": "sh tools/image-build.sh"
   },
   "dependencies": {

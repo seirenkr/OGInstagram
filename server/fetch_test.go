@@ -43,14 +43,14 @@ func TestParseOembedPost(t *testing.T) {
 	if !ok {
 		t.Fatal("oembed success payload should parse")
 	}
-	if p.Username != "instagram" || p.FullName != "Instagram" || p.OwnerID != "25025320" {
+	if p.Username != "instagram" || p.FullName != "Instagram" {
 		t.Errorf("author fields: %+v", p)
 	}
 	if p.Shortcode != "DaD8phTyclR" || !strings.Contains(p.Caption, "time to create") {
 		t.Errorf("post fields: %+v", p)
 	}
 	att := p.Attachments[0]
-	if att.ID != "3928250036051888465" || att.Kind != "image" || att.Width != 640 || att.Height != 800 {
+	if att.Kind != "image" || att.Width != 640 || att.Height != 800 {
 		t.Errorf("attachment: %+v", att)
 	}
 	if att.URL == "" || att.URL != att.Thumbnail {

@@ -78,7 +78,7 @@ func TestGatewayWebFingerUsesValidatedHost(t *testing.T) {
 	r := publicRequest("GET", "/.well-known/webfinger?resource=acct:alice@oginstagram.com")
 	w := httptest.NewRecorder()
 	g.ServeHTTP(w, r)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "https://oginstagram.com/users/alice") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"https://oginstagram.com/alice"`) {
 		t.Fatalf("unsafe/missing WebFinger: %d %s", w.Code, w.Body.String())
 	}
 	if w.Header().Get("Cloudflare-CDN-Cache-Control") != "" || w.Header().Get("Cache-Control") != "no-store" {
@@ -115,7 +115,7 @@ func TestGatewayPassesItsOriginToHandlers(t *testing.T) {
 		r.RemoteAddr, r.Host, g.cfg.Development = tt.peer, tt.host, tt.dev
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
-		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+tt.want+`/users/alice"`) {
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"`+tt.want+`/alice"`) {
 			t.Errorf("dev=%v host=%s: %d %s, want origin %s", tt.dev, tt.host, w.Code, w.Body.String(), tt.want)
 		}
 	}
@@ -195,7 +195,6 @@ func TestGatewayBotUnfurls(t *testing.T) {
 	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: Post{Shortcode: "ABC123", Username: "alice", Attachments: []Attachment{video}}, expiresAt: exp})
 	g.app.posts.storeLocal("GONE12", &cacheEntry[Post]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: exp})
 	g.app.profiles.storeLocal("bob", &cacheEntry[Profile]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: exp})
-	story := storyStatusSnowcode("alice", "123", false)
 	for _, tt := range []struct {
 		method, path, want string
 		status             int
@@ -203,24 +202,18 @@ func TestGatewayBotUnfurls(t *testing.T) {
 		{"GET", "/stories/alice/123", `og:video:type`, 200},
 		{"GET", "/alice", `og:type" content="profile`, 200},
 		{"GET", "/p/ABC123", `og:video:type`, 200},
-		{"GET", "/api/v1/statuses/" + story, `media_attachments`, 200},
-		{"GET", "/api/v1/statuses/" + profileSnowcode("alice"), `media_attachments`, 200},
-		{"GET", "/api/v1/statuses/" + profileSnowcode("bob"), `"error"`, 404},
-		{"GET", "/users/alice/statuses/" + story, `Note`, 200},
-		{"GET", "/users/alice/statuses/" + profileSnowcode("alice"), `Note`, 200},
-		{"GET", "/users/alice", `Person`, 200},
-		{"GET", "/users/alice/outbox", `OrderedCollection`, 200},
+		{"GET", "/api/v1/statuses/123", `not found`, 404},
+		{"GET", "/users/alice", `not found`, 404},
+		{"GET", "/alice/outbox", `OrderedCollection`, 200},
 		{"GET", "/p/GONE12", `Post unavailable`, 200},
 		{"GET", "/bob", `Account unavailable`, 200},
-		{"POST", "/users/alice/inbox", ``, 405},
-		{"GET", "/stories/alice/123?e=c", `id="discord:component-embed"`, 200},
-		{"GET", "/alice?e=c", `id="discord:component-embed"`, 200},
+		{"POST", "/alice/inbox", ``, 405},
+		{"GET", "/stories/alice/123", `id="discord:component-embed"`, 200},
+		{"GET", "/alice", `id="discord:component-embed"`, 200},
 		{"GET", "/p/ABC123?e=s", `https://ko-fi.com/seirenkr`, 200},
 	} {
 		r := publicRequest(tt.method, tt.path)
 		r.Header.Set("User-Agent", "Discordbot/2.0")
-		// Ray ID "0" hashes to the legacy arm; ?e=c and ?e=s pin the other two.
-		r.Header.Set("Cf-Ray", "0")
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
 		if w.Code != tt.status || !strings.Contains(w.Body.String(), tt.want) {
@@ -343,11 +336,12 @@ func TestPreviewResponses(t *testing.T) {
 		if w.Code != 200 {
 			continue
 		}
-		_, inline, _ := strings.Cut(w.Body.String(), `<script type="application/json" id="og-status">`)
-		inline, _, _ = strings.Cut(inline, "</script>")
-		var status struct{ Content string }
-		if strings.Contains(inline, "<") || json.Unmarshal([]byte(inline), &status) != nil || !strings.Contains(status.Content, "a &lt;b&gt;") {
-			t.Errorf("inline status = %q", inline)
+		found := false
+		for _, display := range componentsOfType(componentPayload(t, w.Body.String()), 10) {
+			found = found || display["content"] == `a \<b>`
+		}
+		if !found || strings.Contains(w.Body.String(), `id="og-status"`) {
+			t.Errorf("preview must carry the card's Component Embed caption: %s", w.Body.String())
 		}
 	}
 }
@@ -520,9 +514,7 @@ func TestGatewayEdgeCachesOnlyURLKeyedSuccesses(t *testing.T) {
 		{"GET", "oginstagram.com", "/p/ABC123/", false, 200, cardEdgeTTL, false},
 		{"GET", "g.oginstagram.com", "/reel/ABC123/?img_index=1", false, 200, cardEdgeTTL, false},
 		{"GET", "oginstagram.com", "/stories/alice/123", false, 200, cardEdgeTTL, false},
-		{"GET", "oginstagram.com", "/api/v1/statuses/" + statusSnowcode("p", "ABC123", 0, false, false), false, 200, cardEdgeTTL, false},
-		{"GET", "g.oginstagram.com", "/users/alice/statuses/" + statusSnowcode("p", "ABC123", 0, false, true), false, 200, cardEdgeTTL, false},
-		{"GET", "oginstagram.com", "/api/v1/statuses/" + statusSnowcode("p", "GONE12", 0, false, false), false, 404, 0, false},
+		{"GET", "g.oginstagram.com", "/alice/outbox", false, 200, 0, false},
 		{"GET", "oginstagram.com", signed.RequestURI(), false, 302, 9000, false},
 		{"GET", "d.oginstagram.com", "/p/ABC123?thumbnail=1", false, 302, 0, false}, // default avatar
 		{"GET", "d.oginstagram.com", "/p/SLOW12", false, 302, 0, false},             // fallback to Instagram

@@ -99,7 +99,7 @@ func TestParseProfileShapes(t *testing.T) {
 	}
 	p, err := parseProfile(`{"data":{"user":{"username":"u","edge_owner_to_timeline_media":{"edges":[{"node":{"id":"1",` +
 		`"thumbnail_src":"https://cdn/square.jpg","display_url":"https://cdn/full.jpg","dimensions":{"width":1080,"height":1350},"taken_at_timestamp":1790870385}}]}}}}`)
-	if err != nil || len(p.RecentMedia) != 1 || p.RecentMedia[0].Thumbnail != "https://cdn/full.jpg" || p.RecentMedia[0].TakenAt.Unix() != 1790870385 {
+	if err != nil || len(p.RecentMedia) != 1 || p.RecentMedia[0].Thumbnail != "https://cdn/full.jpg" {
 		t.Fatalf("gallery = %+v, %v; want display_url", p.RecentMedia, err)
 	}
 }

@@ -518,15 +518,12 @@ func parseOembedPost(shortcode, body string) (Post, bool) {
 	if !validCachedDimensions(width, height) {
 		return Post{}, false
 	}
-	id, _, _ := strings.Cut(root.Get("media_id").String(), "_")
 	return Post{
 		Shortcode: shortcode,
 		Username:  username,
-		OwnerID:   root.Get("author_id").String(),
 		FullName:  html.UnescapeString(firstGroup(oembedSharedByRE, root.Get("html").String())),
 		Caption:   root.Get("title").String(),
 		Attachments: []Attachment{{
-			ID:        id,
 			Kind:      "image",
 			URL:       thumb,
 			Thumbnail: thumb,

@@ -35,25 +35,21 @@ func captionParagraphHTML(text string) string {
 }
 
 type Profile struct {
-	Username       string
-	UserID         string
-	FullName       string
-	Biography      string
-	ProfilePic     string
-	FollowerCount  int
-	FollowingCount int
-	MediaCount     int
-	IsPrivate      bool
-	IsVerified     bool
-	RecentMedia    []ProfileMedia
+	Username      string
+	FullName      string
+	Biography     string
+	ProfilePic    string
+	FollowerCount int
+	MediaCount    int
+	IsPrivate     bool
+	IsVerified    bool
+	RecentMedia   []ProfileMedia
 }
 
 type ProfileMedia struct {
-	ID        string
 	Thumbnail string
 	Width     int
 	Height    int
-	TakenAt   time.Time
 }
 
 var usernameRE = regexp.MustCompile(`^[A-Za-z0-9._]{1,30}$`)
@@ -111,16 +107,14 @@ func parseProfile(body string) (Profile, *AppError) {
 		return Profile{}, igErr(502, errorCodeUpstream, "profile response had no user")
 	}
 	p := Profile{
-		Username:       u.Get("username").String(),
-		UserID:         u.Get("id").String(),
-		FullName:       u.Get("full_name").String(),
-		Biography:      u.Get("biography").String(),
-		ProfilePic:     cmp.Or(u.Get("profile_pic_url_hd").String(), u.Get("profile_pic_url").String()),
-		FollowerCount:  uintOf(u, "edge_followed_by.count"),
-		FollowingCount: uintOf(u, "edge_follow.count"),
-		MediaCount:     uintOf(u, "edge_owner_to_timeline_media.count"),
-		IsPrivate:      u.Get("is_private").Bool(),
-		IsVerified:     u.Get("is_verified").Type == gjson.True,
+		Username:      u.Get("username").String(),
+		FullName:      u.Get("full_name").String(),
+		Biography:     u.Get("biography").String(),
+		ProfilePic:    cmp.Or(u.Get("profile_pic_url_hd").String(), u.Get("profile_pic_url").String()),
+		FollowerCount: uintOf(u, "edge_followed_by.count"),
+		MediaCount:    uintOf(u, "edge_owner_to_timeline_media.count"),
+		IsPrivate:     u.Get("is_private").Bool(),
+		IsVerified:    u.Get("is_verified").Type == gjson.True,
 	}
 	if p.Username == "" {
 		return Profile{}, igErr(502, errorCodeUpstream, "profile had no username")
@@ -129,11 +123,9 @@ func parseProfile(body string) (Profile, *AppError) {
 		n := e.Get("node")
 		if thumb := bestGraphImageURL(n); thumb != "" {
 			p.RecentMedia = append(p.RecentMedia, ProfileMedia{
-				ID:        cmp.Or(n.Get("pk").String(), n.Get("id").String()),
 				Thumbnail: thumb,
 				Width:     uintOf(n, "dimensions.width"),
 				Height:    uintOf(n, "dimensions.height"),
-				TakenAt:   unixTime(n.Get("taken_at_timestamp").Int()),
 			})
 		}
 		return len(p.RecentMedia) < profileGalleryMax

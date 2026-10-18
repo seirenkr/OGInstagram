@@ -176,8 +176,9 @@ func htmlResp(status int, body string) resp {
 func jsonResp(status int, body []byte) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "application/json"}, body: body}
 }
-func activityJSONResp(status int, body []byte) resp {
-	return resp{status: status, headers: map[string]string{"Content-Type": "application/activity+json"}, body: body}
+func problemResp(status int, detail string) resp {
+	return resp{status: status, headers: map[string]string{"Content-Type": "application/problem+json"},
+		body: jsonBytes(map[string]any{"type": "about:blank", "title": http.StatusText(status), "status": status, "detail": detail})}
 }
 func textResp(status int, text string) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"}, body: []byte(text)}
@@ -202,106 +203,59 @@ func logger(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
+// handleWebFinger answers RFC 7033 queries for actors, named by acct: URI or by
+// their actor id (SWICG ActivityPub Discovery, "WebFinger").
 func (a *App) handleWebFinger(req *http.Request) resp {
-	resource := req.URL.Query().Get("resource")
-	account, ok := strings.CutPrefix(resource, "acct:")
-	at := strings.LastIndexByte(account, '@')
-	if !ok || at <= 0 || at == len(account)-1 {
-		return textResp(http.StatusBadRequest, "invalid resource")
-	}
-	username, host := account[:at], account[at+1:]
-	baseURL := a.publicBaseURL(req)
-	base, err := url.Parse(baseURL)
-	if err != nil || !validUsername(username) || !strings.EqualFold(host, base.Host) {
-		return textResp(http.StatusNotFound, "resource not found")
-	}
-	actor := actorURL(baseURL, username)
-	links := []any{}
-	rels := req.URL.Query()["rel"]
-	if len(rels) == 0 || slices.Contains(rels, "self") {
-		links = append(links, map[string]any{"rel": "self", "type": "application/activity+json", "href": actor})
-	}
-	r := jsonResp(http.StatusOK, jsonBytes(map[string]any{
-		"subject": "acct:" + username + "@" + base.Host,
-		"aliases": []any{actor},
-		"links":   links,
-	}))
-	r.headers["Content-Type"] = "application/jrd+json"
+	r := a.webFinger(req)
 	r.headers["Access-Control-Allow-Origin"] = "*"
 	return r
 }
 
-func (a *App) handleActivityCollection(req *http.Request, username, name string) resp {
-	id := actorURL(a.publicBaseURL(req), username) + "/" + name
-	return activityJSONResp(http.StatusOK, emptyOrderedCollection(id))
-}
-
-func (a *App) handleActivity(req *http.Request, code string) resp {
-	sp := parseStatusSnowcode(code)
-	baseURL := a.publicBaseURL(req)
-	if sp.Story {
-		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
-		if err != nil {
-			return statusErrorResp(err, false)
+func (a *App) webFinger(req *http.Request) resp {
+	resource := req.URL.Query().Get("resource")
+	origin := apOrigin(a.publicBaseURL(req))
+	host := strings.TrimPrefix(strings.TrimPrefix(origin, "http://"), "https://")
+	username := ""
+	if account, ok := strings.CutPrefix(resource, "acct:"); ok {
+		at := strings.LastIndexByte(account, '@')
+		if at <= 0 || at == len(account)-1 {
+			return textResp(http.StatusBadRequest, "invalid resource")
 		}
-		return activityJSONResp(200, a.buildStoryActivityStatus(baseURL, story, sp.Gallery))
-	}
-	if sp.Username != "" {
-		p, err := a.getProfile(req.Context(), sp.Username, nil)
-		if err != nil {
-			return statusErrorResp(err, false)
+		if strings.EqualFold(account[at+1:], host) {
+			username = account[:at]
 		}
-		return activityJSONResp(200, a.buildProfileActivityStatus(baseURL, p, sp.Gallery))
+	} else if u, err := url.Parse(resource); err != nil || !u.IsAbs() {
+		return textResp(http.StatusBadRequest, "invalid resource")
+	} else if strings.EqualFold(u.Scheme+"://"+u.Host, origin) && u.RawQuery == "" {
+		username = strings.TrimPrefix(u.Path, "/")
 	}
-	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
-	if err != nil {
-		return statusErrorResp(err, false)
+	if !validUsername(username) {
+		return textResp(http.StatusNotFound, "resource not found")
 	}
-	body := a.buildActivityStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
-	return activityJSONResp(200, body)
-}
-
-func (a *App) handleMastodonStatus(req *http.Request, code string) resp {
-	sp := parseStatusSnowcode(code)
-	baseURL := a.publicBaseURL(req)
-	if sp.Story {
-		story, err := a.getStory(req.Context(), sp.Username, sp.Shortcode, nil)
-		if err != nil {
-			return statusErrorResp(err, true)
+	actor := actorID(origin, username)
+	links := []any{}
+	rels := req.URL.Query()["rel"]
+	for _, link := range []map[string]any{
+		{"rel": "self", "type": asMediaType, "href": actor},
+		{"rel": "http://webfinger.net/rel/profile-page", "type": "text/html", "href": actor},
+		{"rel": "alternate", "type": "text/html", "href": actor},
+	} {
+		if len(rels) == 0 || slices.Contains(rels, link["rel"].(string)) {
+			links = append(links, link)
 		}
-		return jsonResp(200, a.buildStoryMastodonStatus(baseURL, story, sp.Gallery))
 	}
-	if sp.Username != "" {
-		p, err := a.getProfile(req.Context(), sp.Username, nil)
-		if err != nil {
-			return statusErrorResp(err, true)
-		}
-		return jsonResp(200, a.buildMastodonProfileStatus(baseURL, p, sp.Gallery))
-	}
-	post, err := a.getPost(req.Context(), sp.Shortcode, nil)
-	if err != nil {
-		return statusErrorResp(err, true)
-	}
-	body := a.buildMastodonStatus(baseURL, post, sp.PostType, sp.MediaIndex, sp.Specified, sp.Gallery)
-	return jsonResp(200, body)
-}
-
-// Federated clients get a fixed verdict, never upstream statuses or helper messages.
-func statusErrorResp(err *AppError, mastodon bool) resp {
-	status, text := http.StatusNotFound, "Record not found"
-	if isTransient(err.Code) {
-		status, text = http.StatusServiceUnavailable, "Temporarily unavailable"
-	} else if err.Status == http.StatusForbidden || err.Status == http.StatusUnavailableForLegalReasons {
-		status = err.Status
-	}
-	r := textResp(status, text)
-	if mastodon {
-		r = jsonResp(status, jsonBytes(map[string]any{"error": text}))
-	}
-	if status == http.StatusServiceUnavailable {
-		r.headers["Retry-After"] = strconv.Itoa(transientErrorCacheSeconds)
-	}
+	r := jsonResp(http.StatusOK, jsonBytes(map[string]any{
+		"subject": "acct:" + strings.ToLower(username) + "@" + host,
+		"aliases": []any{actor},
+		"links":   links,
+	}))
+	r.headers["Content-Type"] = "application/jrd+json"
 	return r
+}
+
+func (a *App) handleActivityCollection(req *http.Request, username, name string) resp {
+	actor := actorID(a.publicBaseURL(req), username)
+	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": asMediaType}, body: emptyOrderedCollection(actor+"/"+name, actor)}
 }
 
 func (a *App) handleProfile(req *http.Request, username string, gallery bool) resp {
@@ -309,13 +263,19 @@ func (a *App) handleProfile(req *http.Request, username string, gallery bool) re
 	baseURL := a.publicBaseURL(req)
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
+	activity := wantsActivity(req)
 	if err != nil {
+		if activity {
+			return tagFetch(activityErrorResp(err), meta)
+		}
 		title, desc := errorCard("profile", err.Code)
 		return a.errorCardResp(baseURL, origin, title, desc, err.Code, err, meta)
 	}
-	variant := discordRequestVariant(req)
-	html := a.buildProfileEmbedHTML(baseURL, p, gallery, variant)
-	return tagFetch(discordEmbedResponse(req, html, variant), meta)
+	id := actorID(baseURL, p.Username)
+	if activity {
+		return tagFetch(activityResp(a.profileActor(baseURL, p, gallery), id, ""), meta)
+	}
+	return tagFetch(cardResp(a.buildProfileEmbedHTML(baseURL, p, gallery, discordSupport(req)), id, ""), meta)
 }
 
 func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaIndex int, specified, gallery bool) resp {
@@ -324,7 +284,11 @@ func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaInd
 	baseURL := a.publicBaseURL(req)
 	meta := &fetchMeta{}
 	post, err := a.getPost(req.Context(), shortcode, meta)
+	activity := wantsActivity(req)
 	if err != nil {
+		if activity {
+			return tagFetch(activityErrorResp(err), meta)
+		}
 		errorCode := err.Code
 		title, desc := errorCard("post", errorCode)
 		if err.CardTitle != "" {
@@ -332,13 +296,15 @@ func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaInd
 		}
 		return a.errorCardResp(baseURL, origin, title, desc, errorCode, err, meta)
 	}
-	variant := discordRequestVariant(req)
-	html := a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, variant)
-	return tagFetch(discordEmbedResponse(req, html, variant), meta)
+	id, actor := postRefs(baseURL, post, postType, mediaIndex, specified)
+	if activity {
+		return tagFetch(activityResp(a.postNote(baseURL, post, postType, mediaIndex, specified, gallery), id, actor), meta)
+	}
+	return tagFetch(cardResp(a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, discordSupport(req)), id, actor), meta)
 }
 
 func (a *App) errorCardResp(baseURL, origin, title, desc, headerCode string, err *AppError, meta *fetchMeta) resp {
-	r := htmlResp(200, a.buildStatusEmbedHTML(baseURL, origin, title, desc))
+	r := cardResp(a.buildStatusEmbedHTML(baseURL, origin, title, desc), "", "")
 	r.originStatus, r.errorType = err.Status, headerCode
 	return tagFetch(r, meta)
 }

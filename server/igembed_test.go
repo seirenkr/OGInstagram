@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 )
 
 func wrapEmbed(inner string) string {
@@ -63,7 +62,7 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if post.Username != "instagram" || post.Shortcode != "DaD8phTyclR" || post.OwnerID != "25025320" {
+	if post.Username != "instagram" || post.Shortcode != "DaD8phTyclR" {
 		t.Fatalf("bad post: %+v", post)
 	}
 	if post.ProfilePic != "https://cdn/avatar.jpg?oe=1" {
@@ -74,9 +73,6 @@ func TestParseEmbedSimpleImage(t *testing.T) {
 	}
 	if post.Attachments[0].Width != 3072 || post.Attachments[0].Height != 4095 {
 		t.Fatalf("bad dims: %+v", post.Attachments[0])
-	}
-	if post.Attachments[0].ID != "3928250036051888465" {
-		t.Fatalf("bad media id: %q", post.Attachments[0].ID)
 	}
 	if post.Caption != "Hello & #world\nline2" {
 		t.Fatalf("bad caption: %q", post.Caption)
@@ -133,9 +129,6 @@ func TestParseEmbedProfile(t *testing.T) {
 	}
 	if len(p.RecentMedia) != 2 || p.RecentMedia[0].Thumbnail != "https://cdn/m1.jpg" {
 		t.Fatalf("bad recent media: %+v", p.RecentMedia)
-	}
-	if !p.RecentMedia[0].TakenAt.Equal(time.Unix(1790870385, 0)) || !p.RecentMedia[1].TakenAt.IsZero() {
-		t.Fatalf("taken_at not read: %+v", p.RecentMedia)
 	}
 }
 

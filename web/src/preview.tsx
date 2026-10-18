@@ -2,12 +2,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@cloudflare/kumo/components/button";
 import { Input } from "@cloudflare/kumo/components/input";
 import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
+import { ArrowSquareOutIcon as ArrowSquareOut } from "@phosphor-icons/react/ArrowSquareOut";
 import { PlayIcon as Play } from "@phosphor-icons/react/Play";
+import { SealCheckIcon as SealCheck } from "@phosphor-icons/react/SealCheck";
 import { parse as parseEmoji } from "@twemoji/parser";
 import { version as twemojiVersion } from "@twemoji/svg/package.json";
 import { canonicalServiceHost, instagramEmbedPath } from "../../shared/routes.ts";
 import type en from "../locales/en.json";
 import { requestPreview } from "./preview-request.ts";
+import {
+  formatTimestamp, galleryRows, httpURL, offloadPoster, parseComponentEmbed,
+  type ComponentEmbed, type EmbedChild, type LinkButton, type Markdown, type Media,
+} from "./component-embed.ts";
 
 declare global {
   interface Window {
@@ -42,12 +48,11 @@ type PreviewPost = {
   authorIconUrl?: string;
   statsText?: string;
   caption?: string;
-  captionNodes?: React.ReactNode[];
-  media?: PreviewMedia[];
+  media?: Media;
+  mediaIsVideo?: boolean;
   date?: string;
+  component?: ComponentEmbed;
 };
-
-type PreviewMedia = { url: string; kind: "image" | "video"; width?: number; height?: number };
 
 type PreviewProps = {
   brand: string;
@@ -61,6 +66,7 @@ type PreviewProps = {
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onloadTurnstileCallback";
 const STATS_EMOJI_RE = /❤️|💬|📝|👤|▶️/;
 const TWEMOJI_BASE = `https://cdn.jsdelivr.net/npm/@twemoji/svg@${twemojiVersion}/`;
+const COMPONENT_EMBED_TYPES = new Set(["application/json", "application/vnd.discord.component-embed+json"]);
 let turnstileReady: Promise<void> | null = null;
 
 function loadTurnstile(): Promise<void> {
@@ -130,73 +136,6 @@ function previewMediaUrl(raw: string, serviceHost: string): string | undefined {
   return url.href;
 }
 
-function safeHref(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:" ? url.toString() : null;
-  } catch { return null; }
-}
-
-function renderStatusNode(node: Node, key: string): React.ReactNode {
-  if (node.nodeType === Node.TEXT_NODE) return <TwemojiText key={key}>{node.textContent ?? ""}</TwemojiText>;
-  if (!(node instanceof HTMLElement)) return null;
-  const children = Array.from(node.childNodes, (child, index) => renderStatusNode(child, `${key}-${index}`));
-  switch (node.tagName.toLowerCase()) {
-    case "br": return <br key={key} />;
-    case "blockquote": return <blockquote key={key}>{children}</blockquote>;
-    case "p": return <p key={key}>{children}</p>;
-    case "b": case "strong": return <b key={key}>{children}</b>;
-    case "i": case "em": return <i key={key}>{children}</i>;
-    case "del": case "s": return <del key={key}>{children}</del>;
-    case "a": {
-      const href = safeHref(node.getAttribute("href") ?? "");
-      return href ? <a key={key} href={href} target="_blank" rel="noreferrer noopener">{children}</a> : children;
-    }
-    default: return children;
-  }
-}
-
-function renderStatusContent(input: string): React.ReactNode[] {
-  const body = new DOMParser().parseFromString(input, "text/html").body;
-  return Array.from(body.childNodes, (node, index) => renderStatusNode(node, `content-${index}`));
-}
-
-// The preview API inlines the card's Mastodon status as JSON.
-function parseStatusPreview(doc: Document, serviceHost: string, dateFormatter: Intl.DateTimeFormat): Partial<PreviewPost> {
-  const status = JSON.parse(doc.getElementById("og-status")?.textContent ?? "null") as {
-    content?: unknown;
-    created_at?: unknown;
-    media_attachments?: unknown;
-    account?: { url?: unknown; avatar?: unknown };
-  } | null;
-  if (typeof status?.content !== "string") throw new Error("invalid Mastodon status");
-  const captionNodes = status.content ? renderStatusContent(status.content) : [];
-  const media = Array.isArray(status.media_attachments) ? status.media_attachments.flatMap((raw): PreviewMedia[] => {
-    if (!raw || typeof raw !== "object") return [];
-    const item = raw as Record<string, unknown>;
-    const kind = item.type === "image" ? "image" : item.type === "video" || item.type === "gifv" ? "video" : null;
-    // preview_url is the image itself, or a video's thumbnail.
-    if (!kind || typeof item.preview_url !== "string") return [];
-    const mediaUrl = previewMediaUrl(item.preview_url, serviceHost);
-    if (!mediaUrl) return [];
-    const original = (item.meta as Record<string, unknown> | undefined)?.original as Record<string, unknown> | undefined;
-    return [{
-      url: mediaUrl,
-      kind,
-      width: typeof original?.width === "number" && original.width > 0 ? original.width : undefined,
-      height: typeof original?.height === "number" && original.height > 0 ? original.height : undefined,
-    }];
-  }).slice(0, 4) : [];
-  const account = status.account;
-  return {
-    profileUrl: typeof account?.url === "string" ? safeHref(account.url) ?? undefined : undefined,
-    authorIconUrl: typeof account?.avatar === "string" ? previewMediaUrl(account.avatar, serviceHost) : undefined,
-    captionNodes: captionNodes.length ? captionNodes : undefined,
-    media: media.length ? media : undefined,
-    date: previewDate(status.created_at, dateFormatter),
-  };
-}
-
 function previewDate(raw: unknown, dateFormatter: Intl.DateTimeFormat): string | undefined {
   if (typeof raw !== "string" || !raw) return undefined;
   const date = new Date(raw);
@@ -207,34 +146,29 @@ function parseHTMLPreview(doc: Document, serviceHost: string, dateFormatter: Int
   const meta = (key: string) => doc.querySelector(`meta[property="${key}"], meta[name="${key}"]`)?.getAttribute("content") ?? "";
   const title = meta("og:title");
   if (!title) throw new Error("no embed metadata");
-  let status: Partial<PreviewPost> = {};
-  try {
-    status = parseStatusPreview(doc, serviceHost, dateFormatter);
-  } catch {
-    // The Open Graph tags alone still make a preview.
-  }
+  const script = doc.head.querySelector('script[id="discord:component-embed"]');
+  const component = script && COMPONENT_EMBED_TYPES.has(script.getAttribute("type") ?? "")
+    ? parseComponentEmbed(script.textContent ?? "", (url) => previewMediaUrl(url, serviceHost)) ?? undefined
+    : undefined;
   const description = meta("og:description");
   const [firstBlock = "", ...restBlocks] = description.split("\n\n");
   const hasStats = STATS_EMOJI_RE.test(firstBlock);
   const isProfile = meta("og:type") === "profile";
-  const isVideo = Boolean(meta("og:video"));
   const image = previewMediaUrl(meta("og:image"), serviceHost);
   const authorIcon = previewMediaUrl(
     doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "",
     serviceHost
   ) || (isProfile && image ? image : "");
-  const fallbackMedia = image && !image.includes("/favicon-")
-    ? [{ url: image, kind: isVideo ? "video" : "image" } satisfies PreviewMedia]
-    : undefined;
   return {
     title,
-    profileUrl: status.profileUrl ?? (safeHref(meta("article:author")) ?? undefined),
-    authorIconUrl: status.authorIconUrl ?? (authorIcon || undefined),
-    statsText: status.captionNodes ? undefined : (hasStats ? firstBlock : undefined),
-    captionNodes: status.captionNodes,
-    caption: status.captionNodes ? undefined : (hasStats ? restBlocks.join("\n\n") : description) || undefined,
-    media: status.media ?? fallbackMedia,
-    date: status.date ?? previewDate(meta("article:published_time"), dateFormatter),
+    component,
+    profileUrl: httpURL(meta("article:author")),
+    authorIconUrl: authorIcon || undefined,
+    statsText: hasStats ? firstBlock : undefined,
+    caption: (hasStats ? restBlocks.join("\n\n") : description) || undefined,
+    media: image && !image.includes("/favicon-") ? { url: image, alt: "" } : undefined,
+    mediaIsVideo: Boolean(meta("og:video")),
+    date: previewDate(meta("article:published_time"), dateFormatter),
   };
 }
 
@@ -249,29 +183,139 @@ async function fetchPreview(path: string, token: string | undefined, signal: Abo
   return parseHTMLPreview(doc, serviceHost, dateFormatter);
 }
 
-function PreviewMediaGrid({ items = [], videoUnavailable }: { items?: PreviewMedia[]; videoUnavailable: string }) {
-  if (!items.length) return null;
-  const count = Math.min(items.length, 4);
-  const layout = count === 1
-    ? "grid-cols-1 max-w-[225px]"
-    : count === 2
-      ? "aspect-[2/1] max-w-[300px] grid-cols-2"
-      : count === 3
-        ? "aspect-[3/2] max-w-[300px] grid-cols-3 grid-rows-2"
-        : "aspect-square max-w-[300px] grid-cols-2 grid-rows-2";
-  return <div className={`mt-2.5 grid w-full gap-0.5 overflow-hidden rounded bg-[color-mix(in_srgb,var(--color-kumo-recessed)_70%,transparent)] ${layout}`}>
-    {items.slice(0, 4).map((item, index) => <div key={`${item.url}-${index}`}
-      className={`relative min-h-0 overflow-hidden ${count > 1 ? "h-full" : ""} ${count === 3 && index === 0 ? "col-span-2 row-span-2" : ""}`}>
-      <img className={`block min-h-0 w-full object-cover saturate-[0.72] contrast-[1.02] ${count === 1 ? "h-auto" : "h-full"}`}
-        src={item.url} alt="" width={item.width ?? 480} height={item.height ?? 480}
-        style={count === 1 && item.width && item.height ? { aspectRatio: `${item.width} / ${item.height}` } : undefined}
-        loading="lazy" decoding="async" />
-      {item.kind === "video" ? <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/25 px-2 text-center text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)]">
-        <Play size={26} weight="fill" aria-hidden="true" />
-        <span className="text-[0.65rem] leading-tight">{videoUnavailable}</span>
-      </span> : null}
+const EMOJI_CLASS = "inline-block h-[1.1em] w-[1.1em] align-[-0.18em]";
+
+// Discord's emoji CDN is outside the page's img-src, so only our own two render.
+function CustomEmoji({ name }: { name: string }) {
+  switch (name.toLowerCase()) {
+    case "verified":
+      // docs/discord-emojis/verified.svg: this icon over a white disc.
+      return <span className={`relative ${EMOJI_CLASS}`} role="img" aria-label={`:${name}:`}>
+        <span className="absolute inset-1/4 rounded-full bg-white" />
+        <SealCheck className="relative h-full w-full" weight="fill" color="#0095f6" aria-hidden="true" />
+      </span>;
+    case "oginstagram":
+      return <img className={EMOJI_CLASS} src="/favicon-64.png" alt={`:${name}:`} width={20} height={20} />;
+    default:
+      return null;
+  }
+}
+
+const MARKDOWN_ELEMENTS = {
+  b: ["strong", undefined],
+  i: ["em", undefined],
+  u: ["u", undefined],
+  s: ["s", undefined],
+  h1: ["span", "my-0.5 block text-[1.2rem] font-bold leading-tight"],
+  h2: ["span", "my-0.5 block text-[1rem] font-bold leading-tight"],
+  h3: ["span", "my-0.5 block font-bold leading-tight"],
+  sub: ["span", "block text-[0.7rem] leading-snug text-kumo-subtle"],
+} as const;
+
+function MarkdownNodes({ nodes, lang }: { nodes: Markdown[]; lang: string }) {
+  return nodes.map((node, key) => {
+    if (typeof node === "string") return <TwemojiText key={key}>{node}</TwemojiText>;
+    switch (node.tag) {
+      case "emoji":
+        return <CustomEmoji key={key} name={node.name} />;
+      case "time":
+        return <time key={key} className="rounded bg-kumo-recessed px-0.5" dateTime={new Date(node.unix * 1000).toISOString()}>{formatTimestamp(node.unix, node.style, lang)}</time>;
+      case "a":
+        return <a key={key} className="text-kumo-link no-underline hover:underline" href={node.href} target="_blank" rel="noopener noreferrer"><MarkdownNodes nodes={node.children} lang={lang} /></a>;
+      default: {
+        const [Tag, className] = MARKDOWN_ELEMENTS[node.tag];
+        return <Tag key={key} className={className}><MarkdownNodes nodes={node.children} lang={lang} /></Tag>;
+      }
+    }
+  });
+}
+
+function TextDisplay({ nodes, lang }: { nodes: Markdown[]; lang: string }) {
+  return <div className="whitespace-pre-wrap [overflow-wrap:anywhere]"><MarkdownNodes nodes={nodes} lang={lang} /></div>;
+}
+
+function LinkButtonView({ button }: { button: LinkButton }) {
+  const className = "inline-flex max-w-full items-center gap-1.5 rounded-lg bg-kumo-fill px-3 py-1.5 text-[0.8rem] font-medium leading-tight text-kumo-default no-underline";
+  const content = <>
+    <span className="truncate"><TwemojiText>{button.label}</TwemojiText></span>
+    <ArrowSquareOut className="flex-none" size={14} aria-hidden="true" />
+  </>;
+  return button.href
+    ? <a className={`${className} hover:bg-kumo-fill-hover`} href={button.href} target="_blank" rel="noopener noreferrer">{content}</a>
+    : <span className={`${className} opacity-50`} aria-disabled="true">{content}</span>;
+}
+
+type TileProps = { item: Media; videoUnavailable: string; video?: boolean; single?: boolean; className?: string };
+
+function GalleryTile({ item, videoUnavailable, video = false, single = false, className = "" }: TileProps) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <div className={`min-h-16 bg-kumo-recessed ${className}`} />;
+  return <div className={`relative min-h-0 min-w-0 overflow-hidden bg-kumo-recessed ${className}`}>
+    <img className={`block saturate-[0.72] contrast-[1.02] ${single ? "h-auto max-h-80 w-auto max-w-full" : "h-full w-full object-cover"}`}
+      src={offloadPoster(item.url, location.origin) ?? item.url} alt={item.alt} loading="lazy" decoding="async"
+      onError={() => setFailed(true)} />
+    {video ? <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/25 px-2 text-center text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)]">
+      <Play size={26} weight="fill" aria-hidden="true" />
+      <span className={single ? "text-[0.65rem] leading-tight" : "sr-only"}>{videoUnavailable}</span>
+    </span> : null}
+  </div>;
+}
+
+const GALLERY_ROW_CLASS = ["", "aspect-[2/1] grid-cols-1", "aspect-[2/1] grid-cols-2", "aspect-[3/1] grid-cols-3"];
+
+function MediaGallery({ items, videoUnavailable }: { items: Media[]; videoUnavailable: string }) {
+  if (items.length === 1) {
+    return <div className="w-fit max-w-full overflow-hidden rounded-lg"><GalleryTile item={items[0]} videoUnavailable={videoUnavailable} single /></div>;
+  }
+  if (items.length === 3) {
+    return <div className="grid aspect-[3/2] grid-cols-[2fr_1fr] grid-rows-2 gap-1 overflow-hidden rounded-lg">
+      {items.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} videoUnavailable={videoUnavailable} className={index === 0 ? "row-span-2" : ""} />)}
+    </div>;
+  }
+  return <div className="flex flex-col gap-1 overflow-hidden rounded-lg">
+    {galleryRows(items).map((row, rowIndex) => <div key={rowIndex} className={`grid gap-1 ${GALLERY_ROW_CLASS[row.length]}`}>
+      {row.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} videoUnavailable={videoUnavailable} />)}
     </div>)}
   </div>;
+}
+
+function EmbedChildView({ child, lang, videoUnavailable }: { child: EmbedChild; lang: string; videoUnavailable: string }) {
+  switch (child.type) {
+    case "text":
+      return <TextDisplay nodes={child.content} lang={lang} />;
+    case "section":
+      return <div className={`flex gap-3 ${child.thumbnail ? "items-start" : "items-center"}`}>
+        <div className="flex min-w-0 flex-1 flex-col gap-2">{child.texts.map((nodes, index) => <TextDisplay key={index} nodes={nodes} lang={lang} />)}</div>
+        {child.thumbnail ? <img className="h-[4.5rem] w-[4.5rem] flex-none rounded-lg object-cover max-sm:h-16 max-sm:w-16"
+          src={child.thumbnail.url} alt={child.thumbnail.alt} width={72} height={72} /> : null}
+        {child.button ? <div className="flex-none"><LinkButtonView button={child.button} /></div> : null}
+      </div>;
+    case "gallery":
+      return <MediaGallery items={child.items} videoUnavailable={videoUnavailable} />;
+    case "separator":
+      return <hr className={`${child.large ? "my-2" : "my-0.5"} ${child.divider ? "border-kumo-hairline" : "border-transparent"}`} />;
+    case "row":
+      return <div className="flex flex-wrap gap-2">{child.buttons.map((button, index) => <LinkButtonView key={index} button={button} />)}</div>;
+  }
+}
+
+function ComponentEmbedView({ embed, lang, videoUnavailable }: { embed: ComponentEmbed; lang: string; videoUnavailable: string }) {
+  return <article className="hero-item mt-3 flex max-w-[30rem] flex-col gap-2 rounded-lg border border-l-4 border-kumo-hairline bg-kumo-base p-3 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs"
+    style={embed.accent ? { borderLeftColor: embed.accent } : undefined}>
+    {embed.children.map((child, index) => <EmbedChildView key={index} child={child} lang={lang} videoUnavailable={videoUnavailable} />)}
+  </article>;
+}
+
+// The demo post, in the layout the bot sends to Discord.
+function sampleEmbed(): ComponentEmbed | undefined {
+  const asset = (file: string) => ({ url: `${location.origin}/preview/v1/${file}` });
+  return parseComponentEmbed(JSON.stringify({ component: { type: 17, accent_color: 0xff0069, components: [
+    { type: 9, components: [{ type: 10, content: "**Visit Türkiye**\n@visit-turkiye\n\n❤️ **12.4K**  💬 **84**" }], accessory: { type: 11, media: asset("avatar-2.svg") } },
+    { type: 10, content: "Antalya, where the Taurus Mountains meet the Mediterranean.\nOld town lanes, turquoise coves, and the Red Tower glowing at sunset.\n\n#Antalya #Türkiye #TravelGuide" },
+    { type: 12, items: [{ media: asset("antalya.webp") }] },
+    { type: 9, components: [{ type: 10, content: `-# <:OGInstagram:1556597080229810266> OGInstagram · <t:${Math.floor(Date.now() / 1000)}:s>` }],
+      accessory: { type: 2, style: 5, label: "📷 Instagram", url: "https://www.instagram.com/" } },
+  ] } })) ?? undefined;
 }
 
 function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: PreviewProps) {
@@ -284,13 +328,8 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
     avatar: "/preview/v1/avatar-1.svg",
     time: timeFormatter.format(new Date()),
     path: "/p/ExAmpl3",
-    title: "Visit Türkiye (@visit-turkiye)",
-    authorIconUrl: "/preview/v1/avatar-2.svg",
-    statsText: "❤️ 12.4K 💬 84",
-    caption: "Antalya, where the Taurus Mountains meet the Mediterranean.\nOld town lanes, turquoise coves, and the Red Tower glowing at sunset.\n\n#Antalya #Türkiye #TravelGuide",
-    media: [{ url: "/preview/v1/antalya.webp", kind: "image", width: 480, height: 320 }],
-    date: dateFormatter.format(new Date()),
-  }), [dateFormatter, timeFormatter]);
+    component: sampleEmbed(),
+  }), [timeFormatter]);
   const [post, setPost] = useState<PreviewPost | null>(null);
   const postId = post?.id;
   const [stage, setStage] = useState<"sent" | "morph" | "embed">("sent");
@@ -499,16 +538,20 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
                 <div className={`preview-url-source absolute inset-0 truncate text-kumo-subtle ${visibleStage === "sent" ? "" : "preview-url-hidden"}`}>https://{baseHost}{visiblePost.path}</div>
                 <div className={`preview-url-target absolute inset-0 truncate text-kumo-default ${visibleStage === "sent" ? "" : "preview-url-visible"}`}><span>https://</span><HighlightedHost host={host} /><span>{visiblePost.path}</span></div>
               </div>
-              {visibleStage === "embed" && visiblePost.title ? <article className="hero-item mt-3 rounded border-l-4 border-kumo-brand bg-kumo-base py-2 pr-4 pb-4 pl-3 [overflow-wrap:anywhere] max-sm:pr-3">
+              {visibleStage === "embed" && visiblePost.component
+                ? <ComponentEmbedView embed={visiblePost.component} lang={lang} videoUnavailable={copy.videoUnavailable} />
+                : visibleStage === "embed" && visiblePost.title ? <article className="hero-item mt-3 rounded border-l-4 border-kumo-brand bg-kumo-base py-2 pr-4 pb-4 pl-3 [overflow-wrap:anywhere] max-sm:pr-3">
                 <div className="mt-2 flex items-center gap-2">
                   <img className="h-6 w-6 rounded-full object-cover" src={visiblePost.authorIconUrl ?? visiblePost.avatar} alt="" width={24} height={24} />
                   {visiblePost.profileUrl ? <a className="text-sm font-semibold text-kumo-default no-underline hover:underline" href={visiblePost.profileUrl} target="_blank" rel="noreferrer noopener" translate="no">{visiblePost.title}</a> : <span className="text-sm font-semibold text-kumo-default" translate="no">{visiblePost.title}</span>}
                 </div>
-                {visiblePost.statsText || visiblePost.captionNodes || visiblePost.caption ? <div className="mt-2 flex flex-col gap-2 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs">
+                {visiblePost.statsText || visiblePost.caption ? <div className="mt-2 flex flex-col gap-2 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs">
                   {visiblePost.statsText ? <p><strong translate="no"><TwemojiText>{visiblePost.statsText}</TwemojiText></strong></p> : null}
-                  {visiblePost.captionNodes ? <div className="[&_a]:text-kumo-brand [&_a]:underline [&_a]:underline-offset-2 [&_p]:whitespace-pre-wrap [&_p+p]:mt-2 [&_blockquote]:border-l-2 [&_blockquote]:border-kumo-line [&_blockquote]:pl-2">{visiblePost.captionNodes}</div> : visiblePost.caption ? <p className="whitespace-pre-line"><TwemojiText>{visiblePost.caption}</TwemojiText></p> : null}
+                  {visiblePost.caption ? <p className="whitespace-pre-line"><TwemojiText>{visiblePost.caption}</TwemojiText></p> : null}
                 </div> : null}
-                <PreviewMediaGrid items={visiblePost.media} videoUnavailable={copy.videoUnavailable} />
+                {visiblePost.media ? <div className="mt-2.5 w-fit max-w-[225px] overflow-hidden rounded">
+                  <GalleryTile item={visiblePost.media} videoUnavailable={copy.videoUnavailable} video={visiblePost.mediaIsVideo} single />
+                </div> : null}
                 <div className="mt-2.5 flex items-center gap-2"><img className="h-5 w-5 rounded-full object-cover" src="/favicon-64.png" alt="" width={20} height={20} /><span className="text-[0.7rem] leading-tight text-kumo-subtle" translate="no">{brand}{visiblePost.date ? <><i className="mx-1 not-italic">•</i>{visiblePost.date}</> : null}</span></div>
               </article> : null}
             </div>

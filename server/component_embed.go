@@ -3,9 +3,6 @@ package main
 import (
 	"bytes"
 	"cmp"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	mathrand "math/rand/v2"
 	"net/http"
@@ -17,18 +14,10 @@ import (
 	"unicode"
 )
 
-// Discord's draft is a link-preview payload, not a webhook message:
-// https://github.com/discord/discord-api-docs/pull/8606
+// A link-preview payload, not a webhook message:
+// https://docs.discord.com/developers/link-previews/component-embeds
 // The 3,000-byte limit includes JSON/HTML escapes and every signed media URL.
 const discordComponentMaxBytes = 3000
-
-type discordEmbedVariant uint8
-
-const (
-	discordLegacy discordEmbedVariant = iota
-	discordComponents
-	discordComponentsSupport
-)
 
 type discordMedia struct {
 	URL string `json:"url"`
@@ -59,55 +48,23 @@ type discordCard struct {
 	gallery, support, verified                         bool
 }
 
-func discordRequestVariant(req *http.Request) discordEmbedVariant {
-	if !strings.Contains(req.UserAgent(), "Discordbot") {
-		return discordLegacy
-	}
-	// Testing override: ?e=c pins the Component Embed and ?e=s adds the support
-	// button. Discord caches per URL, so add any other parameter (&n=2) to refetch.
-	switch req.URL.Query().Get("e") {
-	case "c":
-		return discordComponents
-	case "s":
-		return discordComponentsSupport
-	}
-	// Split requests, not posts: a cached model can serve either variant. The
-	// gateway gives each request a Cloudflare Ray ID or a fresh random ID.
-	id, _ := req.Context().Value(requestIDKey{}).(string)
-	if id == "" {
-		id = rand.Text()
-	}
-	digest := sha256.Sum256([]byte(id))
-	if digest[0]&1 != 0 {
-		return discordLegacy
-	}
-	// Independent hash bytes pick the support button for 20% of the Component
-	// Embed arm (10% of Discordbot requests); fitting the payload must not
-	// reroll the choice.
-	if binary.BigEndian.Uint64(digest[1:9])%5 == 0 {
-		return discordComponentsSupport
-	}
-	return discordComponents
+// The support button rides on a random tenth of renders; ?e=s pins it for
+// testing. Discord caches per URL, so add any other parameter (&n=2) to refetch.
+func discordSupport(req *http.Request) bool {
+	return req.URL.Query().Get("e") == "s" || mathrand.IntN(10) == 0
 }
 
-func discordEmbedResponse(req *http.Request, document string, choice discordEmbedVariant) resp {
+// cardResp serves an HTML card. id names its AS2 object, actor the author
+// (empty for an actor's own card); error cards pass neither.
+func cardResp(document, id, actor string) resp {
 	r := htmlResp(http.StatusOK, document)
-	if !strings.Contains(req.UserAgent(), "Discordbot") {
-		return r
+	r.headers["Vary"] = "Accept"
+	if id != "" {
+		r.headers["Link"] = apLinks(id, actor)
 	}
-	variant := "mastodon"
-	if choice != discordLegacy {
-		variant = "component"
-	}
-	rendered := "opengraph"
+	r.headers["X-OGInstagram-Embed"] = "opengraph"
 	if strings.Contains(document, `id="discord:component-embed"`) {
-		rendered = "component"
-	} else if strings.Contains(document, `type="application/activity+json"`) {
-		rendered = "mastodon"
-	}
-	r.headers["X-OGInstagram-Embed"] = rendered
-	if mathrand.IntN(100) == 0 {
-		logger(req.Context()).Info("discord embed served", "variant", variant, "rendered", rendered, "path", req.URL.Path, "sample_rate", 100)
+		r.headers["X-OGInstagram-Embed"] = "component"
 	}
 	return r
 }
@@ -288,7 +245,7 @@ func componentEmbedScript(card discordCard) string {
 	var items []discordGalleryItem
 	for _, mediaURL := range card.media {
 		if !discordMediaURL(mediaURL) {
-			return "" // Keep the established embed if we cannot describe its media.
+			return "" // Fall back to Open Graph if we cannot describe its media.
 		}
 		items = append(items, discordGalleryItem{Media: discordMedia{URL: mediaURL}})
 		if len(items) == 10 {
@@ -298,7 +255,8 @@ func componentEmbedScript(card discordCard) string {
 	// Discord left some names (emoji-heavy ones, at least) as raw [label](url)
 	// in headings, so the name stays plain text and the ASCII handle carries the link.
 	// Name, handle and stats share one size; weight and link color set them apart.
-	author := "**" + discordText(truncateFlat(cmp.Or(card.name, card.username), 120)) + "**"
+	// Truncate before the fallback: a blank-only name would leave "****".
+	author := "**" + discordText(cmp.Or(truncateFlat(card.name, 120), card.username)) + "**"
 	if card.verified && card.verifiedEmoji != "" {
 		author += " " + card.verifiedEmoji
 	}
@@ -338,8 +296,8 @@ func componentEmbedScript(card discordCard) string {
 				children = append(children, discordComponent{Type: 9, Components: []discordComponent{brand}, Accessory: &instagram})
 			}
 		}
-		// At most 11 components including the sole top-level container. The fixed
-		// layout stays below Discord's 40-component and 4,000-character limits.
+		// At most 11 components including the sole top-level container, well
+		// below Discord's 40.
 		payload := struct {
 			Component discordComponent `json:"component"`
 		}{discordComponent{Type: 17, AccentColor: 0xff0069, Components: children}}

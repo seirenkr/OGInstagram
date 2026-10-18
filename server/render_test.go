@@ -32,7 +32,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		}},
 	}
 
-	normal := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, discordLegacy)
+	normal := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, false)
 	if !strings.Contains(normal, "property=\"og:description\" content=\"stats\n\ncaption\"") {
 		t.Fatalf("normal embed description missing: %s", normal)
 	}
@@ -43,7 +43,7 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		t.Error("author avatar must remain separate from the service favicon")
 	}
 
-	gallery := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, true, discordLegacy)
+	gallery := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, true, false)
 	for _, tag := range []string{
 		`name="description" content=""`,
 		`property="og:description" content=""`,
@@ -57,13 +57,8 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 		t.Error("gallery embed must not expose the caption through image alt metadata")
 	}
 
-	wantHref := statusURL("https://oginstagram.com", "user", "p", "CODE", 0, false, true)
-	if !strings.Contains(gallery, `href="`+wantHref+`"`) {
-		t.Errorf("gallery embed activity link wrong, want %s in: %s", wantHref, gallery)
-	}
-
 	var note map[string]any
-	body := a.buildActivityStatus("https://oginstagram.com", post, "p", 0, false, true)
+	body := a.postNote("https://g.oginstagram.com", post, "p", 0, false, true)
 	if err := json.Unmarshal(body, &note); err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +66,10 @@ func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	if !ok || ctx != "https://www.w3.org/ns/activitystreams" || note["type"] != "Note" {
 		t.Errorf("not a standard AS2 Note: @context=%v type=%v", note["@context"], note["type"])
 	}
-	if note["id"] != wantHref {
-		t.Errorf("Note id wrong, got %v want %v", note["id"], wantHref)
+	if note["id"] != "https://g.oginstagram.com/p/CODE" {
+		t.Errorf("Note id wrong, got %v", note["id"])
 	}
-	if note["attributedTo"] != "https://oginstagram.com/users/user" {
+	if note["attributedTo"] != "https://g.oginstagram.com/user" {
 		t.Errorf("attributedTo must be the actor URL, got %v", note["attributedTo"])
 	}
 	if note["content"] != "" {
@@ -102,27 +97,18 @@ func TestStoryGalleryLeavesCaptionEmpty(t *testing.T) {
 		Media: Attachment{Kind: "image", Width: 1080, Height: 1920},
 	}
 	baseURL := "https://g.oginstagram.com"
-	wantStatus := storyStatusURL(baseURL, story.Username, story.ID, true)
 	html := a.buildStoryEmbedHTML(baseURL, storyOriginURL(story.Username, story.ID), story,
-		baseURL+"/media", baseURL+"/thumb", wantStatus, true, discordLegacy)
+		baseURL+"/media", baseURL+"/thumb", true, false)
 	if !strings.Contains(html, `property="og:description" content=""`) || strings.Contains(html, "story caption") {
 		t.Fatalf("gallery story exposed caption: %s", html)
 	}
-	if !strings.Contains(html, `href="`+wantStatus+`"`) {
-		t.Fatalf("gallery story activity link missing: %s", html)
-	}
 
-	for name, body := range map[string][]byte{
-		"activity": a.buildStoryActivityStatus(baseURL, story, true),
-		"mastodon": a.buildStoryMastodonStatus(baseURL, story, true),
-	} {
-		var status map[string]any
-		if err := json.Unmarshal(body, &status); err != nil {
-			t.Fatal(err)
-		}
-		if status["content"] != "" {
-			t.Errorf("%s gallery content = %q, want empty", name, status["content"])
-		}
+	var status map[string]any
+	if err := json.Unmarshal(a.storyNote(baseURL, story, true), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["content"] != "" {
+		t.Errorf("gallery Note content = %q, want empty", status["content"])
 	}
 }
 
@@ -130,173 +116,17 @@ func TestProfileGalleryLeavesStatsAndBioEmpty(t *testing.T) {
 	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 	p := Profile{Username: "user", FullName: "User", Biography: "profile bio", FollowerCount: 7}
 	baseURL := "https://g.oginstagram.com"
-	wantStatus := profileStatusURL(baseURL, p.Username, true)
-	if html := a.buildProfileEmbedHTML(baseURL, p, true, discordLegacy); !strings.Contains(html, `href="`+wantStatus+`"`) {
-		t.Fatalf("gallery profile must advertise the gallery status %s: %s", wantStatus, html)
+	if html := a.buildProfileEmbedHTML(baseURL, p, true, false); strings.Contains(html, "profile bio") || strings.Contains(html, "👤") {
+		t.Fatalf("gallery profile card leaked stats or bio: %s", html)
 	}
 
-	for name, body := range map[string][]byte{
-		"activity": a.buildProfileActivityStatus(baseURL, p, true),
-		"mastodon": a.buildMastodonProfileStatus(baseURL, p, true),
-	} {
-		var status map[string]any
-		if err := json.Unmarshal(body, &status); err != nil {
-			t.Fatal(err)
-		}
-		if status["content"] != "" || strings.Contains(string(body), "profile bio") {
-			t.Errorf("%s gallery profile leaked stats or bio: %s", name, body)
-		}
-	}
-}
-
-func TestBuildMastodonStatusVideoHasPreviewURL(t *testing.T) {
-	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
-	post := Post{
-		Shortcode: "CODE", Username: "user", FullName: "User", StatsLine: "stats",
-		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080}},
-	}
-	var st map[string]any
-	if err := json.Unmarshal(a.buildMastodonStatus("https://oginstagram.com", post, "reel", 0, false, false), &st); err != nil {
+	body := a.profileActor(baseURL, p, true)
+	var person map[string]any
+	if err := json.Unmarshal(body, &person); err != nil {
 		t.Fatal(err)
 	}
-
-	wantID := statusSnowcode("reel", "CODE", 0, false, false)
-	if st["id"] != wantID || st["visibility"] != "public" {
-		t.Errorf("status core fields wrong: id=%v want=%v visibility=%v", st["id"], wantID, st["visibility"])
-	}
-	if strings.TrimFunc(wantID, func(r rune) bool { return r >= '0' && r <= '9' }) != "" {
-		t.Errorf("snowcode id must be all digits, got %q", wantID)
-	}
-
-	for _, k := range []string{"media_attachments", "mentions", "tags", "emojis"} {
-		if _, ok := st[k].([]any); !ok {
-			t.Errorf("%q must be a present array", k)
-		}
-	}
-	if _, ok := st["account"].(map[string]any); !ok {
-		t.Fatal("account object missing")
-	}
-	media, ok := st["media_attachments"].([]any)
-	if !ok || len(media) != 1 {
-		t.Fatalf("want one media_attachment, got %#v", st["media_attachments"])
-	}
-	m := media[0].(map[string]any)
-	if m["type"] != "video" {
-		t.Errorf("media type = %v, want video", m["type"])
-	}
-
-	wantPreview := "https://oginstagram.com/offload/CODE/1?thumbnail=1"
-	if p, _ := m["preview_url"].(string); !strings.HasPrefix(p, wantPreview+"&") {
-		t.Errorf("preview_url = %v, want %v", m["preview_url"], wantPreview)
-	}
-	if u, _ := m["url"].(string); !strings.HasPrefix(u, "https://oginstagram.com/offload/CODE/1?") {
-		t.Errorf("url = %v, want playable offload", m["url"])
-	}
-}
-
-func TestBuildMastodonStatusUsesNullsForMissingEmbedFields(t *testing.T) {
-	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
-	post := Post{
-		Shortcode: "CODE",
-		Username:  "user",
-		StatsLine: "stats",
-		Attachments: []Attachment{{
-			Kind: "image", URL: "https://cdn/x.jpg", Thumbnail: "https://cdn/x.jpg", Width: 1080, Height: 1080,
-		}},
-	}
-
-	var st map[string]any
-	if err := json.Unmarshal(a.buildMastodonStatus("https://oginstagram.com", post, "p", 0, false, false), &st); err != nil {
-		t.Fatal(err)
-	}
-	if st["created_at"] != nil {
-		t.Fatalf("missing post timestamp must be JSON null, got %#v", st["created_at"])
-	}
-	for _, k := range []string{"edited_at", "poll", "card", "language", "text", "quote"} {
-		if st[k] != nil {
-			t.Errorf("%s must be JSON null when unavailable, got %#v", k, st[k])
-		}
-	}
-	if st["quotes_count"] != float64(0) {
-		t.Errorf("quotes_count = %#v, want 0", st["quotes_count"])
-	}
-	if _, ok := st["tagged_collections"].([]any); !ok {
-		t.Errorf("tagged_collections must be a present array, got %#v", st["tagged_collections"])
-	}
-	qa, ok := st["quote_approval"].(map[string]any)
-	if !ok || qa["current_user"] != "denied" {
-		t.Fatalf("quote_approval wrong: %#v", st["quote_approval"])
-	}
-
-	acct, ok := st["account"].(map[string]any)
-	if !ok {
-		t.Fatal("account object missing")
-	}
-	if acct["display_name"] != "user" {
-		t.Errorf("display_name should fall back to username, got %#v", acct["display_name"])
-	}
-	if acct["acct"] != "user" {
-		t.Errorf("acct must remain local username without domain, got %#v", acct["acct"])
-	}
-	if acct["url"] != "https://www.instagram.com/user/" || acct["uri"] != "https://www.instagram.com/user/" {
-		t.Errorf("account URLs wrong: url=%#v uri=%#v", acct["url"], acct["uri"])
-	}
-	for _, k := range []string{"note", "avatar_description", "header", "header_static", "header_description", "discoverable", "created_at", "last_status_at", "hide_collections"} {
-		if acct[k] != nil {
-			t.Errorf("account %s must be JSON null when unavailable, got %#v", k, acct[k])
-		}
-	}
-	for _, k := range []string{"avatar", "avatar_static"} {
-		if acct[k] != "https://oginstagram.com"+defaultAvatarPath {
-			t.Errorf("account %s must fall back to the default avatar, got %#v", k, acct[k])
-		}
-	}
-	if acct["indexable"] != false || acct["show_media"] != false || acct["show_media_replies"] != false || acct["show_featured"] != false {
-		t.Errorf("account boolean defaults wrong: %#v", acct)
-	}
-	fa, ok := acct["feature_approval"].(map[string]any)
-	if !ok || fa["current_user"] != "missing" {
-		t.Fatalf("feature_approval wrong: %#v", acct["feature_approval"])
-	}
-}
-
-func TestBuildMastodonProfileStatusUsesKnownProfileFields(t *testing.T) {
-	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
-	taken := time.Date(2026, 4, 23, 10, 1, 13, 0, time.UTC)
-	p := Profile{
-		Username:       "user",
-		UserID:         "123",
-		FullName:       "User Name",
-		Biography:      "hello #tag",
-		ProfilePic:     "https://cdn/avatar.jpg",
-		FollowerCount:  7,
-		FollowingCount: 3,
-		MediaCount:     11,
-		RecentMedia:    []ProfileMedia{{ID: "m1", Thumbnail: "https://cdn/thumb.jpg", Width: 640, Height: 480, TakenAt: taken}},
-	}
-
-	var st map[string]any
-	if err := json.Unmarshal(a.buildMastodonProfileStatus("https://oginstagram.com", p, false), &st); err != nil {
-		t.Fatal(err)
-	}
-	if st["created_at"] != "2026-04-23T10:01:13.000Z" {
-		t.Fatalf("status created_at = %#v", st["created_at"])
-	}
-	acct := st["account"].(map[string]any)
-	if acct["id"] != "123" || acct["display_name"] != "User Name" {
-		t.Errorf("account identity wrong: %#v", acct)
-	}
-	if acct["created_at"] != nil {
-		t.Errorf("account creation date is unknown and must be null, got %#v", acct["created_at"])
-	}
-	if acct["last_status_at"] != "2026-04-23" {
-		t.Errorf("last_status_at = %#v", acct["last_status_at"])
-	}
-	if acct["followers_count"] != float64(7) || acct["following_count"] != float64(3) || acct["statuses_count"] != float64(11) {
-		t.Errorf("account counts wrong: %#v", acct)
-	}
-	if acct["note"] == nil || !strings.HasPrefix(acct["avatar"].(string), "https://oginstagram.com/offload/@user/avatar?") {
-		t.Errorf("known profile fields missing: %#v", acct)
+	if _, found := person["summary"]; found || strings.Contains(string(body), "profile bio") {
+		t.Errorf("gallery Person leaked stats or bio: %s", body)
 	}
 }
 
@@ -369,7 +199,7 @@ func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
 		Shortcode: "CODE", Username: "user", FullName: "User",
 		Attachments: []Attachment{{Kind: "video", URL: "https://cdn/x.mp4", Width: 2160, Height: 3840}},
 	}
-	html := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, discordLegacy)
+	html := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, false)
 	for _, tag := range []string{
 		`property="og:video:width" content="1080"`,
 		`property="og:video:height" content="1920"`,
@@ -381,5 +211,28 @@ func TestBuildEmbedHTMLScalesVideoDimensions(t *testing.T) {
 
 	if strings.Contains(html, "twitter:player") || strings.Contains(html, `twitter:card" content="player"`) {
 		t.Errorf("video embed must not use a Twitter player card:\n%s", html)
+	}
+}
+
+func TestEmbedHTMLImageTagsAndPublishDate(t *testing.T) {
+	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
+	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	media := Attachment{Kind: "image", URL: "https://cdn/x.jpg", Width: 1080, Height: 1350}
+	post := Post{Shortcode: "CODE", Username: "user", Caption: "caption", CreatedAt: created, Attachments: []Attachment{media}}
+	story := Story{ID: "1", Username: "user", CreatedAt: created, Media: media}
+	for _, html := range []string{
+		a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, false),
+		a.buildStoryEmbedHTML("https://oginstagram.com", storyOriginURL("user", "1"), story, "https://oginstagram.com/media", "https://oginstagram.com/thumb", false, false),
+	} {
+		// Discord attaches dimension tags to the last og:image or twitter:image above them.
+		twitter, image, width := strings.Index(html, `name="twitter:image"`), strings.Index(html, `property="og:image"`), strings.Index(html, `property="og:image:width"`)
+		if twitter < 0 || twitter > image || image > width || !strings.Contains(html, `property="og:image:secure_url"`) {
+			t.Errorf("og:image must be the last image tag before its dimensions: %s", html)
+		}
+		for _, tag := range []string{`property="og:pubdate" content="2026-10-01T12:00:00Z"`, `property="article:published_time" content="2026-10-01T12:00:00Z"`} {
+			if !strings.Contains(html, tag) {
+				t.Errorf("missing %s: %s", tag, html)
+			}
+		}
 	}
 }

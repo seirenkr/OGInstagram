@@ -87,10 +87,8 @@ export function validEmbedPath(path: string): boolean {
   if (url.origin !== origin) return false;
   // The server splits the path as sent; url.pathname would resolve dot segments.
   const segments = splitPath(path.split("?")[0]);
-  // The gateway routes these to offload and ActivityPub handlers before embeds.
-  if (segments[0] === "offload" || (segments[0] === "users" && (segments.length === 3
-    ? segments[2] === "inbox" || segments[2] === "outbox"
-    : segments.length === 4 && segments[2] === "statuses"))) return false;
+  // The gateway routes these to offload handlers before embeds.
+  if (segments[0] === "offload") return false;
   const embed = parseEmbedSegments(segments);
   const query = Array.from(url.searchParams);
   const imgIndex = query.length === 1 && query[0][0] === "img_index"
