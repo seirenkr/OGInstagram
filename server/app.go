@@ -101,7 +101,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	}
 
 	sources := []stagedSource[Post]{
-		{name: "post_embed", fetch: func(ctx context.Context) (Post, *AppError) {
+		{name: "post_embed", persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
 			return valid(a.fetchPostEmbed(ctx, shortcode))
 		}},
 		{name: "post_graphql", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {

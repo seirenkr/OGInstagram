@@ -17,7 +17,7 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 		name, kind, source string
 		persist            bool
 	}{
-		{"captioned_after_proxy_started", "post", "captioned", false},
+		{"captioned_after_proxy_started", "post", "captioned", true},
 		{"post_graphql", "post", "graphql", true},
 		{"post_external_helper", "post", "helper", true},
 		{"post_oembed", "post", "oembed", true},

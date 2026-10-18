@@ -26,6 +26,8 @@ const (
 
 	transientErrorCacheSeconds = 60
 	permanentErrorCacheSeconds = 3600
+	// Cards and statuses link only to signed offload URLs, which outlive this by days.
+	cardEdgeTTL = 3600
 
 	requestTimeout = 4 * time.Second
 
@@ -52,7 +54,7 @@ const (
 	// Keep origin work bounded on a single small instance.
 	maxConcurrentFetches = 48
 
-	localPostCacheBytes    = 16 << 20
+	localPostCacheBytes    = 64 << 20
 	localProfileCacheBytes = 4 << 20
 	localStoryCacheBytes   = 4 << 20
 

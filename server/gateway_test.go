@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -466,6 +467,92 @@ func TestOffloadEdgeTTL(t *testing.T) {
 	}
 	if got := offloadEdgeTTL(link(time.Hour), cdn, now); got > 3600 {
 		t.Errorf("TTL must not outlive the signed link: %d", got)
+	}
+}
+
+func TestDirectEdgeTTL(t *testing.T) {
+	now := time.Now()
+	oe := func(d time.Duration) string { return "?oe=" + strconv.FormatInt(now.Add(d).Unix(), 16) }
+	cdn := "https://scontent.cdninstagram.com/v/x.jpg"
+	for _, tt := range []struct {
+		location string
+		min, max int
+	}{
+		{cdn + oe(100*time.Hour), 86400, 86400},
+		{cdn + oe(3*time.Hour), 8999, 9000},
+		{cdn + oe(20*time.Minute), 0, 0},
+		{cdn, 0, 0},
+		{"https://d.oginstagram.com" + defaultAvatarPath, 0, 0},
+		{"https://www.instagram.com/p/ABC123/", 0, 0},
+		{"https://www.instagram.com/p/ABC123/" + oe(3*time.Hour), 0, 0},
+		{"://scontent.cdninstagram.com/x.jpg" + oe(3*time.Hour), 0, 0},
+	} {
+		if got := directEdgeTTL(tt.location, now); got < tt.min || got > tt.max {
+			t.Errorf("directEdgeTTL(%s) = %d, want %d..%d", tt.location, got, tt.min, tt.max)
+		}
+	}
+}
+
+var edgeCacheControl = regexp.MustCompile(`^max-age=([0-9]+)(, must-revalidate)?$`)
+
+func TestGatewayEdgeCachesOnlyURLKeyedSuccesses(t *testing.T) {
+	g := testGateway(t)
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	cdn := "https://scontent.cdninstagram.com/"
+	oe := "?oe=" + strconv.FormatInt(now.Add(3*time.Hour).Unix(), 16)
+	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: Post{Shortcode: "ABC123", Username: "alice", Attachments: []Attachment{{Kind: "image", URL: cdn + "1.jpg" + oe}}}, expiresAt: exp})
+	g.app.posts.storeLocal("GONE12", &cacheEntry[Post]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: exp})
+	g.app.posts.storeLocal("SLOW12", &cacheEntry[Post]{err: ephemeralErr(504, errorCodeConnection, "timeout"), expiresAt: exp})
+	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", Media: Attachment{Kind: "image", URL: cdn + "s.jpg" + oe}}, expiresAt: exp})
+	for _, name := range []string{"alice", "al.js"} {
+		g.app.profiles.storeLocal(name, &cacheEntry[Profile]{value: Profile{Username: name}, expiresAt: exp})
+	}
+	signed, _ := url.Parse(g.app.offloadSigner.url("https://oginstagram.com", "/offload/ABC123/1", false))
+	for _, tt := range []struct {
+		method, host, target string
+		navigate             bool
+		status, maxAge       int // maxAge 0: no Cloudflare-CDN-Cache-Control
+		revalidate           bool
+	}{
+		{"GET", "d.oginstagram.com", "/p/ABC123", false, 302, 9000, true},
+		{"GET", "d.oginstagram.com", "/stories/alice/123", false, 302, 9000, true},
+		{"GET", "oginstagram.com", "/p/ABC123/", false, 200, cardEdgeTTL, false},
+		{"GET", "g.oginstagram.com", "/reel/ABC123/?img_index=1", false, 200, cardEdgeTTL, false},
+		{"GET", "oginstagram.com", "/stories/alice/123", false, 200, cardEdgeTTL, false},
+		{"GET", "oginstagram.com", "/api/v1/statuses/" + statusSnowcode("p", "ABC123", 0, false, false), false, 200, cardEdgeTTL, false},
+		{"GET", "g.oginstagram.com", "/users/alice/statuses/" + statusSnowcode("p", "ABC123", 0, false, true), false, 200, cardEdgeTTL, false},
+		{"GET", "oginstagram.com", "/api/v1/statuses/" + statusSnowcode("p", "GONE12", 0, false, false), false, 404, 0, false},
+		{"GET", "oginstagram.com", signed.RequestURI(), false, 302, 9000, false},
+		{"GET", "d.oginstagram.com", "/p/ABC123?thumbnail=1", false, 302, 0, false}, // default avatar
+		{"GET", "d.oginstagram.com", "/p/SLOW12", false, 302, 0, false},             // fallback to Instagram
+		{"GET", "d.oginstagram.com", "/p/GONE12", false, 404, 0, false},
+		{"GET", "d.oginstagram.com", "/alice", false, 200, 0, false},
+		{"HEAD", "oginstagram.com", "/p/ABC123/", false, 200, 0, false},
+		{"GET", "oginstagram.com", "/p/GONE12/", false, 200, 0, false},
+		{"GET", "oginstagram.com", "/p/SLOW12/", false, 200, 0, false},
+		{"GET", "oginstagram.com", "/p/ABC123/", true, 307, 0, false},
+		{"GET", "oginstagram.com", "/alice", false, 200, 0, false},
+		{"GET", "oginstagram.com", "/al.js", false, 200, 0, false},
+	} {
+		r := publicRequest(tt.method, tt.target)
+		r.Host = tt.host
+		if tt.navigate {
+			r.Header.Set("Sec-Fetch-Mode", "navigate")
+			r.Header.Set("Sec-Fetch-Dest", "document")
+		}
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		edge := w.Header().Get("Cloudflare-CDN-Cache-Control")
+		m := edgeCacheControl.FindStringSubmatch(edge)
+		age := 0
+		if m != nil {
+			age, _ = strconv.Atoi(m[1])
+		}
+		if w.Code != tt.status || w.Header().Get("Cache-Control") != "no-store" ||
+			tt.maxAge == 0 && edge != "" || tt.maxAge > 0 && (m == nil || age < tt.maxAge-2 || age > tt.maxAge || (m[2] != "") != tt.revalidate) {
+			t.Errorf("%s %s%s = %d, Cache-Control %q, Cloudflare-CDN-Cache-Control %q", tt.method, tt.host, tt.target, w.Code, w.Header().Get("Cache-Control"), edge)
+		}
 	}
 }
 

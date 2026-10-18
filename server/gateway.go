@@ -244,6 +244,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if route.offload && result.status == http.StatusFound && result.originStatus == 0 {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, result.headers["Location"], time.Now()))
 	}
+	// must-revalidate: past the CDN URL's expiry Cloudflare must not serve the
+	// stale redirect when the origin errors.
+	if route.direct && result.status == http.StatusFound && result.originStatus == 0 {
+		if ttl := directEdgeTTL(result.headers["Location"], time.Now()); ttl > 0 {
+			result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(ttl) + ", must-revalidate"
+		}
+	}
+	// A card differs per User-Agent only in its Discord variant, and any variant
+	// serves any bot. Error cards are 200s too, hence originStatus.
+	if route.card && r.Method == http.MethodGet && result.status == http.StatusOK && result.originStatus == 0 {
+		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(cardEdgeTTL)
+	}
 	elapsed := time.Since(started)
 	g.recordMetric(route, result, elapsed)
 	w.Header().Set("Server-Timing", "origin;dur="+strconv.FormatFloat(float64(elapsed.Microseconds())/1000, 'f', 2, 64))
@@ -258,6 +270,20 @@ func offloadEdgeTTL(link *url.URL, location string, now time.Time) int {
 		ttl = min(ttl, time.Unix(exp, 0).Sub(now))
 	}
 	return max(int(ttl/time.Second), 0)
+}
+
+// directEdgeTTL caches a d. host redirect only while the CDN URL it points at
+// carries its own expiry; the default avatar and unexpiring URLs stay uncached.
+func directEdgeTTL(location string, now time.Time) int {
+	u, err := url.Parse(location)
+	if err != nil || !trustedMediaURL(u) {
+		return 0
+	}
+	expiry, ok := cdnExpiry(location)
+	if !ok {
+		return 0
+	}
+	return max(int(min(cdnFallbackTTL, expiry.Sub(now)-cdnTTLMargin)/time.Second), 0)
 }
 
 func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
@@ -296,7 +322,8 @@ func (g *Gateway) writeResult(w http.ResponseWriter, r *http.Request, result res
 	for k, v := range result.headers {
 		w.Header().Set(k, v)
 	}
-	// Dynamic responses always reach the gateway for authorization, UA and Accept.
+	// Only Cloudflare may keep a dynamic response: where ServeHTTP set
+	// Cloudflare-CDN-Cache-Control and a cache rule opts the path in.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(result.status)
 	if r.Method != http.MethodHead {
@@ -311,6 +338,10 @@ type gatewayRoute struct {
 	humanRedirect string
 	category      string
 	offload       bool
+	direct        bool
+	// card: a 200 keyed only by the URL; profiles stay out because a dotted
+	// username looks like a file extension Cloudflare caches for everyone.
+	card bool
 }
 
 func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
@@ -334,7 +365,7 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
 	if len(segments) == 3 && segments[0] == "stories" && segments[1] != "highlights" && validUsername(segments[1]) && validStoryID(segments[2]) {
 		username, id := segments[1], segments[2]
-		route.category = "stories"
+		route.category, route.direct, route.card = "stories", direct, !direct
 		if direct {
 			route.handle = func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, username, id, false) }
 		} else {
@@ -345,11 +376,13 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	}
 	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "statuses" {
 		code := segments[3]
+		route.card = true
 		route.handle = func(a *App, r *http.Request) resp { return a.handleMastodonStatus(r, code) }
 		return route, validStatusCode(code)
 	}
 	if len(segments) == 4 && segments[0] == "users" && validUsername(segments[1]) && segments[2] == "statuses" {
 		code := segments[3]
+		route.card = true
 		route.handle = func(a *App, r *http.Request) resp { return a.handleActivity(r, code) }
 		return route, validStatusCode(code)
 	}
@@ -366,7 +399,7 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		return route, true
 	}
 	if post := parseEmbedSegments(segments); post != nil {
-		route.category = "posts"
+		route.category, route.direct, route.card = "posts", direct, !direct
 		index, specified := mediaSelection(r.URL.Query(), post.PathIndex)
 		if direct {
 			route.handle = func(a *App, r *http.Request) resp { return a.handleOffload(r, post.Shortcode, index, false) }

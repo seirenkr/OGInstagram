@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	persistentLocalEntryCap = 2048
+	persistentLocalEntryCap = 8192
 	errorLocalEntryCap      = 8192
 
 	cacheSharedWorkTimeout   = 10 * time.Second

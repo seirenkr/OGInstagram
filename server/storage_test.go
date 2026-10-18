@@ -26,6 +26,18 @@ func newTestStore(t *testing.T) *localStore {
 	return s
 }
 
+func checkModelUsage(t *testing.T, s *localStore) {
+	t.Helper()
+	var entries, count int
+	var bytes, used int64
+	if err := s.state.QueryRow(`SELECT entries, bytes, (SELECT COUNT(*) FROM models), (SELECT COALESCE(SUM(length(value)), 0) FROM models) FROM model_usage`).Scan(&entries, &bytes, &count, &used); err != nil {
+		t.Fatal(err)
+	}
+	if entries != count || bytes != used {
+		t.Fatalf("model_usage = %d rows, %d bytes; models hold %d rows, %d bytes", entries, bytes, count, used)
+	}
+}
+
 func TestPersistentCacheRestartExpiryAndValidation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		dir := t.TempDir()
@@ -135,6 +147,7 @@ func TestLocalModelStoreBounds(t *testing.T) {
 		if count != persistentModelEntries {
 			t.Fatalf("entry cap=%d", count)
 		}
+		checkModelUsage(t, s)
 		if _, _, err = s.getModel(ctx, "post", "0"); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("oldest entry not evicted: %v", err)
 		}
@@ -146,7 +159,7 @@ func TestLocalModelStoreBounds(t *testing.T) {
 		if err = s.state.QueryRow("PRAGMA max_page_count").Scan(&pages); err != nil {
 			t.Fatal(err)
 		}
-		if pages != 81920 {
+		if pages != 786432 {
 			t.Fatalf("state disk cap=%d pages", pages)
 		}
 	})
@@ -175,6 +188,7 @@ func TestLocalModelStoreReplacementAtCapacity(t *testing.T) {
 	if count != persistentModelEntries {
 		t.Fatalf("replacement evicted another entry: count=%d", count)
 	}
+	checkModelUsage(t, s)
 	if _, _, err := s.getModel(ctx, "post", "0"); err != nil {
 		t.Fatalf("oldest entry lost during replacement: %v", err)
 	}
@@ -193,6 +207,104 @@ func TestLocalModelStoreReplacementAtCapacity(t *testing.T) {
 	value, gotExpiry, err = s.getModel(ctx, "post", key)
 	if err != nil || string(value) != string(replacement) || !gotExpiry.Equal(expires) {
 		t.Fatalf("failed replacement lost previous value: %s, %s, %v", value, gotExpiry, err)
+	}
+	checkModelUsage(t, s)
+}
+
+func TestModelUsageFollowsReplacementAndExpiry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newTestStore(t)
+		ctx := context.Background()
+		for _, m := range []struct {
+			key, value string
+			ttl        time.Duration
+		}{{"a", `{"value":1}`, time.Hour}, {"b", `{"value":2}`, time.Minute}, {"a", `{"value":"longer"}`, time.Hour}} {
+			if err := s.putModel(ctx, "post", m.key, []byte(m.value), time.Now().Add(m.ttl)); err != nil {
+				t.Fatal(err)
+			}
+			checkModelUsage(t, s)
+		}
+		time.Sleep(2 * time.Minute)
+		// The next write sweeps the expired "b".
+		if err := s.putModel(ctx, "post", "c", []byte(`{"value":3}`), time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		checkModelUsage(t, s)
+		var entries int
+		if err := s.state.QueryRow("SELECT entries FROM model_usage").Scan(&entries); err != nil || entries != 2 {
+			t.Fatalf("entries=%d, %v; want a and c", entries, err)
+		}
+	})
+}
+
+func TestExpiredBacklogSweptInBatches(t *testing.T) {
+	s := newTestStore(t)
+	const expired = 100000
+	_, err := s.state.Exec(`WITH RECURSIVE numbers(n) AS (
+		VALUES (0) UNION ALL SELECT n+1 FROM numbers WHERE n+1 < ?
+	) INSERT INTO models(kind,key,value,expires_at,stored_at)
+		SELECT 'post', n, zeroblob(3369), n, n FROM numbers`, expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		err = s.putModel(ctx, "post", "new"+strconv.Itoa(i), []byte(`{"value":1}`), time.Now().Add(time.Hour))
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var left int
+		if err = s.state.QueryRow("SELECT COUNT(*) FROM models WHERE expires_at <= ?", time.Now().UnixMilli()).Scan(&left); err != nil {
+			t.Fatal(err)
+		}
+		if left != expired-i*modelSweepBatch {
+			t.Fatalf("expired rows after put %d = %d", i, left)
+		}
+	}
+	checkModelUsage(t, s)
+}
+
+func TestModelUsageRecountedOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	// The schema before model_usage existed.
+	db, err := openSQLite(filepath.Join(dir, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE models (
+			kind TEXT NOT NULL, key TEXT NOT NULL, value BLOB NOT NULL,
+			expires_at INTEGER NOT NULL, stored_at INTEGER NOT NULL,
+			PRIMARY KEY (kind, key)
+		);
+		CREATE INDEX model_expiry ON models(expires_at);
+		CREATE INDEX model_age ON models(stored_at);
+		CREATE INDEX model_value_size ON models(length(value));
+		INSERT INTO models VALUES ('post', 'a', x'0102', 9e15, 1), ('post', 'b', x'010203', 9e15, 2), ('story', 'c/1', x'01', 9e15, 3);
+	`)
+	if err = errors.Join(err, db.Close()); err != nil {
+		t.Fatal(err)
+	}
+	// Then a file whose totals drifted.
+	for _, next := range []string{"UPDATE model_usage SET entries = 99, bytes = -1", ""} {
+		s, err := openLocalStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var entries int
+		var bytes int64
+		if err = s.state.QueryRow("SELECT entries, bytes FROM model_usage").Scan(&entries, &bytes); err != nil || entries != 3 || bytes != 6 {
+			t.Fatalf("model_usage = %d rows, %d bytes, %v; want 3, 6", entries, bytes, err)
+		}
+		if next != "" {
+			if _, err = s.state.Exec(next); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err = s.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
