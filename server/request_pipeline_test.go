@@ -230,11 +230,15 @@ func TestHelperCancelledWhenGraphQLWins(t *testing.T) {
 }
 
 // gatedPostProxy answers like Instagram for a post-level gate: GraphQL fails
-// with field_exception, the ruling says the post exists, oEmbed reports the gate.
+// with field_exception, the ruling marks the gate, oEmbed reports it too.
 func gatedPostProxy(oembed *atomic.Int32) *SessionPool {
+	return gatedRulingProxy(oembed, 200, `{"title":"This content isn't available to everyone","gating_type_thrift":3,"status":"ok"}`)
+}
+
+func gatedRulingProxy(oembed *atomic.Int32, rulingStatus int, ruling string) *SessionPool {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if strings.Contains(r.URL.Path, "get_ruling_for_content") {
-			return mediaTestResponse(r, 200, nil, []byte(`{"status":"ok"}`)), nil
+			return mediaTestResponse(r, rulingStatus, nil, []byte(ruling)), nil
 		}
 		if r.URL.Path == "/api/v1/oembed/" {
 			oembed.Add(1)
@@ -325,8 +329,9 @@ func TestOGPageOnlyForFieldException(t *testing.T) {
 	for _, body := range []string{`{"data":null,"errors":[{"message":"x","code":1357001}]}`, `{"data":{"renamed":{}}}`} {
 		synctest.Test(t, func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				// A marked gate, so only the GraphQL error code can hold the page back.
 				if strings.Contains(r.URL.Path, "get_ruling_for_content") {
-					return mediaTestResponse(r, 200, nil, []byte(`{"status":"ok"}`)), nil
+					return mediaTestResponse(r, 200, nil, []byte(`{"gating_type_thrift":3,"status":"ok"}`)), nil
 				}
 				if r.URL.Path == "/api/v1/oembed/" {
 					return mediaTestResponse(r, 200, nil, []byte(`{"status":"fail"}`)), nil
@@ -338,6 +343,46 @@ func TestOGPageOnlyForFieldException(t *testing.T) {
 			if _, err := a.getPost(context.Background(), "ABC123", nil); err == nil || err.Code != errorCodeGraphQL {
 				t.Fatalf("getPost error = %#v for %s", err, body)
 			}
+		})
+	}
+}
+
+// Account-level age limits leave the ruling an unmarked "ok" and their pages
+// tagless; anything else may carry tags, so it still costs a page fetch.
+func TestOGPageOnlyForPostLevelGates(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		ruling string
+		fetch  bool
+	}{
+		{"age gate", 200, `{"title":"This content isn't available to everyone","gating_type_thrift":3,"status":"ok"}`, true},
+		{"geo block", 200, `{"title":"Restricted Post","geo_block_rule_type":3,"gating_type_thrift":2,"status":"ok"}`, true},
+		{"other gate", 200, `{"gating_type_thrift":11,"status":"ok"}`, true},
+		{"account age limit", 200, `{"title":"","description":"","status":"ok"}`, false},
+		{"ruling refused", http.StatusUnauthorized, `{"status":"fail"}`, true},
+		{"ruling not ok", 200, `{"require_login":true,"status":"fail"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := externalHelperPostImpl
+			t.Cleanup(func() { externalHelperPostImpl = previous })
+			externalHelperPostImpl = func(*App, context.Context, string) (Post, *AppError) {
+				return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, "external helper found no post")
+			}
+			var ogPages atomic.Int32
+			stubDefaultTransport(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				ogPages.Add(1)
+				return mediaTestResponse(r, http.StatusOK, nil, []byte(ogTestPage("ABC123"))), nil
+			}))
+			synctest.Test(t, func(t *testing.T) {
+				var oembed atomic.Int32
+				a := newApp(Config{}, gatedRulingProxy(&oembed, tc.status, tc.ruling), offloadSigner{})
+				a.embedPausedUntil.Store(time.Now().Add(24 * time.Hour).UnixNano())
+				post, _ := a.getPost(context.Background(), "ABC123", nil)
+				if fetched := ogPages.Load() == 1; fetched != tc.fetch || post.Partial != tc.fetch {
+					t.Fatalf("og pages=%d partial=%t, want fetch=%t", ogPages.Load(), post.Partial, tc.fetch)
+				}
+			})
 		})
 	}
 }

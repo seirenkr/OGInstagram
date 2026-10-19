@@ -62,10 +62,12 @@ const rulingAsbdID = "359341"
 // mediaMissing asks Instagram's content-ruling endpoint (~200 B) whether a post
 // exists for logged-out viewers. Only a definite "Media cannot be found" counts
 // as missing; answered is false when errors or timeouts left the question open.
-func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answered bool) {
+// ungated means an explicit "ok" without a gating mark: no gate, or an
+// account-level age limit, whose crawler page carries no Open Graph tags.
+func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answered, ungated bool) {
 	pk := shortcodePK(shortcode)
 	if pk == nil {
-		return false, false
+		return false, false, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, rulingTimeout)
 	defer cancel()
@@ -87,7 +89,11 @@ func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answ
 			return statusOnly(status, raw)
 		},
 	})
-	return ferr == nil && gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found", ferr == nil
+	if ferr != nil {
+		return false, false, false
+	}
+	return gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found", true,
+		gjson.Get(out, "status").String() == "ok" && gjson.Get(out, "gating_type_thrift").Int() == 0
 }
 
 func embedContextJSON(page string) (string, *AppError) {

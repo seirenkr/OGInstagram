@@ -160,6 +160,7 @@ func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
 		{http.StatusUnauthorized, `{"status":"fail"}`, false},
 		{http.StatusNotFound, `{"status":"fail","message":"Media cannot be found"}`, true},
 		{http.StatusOK, `{"status":"ok"}`, false},
+		{http.StatusOK, `{"title":"This content isn't available to everyone","gating_type_thrift":3,"status":"ok"}`, false},
 	} {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -167,8 +168,9 @@ func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
 			})}
 			s := &Session{client: client}
 			a := &App{pool: &SessionPool{sessions: []*Session{s}}}
-			if got, answered := a.mediaMissing(context.Background(), "ABC123"); got != tc.missing || answered != (tc.status != http.StatusUnauthorized) {
-				t.Fatalf("mediaMissing = %t, %t; want %t", got, answered, tc.missing)
+			got, answered, ungated := a.mediaMissing(context.Background(), "ABC123")
+			if got != tc.missing || answered != (tc.status != http.StatusUnauthorized) || ungated != (tc.body == `{"status":"ok"}`) {
+				t.Fatalf("mediaMissing = %t, %t, %t; want %t", got, answered, ungated, tc.missing)
 			}
 			if s.client != client || !s.cooldownUntil.IsZero() || s.pending != 0 || s.rttAt.IsZero() != (tc.status == http.StatusUnauthorized) {
 				t.Fatalf("session: rotated=%t cooldown=%s pending=%d rttAt=%s", s.client != client, s.cooldownUntil, s.pending, s.rttAt)

@@ -158,12 +158,12 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 			// GraphQL errors the same way for gated, hidden and missing posts; the
 			// ruling endpoint can tell "missing" apart in ~0.2s.
 			if perr != nil && perr.Code == errorCodeGraphQL {
-				missing, answered := a.mediaMissing(ctx, shortcode)
+				missing, answered, ungated := a.mediaMissing(ctx, shortcode)
 				rulingAnswered.Store(answered)
 				if missing {
 					perr = igErr(404, errorCodeMediaNotFound, "This post isn't available.")
 					perr.Final = true
-				} else if ctx.Err() == nil && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode {
+				} else if ctx.Err() == nil && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode && !ungated {
 					startOG()
 				}
 			}
