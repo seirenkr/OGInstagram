@@ -495,11 +495,13 @@ func TestGatewayEdgeCachesOnlyURLKeyedSuccesses(t *testing.T) {
 	g.app.posts.storeLocal("ABC123", &cacheEntry[Post]{value: Post{Shortcode: "ABC123", Username: "alice", Attachments: []Attachment{{Kind: "image", URL: cdn + "1.jpg" + oe}}}, expiresAt: exp})
 	g.app.posts.storeLocal("GONE12", &cacheEntry[Post]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: exp})
 	g.app.posts.storeLocal("SLOW12", &cacheEntry[Post]{err: ephemeralErr(504, errorCodeConnection, "timeout"), expiresAt: exp})
+	g.app.posts.storeLocal("PART12", &cacheEntry[Post]{value: Post{Shortcode: "PART12", Username: "alice", Partial: true, Attachments: []Attachment{{Kind: "image", URL: cdn + "1.jpg" + oe}}}, expiresAt: exp})
 	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", Media: Attachment{Kind: "image", URL: cdn + "s.jpg" + oe}}, expiresAt: exp})
 	for _, name := range []string{"alice", "al.js"} {
 		g.app.profiles.storeLocal(name, &cacheEntry[Profile]{value: Profile{Username: name}, expiresAt: exp})
 	}
 	signed, _ := url.Parse(g.app.offloadSigner.url("https://oginstagram.com", "/offload/ABC123/1", false))
+	partial, _ := url.Parse(g.app.offloadSigner.url("https://oginstagram.com", "/offload/PART12/1", false))
 	for _, tt := range []struct {
 		method, host, target string
 		navigate             bool
@@ -520,6 +522,10 @@ func TestGatewayEdgeCachesOnlyURLKeyedSuccesses(t *testing.T) {
 		{"HEAD", "oginstagram.com", "/p/ABC123/", false, 200, 0, false},
 		{"GET", "oginstagram.com", "/p/GONE12/", false, 200, 0, false},
 		{"GET", "oginstagram.com", "/p/SLOW12/", false, 200, 0, false},
+		// A full post replaces a partial one; its card and cover links stay off the edge.
+		{"GET", "oginstagram.com", "/p/PART12/", false, 200, 0, false},
+		{"GET", "d.oginstagram.com", "/p/PART12", false, 302, 0, false},
+		{"GET", "oginstagram.com", partial.RequestURI(), false, 302, 0, false},
 		{"GET", "oginstagram.com", "/p/ABC123/", true, 307, 0, false},
 		{"GET", "oginstagram.com", "/alice", false, 200, 0, false},
 		{"GET", "oginstagram.com", "/al.js", false, 200, 0, false},

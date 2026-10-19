@@ -40,6 +40,8 @@ type fetchSpec struct {
 	// An advisory request's failures say nothing about the exit IP: they never
 	// rotate its session, and only its successes feed the RTT.
 	advisory bool
+	// cut keeps the first maxResponseBytes of a longer body instead of refusing it.
+	cut bool
 }
 
 func statusOnly(status int, _ []byte) *AppError {
@@ -138,7 +140,10 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 		return status, "", requestError(readErr, spec.subject+" response read failed")
 	}
 	if len(raw) > maxResponseBytes {
-		return status, "", igErr(502, errorCodeUpstream, spec.subject+" response too large")
+		if !spec.cut {
+			return status, "", igErr(502, errorCodeUpstream, spec.subject+" response too large")
+		}
+		raw = raw[:maxResponseBytes]
 	}
 	if err := spec.interpret(status, raw); err != nil {
 		return status, "", err

@@ -69,7 +69,8 @@ func cardResp(document, id, actor string) resp {
 	return r
 }
 
-var discordCountRE = regexp.MustCompile(`[0-9][0-9,]*`)
+// Partial posts carry Instagram's rounded counts ("14K", "1.2M").
+var discordCountRE = regexp.MustCompile(`[0-9][0-9,.]*[KMB]?`)
 
 func discordMediaURL(raw string) bool {
 	u, err := url.Parse(raw)

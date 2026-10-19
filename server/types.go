@@ -23,6 +23,9 @@ type Post struct {
 	StatsLine   string
 	Attachments []Attachment
 	CreatedAt   time.Time
+	// Partial: built from the Open Graph tags Instagram serves crawlers (one
+	// cover image). A full source replaces it, so it is never persisted.
+	Partial bool `json:",omitempty"`
 }
 
 type Story struct {

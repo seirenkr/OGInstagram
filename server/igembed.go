@@ -11,16 +11,22 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
 )
 
-func (a *App) directGet(ctx context.Context, operation, rawURL string) (out string, ferr *AppError) {
+func (a *App) directGet(ctx context.Context, operation, rawURL string) (string, *AppError) {
+	return a.directFetch(ctx, fetchSpec{operation: operation, url: rawURL})
+}
+
+// directFetch GETs spec.url from this host with the crawler UA.
+func (a *App) directFetch(ctx context.Context, spec fetchSpec) (out string, ferr *AppError) {
 	started := time.Now()
 	status := 0
 	defer func() {
-		logOutbound(ctx, operation, "direct", http.MethodGet, rawURL, started, status, len(out), ferr, false)
+		logOutbound(ctx, spec.operation, "direct", http.MethodGet, spec.url, started, status, len(out), ferr, false)
 	}()
 	client := *http.DefaultClient
 	loginRedirect := errors.New("Instagram redirected to login or verification")
@@ -41,14 +47,9 @@ func (a *App) directGet(ctx context.Context, operation, rawURL string) (out stri
 		}
 		return nil
 	}
-	status, out, ferr = fetchRequest(ctx, &client, fetchSpec{
-		operation: operation,
-		method:    http.MethodGet,
-		url:       rawURL,
-		subject:   "Instagram",
-		headers:   map[string]string{"User-Agent": embedUA},
-		interpret: statusOnly,
-	})
+	spec.method, spec.subject, spec.interpret = http.MethodGet, "Instagram", statusOnly
+	spec.headers = map[string]string{"User-Agent": embedUA}
+	status, out, ferr = fetchRequest(ctx, &client, spec)
 	if ferr != nil && errors.Is(ferr.Cause, loginRedirect) {
 		status = loginStatus
 		ferr = igErr(http.StatusBadGateway, errorCodeLoginRequired, loginRedirect.Error())
@@ -106,34 +107,162 @@ func embedContextJSON(page string) (string, *AppError) {
 // failure by this pointer.
 var errEmbedPaused = ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "embed temporarily paused after Instagram blocked requests")
 
-func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
-	// While Instagram blocks the embed, skip it and let one probe through per
-	// embedProbeInterval (the CAS winner); everyone else falls through at once.
+// enterPause lets a request through a direct path that *paused may hold shut:
+// once the pause lapses, one probe per interval (the CAS winner) goes and
+// everyone else falls through at once. probe is non-zero for that probe.
+func enterPause(paused *atomic.Int64, interval time.Duration) (probe int64, ok bool) {
 	now := time.Now().UnixNano()
-	until := a.embedPausedUntil.Load()
-	if until != 0 {
-		if now < until || !a.embedPausedUntil.CompareAndSwap(until, now+int64(embedProbeInterval)) {
-			return Post{}, errEmbedPaused
-		}
-		until = now + int64(embedProbeInterval)
+	until := paused.Load()
+	if until == 0 {
+		return 0, true
+	}
+	if now < until || !paused.CompareAndSwap(until, now+int64(interval)) {
+		return 0, false
+	}
+	return now + int64(interval), true
+}
+
+// pauseOn shuts the path after a 429 or login redirect and reports whether
+// this started the pause.
+func pauseOn(paused *atomic.Int64, interval time.Duration, err *AppError) bool {
+	return (err.Status == http.StatusTooManyRequests || err.Code == errorCodeLoginRequired) &&
+		paused.Swap(time.Now().Add(interval).UnixNano()) == 0
+}
+
+// resumeAfter reopens the path after a good probe. A response started before
+// a newer block must not reopen it, hence the CAS on the probe's own deadline.
+func resumeAfter(paused *atomic.Int64, probe int64) bool {
+	return probe != 0 && paused.CompareAndSwap(probe, 0)
+}
+
+func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
+	probe, ok := enterPause(&a.embedPausedUntil, embedProbeInterval)
+	if !ok {
+		return Post{}, errEmbedPaused
 	}
 	html, err := a.directGet(ctx, "post_embed", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
 	if err != nil {
-		if err.Status == http.StatusTooManyRequests || err.Code == errorCodeLoginRequired {
-			if a.embedPausedUntil.Swap(time.Now().Add(embedProbeInterval).UnixNano()) == 0 {
-				logger(ctx).WarnContext(ctx, "post embed paused", "error_type", err.errorType(), "app_status", err.Status)
-			}
+		if pauseOn(&a.embedPausedUntil, embedProbeInterval, err) {
+			logger(ctx).WarnContext(ctx, "post embed paused", "error_type", err.errorType(), "app_status", err.Status)
 		}
 		return Post{}, err
 	}
 	post, perr := parseEmbedPost(html)
 	if perr != nil {
 		logEmbedParseFailure(ctx, "post", html, perr)
-	} else if until != 0 && a.embedPausedUntil.CompareAndSwap(until, 0) {
-		// A response started before a newer block must not reopen the embed path.
+	} else if resumeAfter(&a.embedPausedUntil, probe) {
 		logger(ctx).InfoContext(ctx, "post embed resumed")
 	}
 	return post, perr
+}
+
+// fetchPostOG reads the Open Graph tags Instagram serves crawlers on the post
+// page. Unlike every logged-out API they survive post-level gates.
+func (a *App) fetchPostOG(ctx context.Context, shortcode string) (Post, *AppError) {
+	probe, ok := enterPause(&a.ogPausedUntil, ogPageProbeInterval)
+	if !ok {
+		return Post{}, ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "og page paused after Instagram blocked requests")
+	}
+	ctx, cancel := context.WithTimeout(ctx, ogPageTimeout)
+	defer cancel()
+	// The tags sit in the head; a page past the body cap is cut, not refused.
+	page, err := a.directFetch(ctx, fetchSpec{operation: "og_page", url: instagramOrigin + "/p/" + url.PathEscape(shortcode) + "/", cut: true})
+	if err != nil {
+		if pauseOn(&a.ogPausedUntil, ogPageProbeInterval, err) {
+			logger(ctx).WarnContext(ctx, "og page paused", "error_type", err.errorType(), "app_status", err.Status)
+		}
+		return Post{}, err
+	}
+	// Any page counts as unblocked: account-gated posts never carry the tags.
+	if resumeAfter(&a.ogPausedUntil, probe) {
+		logger(ctx).InfoContext(ctx, "og page resumed")
+	}
+	post, perr := parseOGPost(shortcode, page)
+	if perr != nil {
+		logger(ctx).InfoContext(ctx, "og page had no card", "error", perr.logMessage(), "bytes", len(page))
+	}
+	return post, perr
+}
+
+var (
+	ogMetaRE   = regexp.MustCompile(`<meta((?:\s+[\w:-]+="[^"]*")+)\s*/?>`)
+	ogAttrRE   = regexp.MustCompile(`([\w:-]+)="([^"]*)"`)
+	ogCountsRE = regexp.MustCompile(`^(?:([0-9][0-9.,]{0,12}[KMB]?) likes?(?:, | - ))?(?:([0-9][0-9.,]{0,12}[KMB]?) comments? - )?`)
+)
+
+// parseOGPost builds a partial post from the crawler tags: og:url names the
+// author, og:description holds Instagram's rounded counts ("14K" stays text)
+// and the caption, og:image a cover of unknown size (s640x640 only bounds it).
+// Every value is untrusted page text; the titles open with the free-text
+// display name, so the handle comes from og:url alone.
+func parseOGPost(shortcode, page string) (Post, *AppError) {
+	tags := map[string]string{}
+	for _, m := range ogMetaRE.FindAllStringSubmatch(page, -1) {
+		attrs := map[string]string{}
+		for _, attr := range ogAttrRE.FindAllStringSubmatch(m[1], -1) {
+			attrs[attr[1]] = attr[2]
+		}
+		key := cmp.Or(attrs["property"], attrs["name"])
+		if content, ok := attrs["content"]; ok && key != "" && tags[key] == "" {
+			tags[key] = html.UnescapeString(content)
+		}
+	}
+	noCard := func(why string) (Post, *AppError) {
+		return Post{}, igErr(http.StatusBadGateway, errorCodeUpstream, "og page "+why)
+	}
+	cover := tags["og:image"]
+	image, err := url.Parse(cover)
+	if err != nil || !trustedMediaURL(image) {
+		return noCard("had no trusted og:image")
+	}
+	postURL, err := url.Parse(tags["og:url"])
+	var path []string
+	if err == nil && postURL.Scheme == "https" && postURL.Host == "www.instagram.com" {
+		path = splitPath(postURL.Path)
+	}
+	if len(path) != 3 || path[2] != shortcode {
+		return noCard("og:url did not name this post")
+	}
+	username := path[0]
+	if !validUsername(username) {
+		return noCard("named no author")
+	}
+	fullName := ""
+	if i := strings.LastIndex(tags["twitter:title"], " (@"+username+")"); i >= 0 {
+		fullName = tags["twitter:title"][:i]
+	}
+	// Either copy of the caption may be the cut one.
+	caption := ogQuoted(tags["og:description"], `: "`)
+	if title := ogQuoted(tags["og:title"], ` on Instagram: "`); len(title) > len(caption) {
+		caption = title
+	}
+	var stats []string
+	counts := ogCountsRE.FindStringSubmatch(tags["og:description"])
+	if counts[1] != "" {
+		stats = append(stats, "❤️ "+counts[1])
+	}
+	if counts[2] != "" {
+		stats = append(stats, "\U0001f4ac "+counts[2])
+	}
+	return Post{
+		Shortcode:   shortcode,
+		Username:    username,
+		FullName:    strings.TrimSpace(fullName),
+		Caption:     normalizeCaption(caption),
+		StatsLine:   strings.Join(stats, "  "),
+		Attachments: []Attachment{{Kind: "image", URL: cover, Thumbnail: cover}},
+		CreatedAt:   shortcodeTime(shortcode),
+		Partial:     true,
+	}, nil
+}
+
+// ogQuoted is the text between the first marker and the last double quote.
+func ogQuoted(s, marker string) string {
+	_, rest, ok := strings.Cut(s, marker)
+	if i := strings.LastIndexByte(rest, '"'); ok && i >= 0 {
+		return rest[:i]
+	}
+	return ""
 }
 
 func logEmbedParseFailure(ctx context.Context, operation, html string, err *AppError) {

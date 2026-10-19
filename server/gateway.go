@@ -236,8 +236,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	result := g.render(r, route)
-	// An error fallback (originStatus set) points at Instagram or at an avatar
-	// not yet copied, and keeps only the short edge TTL its handler set, if any.
+	// An error fallback (originStatus set) points at Instagram, at an avatar
+	// not yet copied or at a partial post's cover, and keeps only the short
+	// edge TTL its handler set, if any.
 	if route.offload && (result.status == http.StatusFound || result.status == http.StatusOK) && result.originStatus == 0 {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, cmp.Or(result.headers["Location"], result.mediaURL), time.Now()))
 	}
@@ -250,7 +251,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// A card never depends on the User-Agent, so one copy serves every bot. The
 	// edge keys on the URL alone, so the AS2 object a card URL also serves must
-	// never be stored. Error cards are 200s too, hence originStatus.
+	// never be stored. Error and partial cards are 200s too, hence originStatus.
 	if route.card && r.Method == http.MethodGet && result.status == http.StatusOK && result.originStatus == 0 &&
 		strings.HasPrefix(result.headers["Content-Type"], "text/html") {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(cardEdgeTTL)

@@ -39,6 +39,12 @@ const (
 	externalHelperHedgeDelay = 2 * time.Second
 	// After a direct embed 429 or login redirect, skip embed until one probe is due.
 	embedProbeInterval = 3 * time.Hour
+	// The crawler post page is fetched direct and only for gated posts, so it
+	// pauses briefly. A partial post stands in this long for requests and media
+	// that cannot wait for its flight.
+	ogPageTimeout       = 2500 * time.Millisecond
+	ogPageProbeInterval = 10 * time.Minute
+	partialPostTTL      = 10 * time.Minute
 	// The content-ruling check is a small JSON GET through the DC proxy; past
 	// this it is no signal. It stays under the 3 s after which a 504 marks the
 	// exit IP hung.
@@ -59,6 +65,7 @@ const (
 	localPostCacheBytes    = 64 << 20
 	localProfileCacheBytes = 4 << 20
 	localStoryCacheBytes   = 4 << 20
+	localOGPostCacheBytes  = 4 << 20
 
 	maxResponseBytes = 1 << 20
 	maxAvatarBytes   = 512 << 10 // profile pictures are 5-30 KiB

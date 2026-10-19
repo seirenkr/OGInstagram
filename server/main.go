@@ -302,7 +302,17 @@ func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaInd
 	if activity {
 		return tagFetch(activityResp(a.postNote(baseURL, post, postType, mediaIndex, specified, gallery), id, actor), meta)
 	}
-	return tagFetch(cardResp(a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, discordSupport(req)), id, actor), meta)
+	return tagFetch(partialResp(cardResp(a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, discordSupport(req)), id, actor), post), meta)
+}
+
+// A full post replaces a partial one, so like an error fallback its responses
+// carry an originStatus that keeps them out of the edge cache; 203 still
+// counts as resolved.
+func partialResp(r resp, post Post) resp {
+	if post.Partial && r.originStatus == 0 {
+		r.originStatus = http.StatusNonAuthoritativeInfo
+	}
+	return r
 }
 
 func (a *App) errorCardResp(baseURL, origin, title, desc, headerCode string, err *AppError, meta *fetchMeta) resp {
@@ -328,9 +338,19 @@ func invalidOffloadResp() resp {
 // route has already validated and bounded them.
 func (a *App) handleOffload(req *http.Request, shortcode string, index int, avatar bool) resp {
 	meta := &fetchMeta{}
-	post, err := a.getPost(req.Context(), shortcode, meta)
-	if err != nil {
-		return tagFetch(offloadErrorResp(err, instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/"), meta)
+	fallback := instagramOrigin + "/p/" + url.PathEscape(shortcode) + "/"
+	var post Post
+	var err *AppError
+	// A partial card's media need not wait out the flight that found it.
+	og, partial := a.ogPosts.localGet(shortcode)
+	if _, cached := a.posts.localGet(shortcode); partial && !cached {
+		post = og.value
+	} else if post, err = a.getPost(req.Context(), shortcode, meta); err != nil {
+		return tagFetch(offloadErrorResp(err, fallback), meta)
+	}
+	// The cover is item 1 only.
+	if post.Partial && !avatar && index > 0 {
+		return tagFetch(partialResp(redirectResp(fallback, http.StatusFound), post), meta)
 	}
 	target := post.ProfilePic
 	if !avatar {
@@ -340,7 +360,7 @@ func (a *App) handleOffload(req *http.Request, shortcode string, index int, avat
 			target = media.Thumbnail
 		}
 	}
-	return tagFetch(a.offloadResp(req, target, avatar), meta)
+	return tagFetch(partialResp(a.offloadResp(req, target, avatar), post), meta)
 }
 
 // n selects the nth recent media item; 0 selects the profile picture.

@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -171,5 +174,117 @@ func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
 				t.Fatalf("session: rotated=%t cooldown=%s pending=%d rttAt=%s", s.client != client, s.cooldownUntil, s.pending, s.rttAt)
 			}
 		})
+	}
+}
+
+const ogTestCover = "https://scontent-iad3-1.cdninstagram.com/v/t51.82787-15/1_n.jpg?stp=c418.0.1254.1254a_dst-jpg_e35_s640x640_tt6&_nc_cat=1&oh=00_A&oe=7A000000"
+
+// ogTestPage is a crawler post page as Instagram escapes it; the body JSON
+// shows the gate that hides the media.
+func ogTestPage(shortcode string, tags ...string) string {
+	if tags == nil {
+		tags = []string{
+			`<meta property="og:title" content="Meta Glasses on Instagram: &quot;Nova. Sage.&quot;" />`,
+			`<meta name="twitter:title" content="Meta Glasses (&#064;metaglasses) &#x2022; Instagram photos and videos" />`,
+			`<meta property="og:description" content="14K likes, 155 comments - metaglasses on October 15, 2026: &quot;Nova. Sage.&quot;. " />`,
+			`<meta property="og:image" content="` + html.EscapeString(ogTestCover) + `" />`,
+			`<meta property="og:url" content="https://www.instagram.com/metaglasses/p/` + shortcode + `/" />`,
+		}
+	}
+	return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" /><meta property="og:type" content="article" />` +
+		strings.Join(tags, "") + `</head><body><script type="application/json">{"gating_type":3,"if_not_gated_logged_out":null}</script></body></html>`
+}
+
+// An account minimum-age gate leaves only an error page.
+const ogAccountGatedPage = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>Instagram</title></head><body><script>{"failure_reason":"MA"}</script></body></html>`
+
+func TestParseOGPost(t *testing.T) {
+	const code = "Dehfw_5mOy8"
+	post, err := parseOGPost(code, ogTestPage(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Post{Shortcode: code, Username: "metaglasses", FullName: "Meta Glasses", Caption: "Nova. Sage.", StatsLine: "❤️ 14K  💬 155",
+		Attachments: []Attachment{{Kind: "image", URL: ogTestCover, Thumbnail: ogTestCover}},
+		CreatedAt:   shortcodeTime(code), Partial: true}
+	if !reflect.DeepEqual(post, want) {
+		t.Fatalf("parsed %+v", post)
+	}
+	if _, ok := cloneAndValidateCacheValue(code, post); !ok || post.CreatedAt.IsZero() {
+		t.Fatal("partial post must be a valid cached post with a date")
+	}
+	a := &App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
+	card := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, false)
+	for _, part := range []string{`content="Meta Glasses (@metaglasses)"`, `❤️ **14K**  💬 **155**`, `/default-avatar.jpg`} {
+		if !strings.Contains(card, part) {
+			t.Errorf("card lacks %s: %s", part, card)
+		}
+	}
+	// s640x640 bounds the cover; reels and portrait posts come back 360x640 or 512x640.
+	if strings.Contains(card, "og:image:width") {
+		t.Errorf("card claims a cover size: %s", card)
+	}
+
+	if _, err := parseOGPost(code, ogAccountGatedPage); err == nil {
+		t.Fatal("page without og tags made a card")
+	}
+}
+
+func TestParseOGPostRejectsUntrustedTags(t *testing.T) {
+	const code = "ABC123"
+	tag := func(key, content string) string {
+		return `<meta property="` + key + `" content="` + html.EscapeString(content) + `" />`
+	}
+	image, postURL := tag("og:image", ogTestCover), tag("og:url", "https://www.instagram.com/alice/p/ABC123/")
+	for _, tc := range []struct {
+		name string
+		tags []string
+		want string // username, or "" for no card
+	}{
+		{"no image", []string{postURL}, ""},
+		{"foreign image", []string{tag("og:image", "https://evil.example/x.jpg"), postURL}, ""},
+		{"plain HTTP image", []string{tag("og:image", "http://scontent.cdninstagram.com/x.jpg"), postURL}, ""},
+		{"lookalike image host", []string{tag("og:image", "https://scontent.cdninstagram.com.evil.example/x.jpg"), postURL}, ""},
+		{"script image", []string{tag("og:image", "javascript:alert(1)"), postURL}, ""},
+		{"no url", []string{image}, ""},
+		{"other post", []string{image, tag("og:url", "https://www.instagram.com/alice/p/OTHER1/")}, ""},
+		{"foreign url", []string{image, tag("og:url", "https://evil.example/alice/p/ABC123/")}, ""},
+		{"bad username", []string{image, tag("og:url", "https://www.instagram.com/a%20b/p/ABC123/")}, ""},
+		{"no username", []string{image, tag("og:url", "https://www.instagram.com/p/ABC123/")}, ""},
+		{"handle only in title", []string{image, tag("og:url", "https://www.instagram.com/p/ABC123/"), tag("twitter:title", "Bob (@bob) • Instagram")}, ""},
+		{"first tag wins", []string{image, postURL, tag("og:image", "https://scontent.cdninstagram.com/later.jpg"), tag("og:url", "https://www.instagram.com/eve/p/ABC123/")}, "alice"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			post, err := parseOGPost(code, ogTestPage(code, tc.tags...))
+			if (err == nil) != (tc.want != "") || post.Username != tc.want || err == nil && post.Attachments[0].URL != ogTestCover {
+				t.Fatalf("parseOGPost = %+v, %v; want author %q", post, err, tc.want)
+			}
+		})
+	}
+
+	// Markup in a caption stays text, including a raw ">" inside the attribute.
+	post, err := parseOGPost(code, ogTestPage(code, image, postURL,
+		`<meta property="og:title" content="Eve on Instagram: &quot;&lt;script&gt;alert(1)&lt;/script&gt; a > b&quot;" />`,
+		`<meta property="og:description" content="1,234 likes, 1 comment - alice on May 30, 2025: &quot;short&quot;. " />`,
+		tag("twitter:title", "Someone else (@eve) • Instagram")))
+	if err != nil || post.Caption != "<script>alert(1)</script> a > b" || post.StatsLine != "❤️ 1,234  💬 1" || post.FullName != "" {
+		t.Fatalf("parseOGPost = %+v, %v", post, err)
+	}
+	a := &App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
+	if card := a.buildEmbedHTML("https://oginstagram.com", post, "p", 0, false, false, false); strings.Contains(card, "<script>alert") {
+		t.Fatalf("caption markup reached the card: %s", card)
+	}
+
+	// The display name is free text and may name another handle.
+	post, err = parseOGPost(code, ogTestPage(code, image, tag("og:url", "https://www.instagram.com/bob/p/ABC123/"),
+		tag("twitter:title", "Bob (@alice) (@bob) • Instagram")))
+	if err != nil || post.Username != "bob" || post.FullName != "Bob (@alice)" {
+		t.Fatalf("parseOGPost = %+v, %v", post, err)
+	}
+
+	// No counts, no caption.
+	post, err = parseOGPost(code, ogTestPage(code, image, postURL, tag("og:description", "alice on May 30, 2025")))
+	if err != nil || post.StatsLine != "" || post.Caption != "" {
+		t.Fatalf("parseOGPost = %+v, %v", post, err)
 	}
 }

@@ -9,8 +9,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// GraphQL error code Instagram uses for per-client throttling.
-const graphQLRateLimitedCode = 1675004
+// GraphQL error codes Instagram uses for per-client throttling and for a post
+// it will not show.
+const (
+	graphQLRateLimitedCode    = 1675004
+	graphQLFieldExceptionCode = 1675030
+)
 
 func parseInstagramPost(body string) (Post, *AppError) {
 	root := gjson.Parse(body)

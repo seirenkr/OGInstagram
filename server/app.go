@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 type App struct {
@@ -18,11 +20,15 @@ type App struct {
 	posts    *cache[Post]
 	profiles *cache[Profile]
 	stories  *cache[Story]
+	// Partial posts a flight found while its full sources still run, for
+	// requests whose deadline passes first.
+	ogPosts *cache[Post]
 
 	fetchSlots chan struct{}
 
 	// Unix nanos until which direct embed requests are skipped (0 = healthy).
 	embedPausedUntil atomic.Int64
+	ogPausedUntil    atomic.Int64
 }
 
 func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
@@ -35,6 +41,7 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 		posts:         newPersistentCache[Post](cfg.Store, "post", fetchSlots, localPostCacheBytes),
 		profiles:      newPersistentCache[Profile](cfg.Store, "profile", fetchSlots, localProfileCacheBytes),
 		stories:       newPersistentCache[Story](cfg.Store, "story", fetchSlots, localStoryCacheBytes),
+		ogPosts:       newPersistentCache[Post](nil, "og_post", fetchSlots, localOGPostCacheBytes),
 	}
 	if newExternalHelperClient != nil {
 		a.helper = newExternalHelperClient(pool)
@@ -49,10 +56,17 @@ func (a *App) getPost(ctx context.Context, shortcode string, meta *fetchMeta) (P
 	if pk := shortcodePK(shortcode); !validShortcode(shortcode) || pk == nil || !pk.IsInt64() {
 		return Post{}, igErr(404, errorCodeNotFound, "invalid shortcode")
 	}
-	return a.posts.get(ctx, shortcode, meta, func(fetchCtx context.Context) (Post, time.Duration, bool, *AppError) {
-		post, persist, err := a.fetchPost(fetchCtx, shortcode)
-		return post, postCacheTTL(post), persist, err
+	post, err := a.posts.get(ctx, shortcode, meta, func(fetchCtx context.Context) (Post, time.Duration, bool, *AppError) {
+		return a.fetchPost(fetchCtx, shortcode)
 	})
+	// The flight outlives this request; a partial card beats "temporarily unavailable".
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		if e, ok := a.ogPosts.localGet(shortcode); ok {
+			logger(ctx).InfoContext(ctx, "partial post served at deadline")
+			return e.value, nil
+		}
+	}
+	return post, err
 }
 
 func postCacheTTL(post Post) time.Duration {
@@ -63,7 +77,12 @@ func postCacheTTL(post Post) time.Duration {
 	return cacheTTLFromURLs(urls...)
 }
 
-func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persist bool, err *AppError) {
+// helperAsked: the external helper reached Instagram and found no post.
+func helperAsked(err *AppError) bool {
+	return err != nil && !err.Ephemeral && err.Code != errorCodeConnection && err.Code != errorCodeRateLimited
+}
+
+func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl time.Duration, persist bool, err *AppError) {
 	valid := validSourceModel[Post](shortcode)
 	// A final ruling can answer before the helper finishes. Keep one bounded
 	// attempt available to fill the cache instead of cancelling and restarting it.
@@ -100,6 +119,32 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 		})
 	}
 
+	// Crawler Open Graph tags survive some gates; started at most once, they
+	// stand in when no full source answers.
+	ogCtx, cancelOG := context.WithCancel(ctx)
+	defer cancelOG()
+	var ogStarted atomic.Bool
+	ogDone := make(chan struct{})
+	var ogPost Post
+	var ogErr *AppError
+	startOG := func() {
+		if !ogStarted.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer close(ogDone)
+			defer func() {
+				if r := recover(); r != nil {
+					logger(ogCtx).ErrorContext(ogCtx, "og page fetch panicked", "panic", r, "stack", string(debug.Stack()))
+					ogErr = ephemeralErr(http.StatusBadGateway, errorCodeUpstream, "og page fetch panicked")
+				}
+			}()
+			if ogPost, ogErr = valid(a.fetchPostOG(ogCtx, shortcode)); ogErr == nil {
+				a.ogPosts.put(ogCtx, shortcode, ogPost, min(postCacheTTL(ogPost), partialPostTTL), false)
+			}
+		}()
+	}
+
 	sources := []stagedSource[Post]{
 		{name: "post_embed", persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
 			return valid(a.fetchPostEmbed(ctx, shortcode))
@@ -118,6 +163,8 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 				if missing {
 					perr = igErr(404, errorCodeMediaNotFound, "This post isn't available.")
 					perr.Final = true
+				} else if ctx.Err() == nil && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode {
+					startOG()
 				}
 			}
 			return valid(post, perr)
@@ -162,7 +209,32 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			default:
 			}
 		}
-		return Post{}, false, err
+		return Post{}, 0, false, err
+	}
+	if err != nil && ogStarted.Load() {
+		<-ogDone
+		if ogErr == nil {
+			// Cached like the gate verdict below: briefly while the helper could
+			// not ask, long once it found nothing, and not at all while it still
+			// runs, so the next request asks it again.
+			helper := "none"
+			ttl = min(postCacheTTL(ogPost), permanentErrorCacheSeconds*time.Second)
+			select {
+			case <-helperDone:
+				if helper = "ok"; helperErr != nil {
+					helper = helperErr.errorType()
+				}
+				if !helperAsked(helperErr) {
+					ttl = min(ttl, transientErrorCacheSeconds*time.Second)
+				}
+			default:
+				if externalHelperPostImpl != nil {
+					ttl, helper = 0, "running"
+				}
+			}
+			logger(ctx).InfoContext(ctx, "partial post found", "helper", helper, "ttl_s", int(ttl.Seconds()))
+			return ogPost, ttl, false, nil
+		}
 	}
 	if err != nil {
 		outcome := a.fetchOembed(ctx, shortcode)
@@ -171,24 +243,23 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 			// oEmbed also 404s posts it hides from logged-out viewers. Its 404 means
 			// "gone" only when the ruling could not tell and the external helper had
 			// no post either.
-			helperAsked := false
+			asked := false
 			select {
 			case <-helperDone:
 				if outcome.status == http.StatusNotFound && isTransient(enrichedErr.Code) && !rulingAnswered.Load() &&
 					helperErr != nil && helperErr.Status == http.StatusNotFound && helperErr.Code == errorCodeUpstream {
-					return Post{}, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
+					return Post{}, 0, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
 				}
-				helperAsked = helperErr != nil && !helperErr.Ephemeral &&
-					helperErr.Code != errorCodeConnection && helperErr.Code != errorCodeRateLimited
+				asked = helperAsked(helperErr)
 			default:
 			}
 			// The external helper can still fetch gated posts. If it never got to ask,
 			// show the gate but cache it briefly so the next request can try again.
-			if externalHelperPostImpl != nil && !helperAsked &&
+			if externalHelperPostImpl != nil && !asked &&
 				(enrichedErr.Code == errorCodeRestricted || enrichedErr.Code == errorCodeGeoBlocked) {
 				enrichedErr.Code = errorCodeUpstream
 			}
-			return Post{}, false, enrichedErr
+			return Post{}, 0, false, enrichedErr
 		}
 		// After a total failure the proxied oEmbed answer is worth keeping.
 		post, persist, err = enriched, true, nil
@@ -196,7 +267,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, persi
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	return post, persist, nil
+	return post, postCacheTTL(post), persist, nil
 }
 
 func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) {
