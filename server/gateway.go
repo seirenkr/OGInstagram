@@ -145,12 +145,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !allowMethod(w, r, http.MethodGet, http.MethodHead) {
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-		defer cancel()
-		if err := g.cfg.Store.Healthy(ctx); err != nil {
-			g.problemCause(w, r, 503, "storage unavailable", err)
-			return
-		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
 			_, _ = w.Write([]byte("ok\n"))

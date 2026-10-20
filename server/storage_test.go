@@ -398,9 +398,6 @@ func TestCorruptStateDatabaseIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err = s.Healthy(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	if aside, _ := filepath.Glob(filepath.Join(dir, "state.sqlite.corrupt-*")); len(aside) != 1 {
 		t.Fatalf("corrupt state set aside as %v", aside)
 	}

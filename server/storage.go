@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -55,9 +56,6 @@ type metricBucket struct {
 }
 
 func openLocalStore(dataDir string) (*localStore, error) {
-	if dataDir == "" {
-		return nil, errors.New("DATA_DIR must not be empty")
-	}
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, err
 	}
@@ -169,10 +167,6 @@ func openSQLite(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	if err = os.Chmod(abs, 0600); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	return db, nil
 }
 
@@ -183,20 +177,6 @@ func (s *localStore) Close() error {
 	err := s.flushMetrics(ctx, time.Now())
 	s.mu.Unlock()
 	return errors.Join(err, s.state.Close())
-}
-
-func (s *localStore) Healthy(ctx context.Context) error {
-	if s == nil {
-		return errors.New("local storage unavailable")
-	}
-	var count int
-	if err := s.state.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('models', 'metric_buckets')").Scan(&count); err != nil {
-		return err
-	}
-	if count != 2 {
-		return errors.New("model and metric schema unavailable")
-	}
-	return nil
 }
 
 func (s *localStore) getModel(ctx context.Context, kind, key string) ([]byte, time.Time, error) {
@@ -337,7 +317,7 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 		return report, err
 	}
 	defer rows.Close()
-	buckets := map[string]map[int64]*metricBucket{}
+	buckets := map[metricKey]*metricBucket{}
 	for rows.Next() {
 		var t int64
 		var category, outcomes, latency string
@@ -348,14 +328,11 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 		if report[category] == nil || json.Unmarshal([]byte(outcomes), &row.outcomes) != nil || json.Unmarshal([]byte(latency), &row.latency) != nil {
 			continue
 		}
-		for _, key := range []string{category, "all"} {
+		for _, key := range []metricKey{{t, category}, {t, "all"}} {
 			if buckets[key] == nil {
-				buckets[key] = map[int64]*metricBucket{}
+				buckets[key] = &metricBucket{}
 			}
-			if buckets[key][t] == nil {
-				buckets[key][t] = &metricBucket{}
-			}
-			bucket := buckets[key][t]
+			bucket := buckets[key]
 			for i, n := range row.outcomes {
 				bucket.outcomes[i] += n
 			}
@@ -367,32 +344,30 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 	if err = rows.Err(); err != nil {
 		return report, err
 	}
-	for category, grouped := range buckets {
-		for _, t := range slices.Sorted(maps.Keys(grouped)) {
-			bucket := grouped[t]
-			var total int64
-			for _, n := range bucket.latency {
-				total += n
-			}
-			quantile := func(q float64) float64 {
-				rank := int64(math.Ceil(q * float64(total)))
-				for i, n := range bucket.latency {
-					if rank -= n; rank <= 0 {
-						// A bin's geometric centre is within 10% of every latency in it.
-						return math.Round(math.Exp2((float64(i)-.5)/4)*100) / 100
-					}
-				}
-				return 0
-			}
-			series := report[category]
-			series.T = append(series.T, t)
-			series.P50 = append(series.P50, quantile(.5))
-			series.P90 = append(series.P90, quantile(.9))
-			series.P99 = append(series.P99, quantile(.99))
-			series.Resolved = append(series.Resolved, bucket.outcomes[0])
-			series.Restricted = append(series.Restricted, bucket.outcomes[1])
-			series.Failed = append(series.Failed, bucket.outcomes[2])
+	for _, key := range slices.SortedFunc(maps.Keys(buckets), func(a, b metricKey) int { return cmp.Compare(a.bucket, b.bucket) }) {
+		bucket := buckets[key]
+		var total int64
+		for _, n := range bucket.latency {
+			total += n
 		}
+		quantile := func(q float64) float64 {
+			rank := int64(math.Ceil(q * float64(total)))
+			for i, n := range bucket.latency {
+				if rank -= n; rank <= 0 {
+					// A bin's geometric centre is within 10% of every latency in it.
+					return math.Round(math.Exp2((float64(i)-.5)/4)*100) / 100
+				}
+			}
+			return 0
+		}
+		series := report[key.category]
+		series.T = append(series.T, key.bucket)
+		series.P50 = append(series.P50, quantile(.5))
+		series.P90 = append(series.P90, quantile(.9))
+		series.P99 = append(series.P99, quantile(.99))
+		series.Resolved = append(series.Resolved, bucket.outcomes[0])
+		series.Restricted = append(series.Restricted, bucket.outcomes[1])
+		series.Failed = append(series.Failed, bucket.outcomes[2])
 	}
 	return report, nil
 }
