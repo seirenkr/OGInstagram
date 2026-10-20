@@ -312,7 +312,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			switch {
 			case card.Shortcode != "":
 				partial = card
-				a.ogPosts.put(ctx, shortcode, card, min(postCacheTTL(card), partialPostTTL), false)
+				a.ogPosts.put(ctx, shortcode, card, min(postCacheTTL(card), partialPostTTL))
 				retryDC()
 			case cardErr.CardTitle != "":
 				gate = cardErr
@@ -334,7 +334,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			pending--
 			if og.Shortcode != "" {
 				partial = og
-				a.ogPosts.put(ctx, shortcode, og, min(postCacheTTL(og), partialPostTTL), false)
+				a.ogPosts.put(ctx, shortcode, og, min(postCacheTTL(og), partialPostTTL))
 			}
 		case post := <-dcC:
 			pending--
@@ -381,5 +381,5 @@ func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) 
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	a.posts.putAfterFlight(ctx, shortcode, post, postCacheTTL(post), true)
+	a.posts.putAfterFlight(ctx, shortcode, post, postCacheTTL(post))
 }
