@@ -15,8 +15,8 @@ importers:
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@twemoji/parser':
-        specifier: 15.0.0
-        version: 15.0.0
+        specifier: 17.0.2
+        version: 17.0.2
       '@twemoji/svg':
         specifier: 15.0.0
         version: 15.0.0
@@ -678,8 +678,8 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@twemoji/parser@15.0.0':
-    resolution: {integrity: sha512-lh9515BNsvKSNvyUqbj5yFu83iIDQ77SwVcsN/SnEGawczhsKU6qWuogewN1GweTi5Imo5ToQ9s+nNTf97IXvg==}
+  '@twemoji/parser@17.0.2':
+    resolution: {integrity: sha512-X/P7pHsGOxnrupQYUVetIeuxBGgffFu8CLwoPMMjH9CWmQvlXiCpbTW/BXxMOCWXQojgHdmgdvm6IsCqAQ5nxA==}
 
   '@twemoji/svg@15.0.0':
     resolution: {integrity: sha512-ZSPef2B6nBaYnfgdTbAy4jgW95o7pi2xPGwGCU+WMTxo7J6B1lMPTWwSq/wTuiMq+N0khQ90CcvYp1wFoQpo/w==}
@@ -2072,7 +2072,7 @@ snapshots:
       tailwindcss: 4.3.3
       vite: 8.3.2(esbuild@0.28.1)(jiti@2.7.0)
 
-  '@twemoji/parser@15.0.0': {}
+  '@twemoji/parser@17.0.2': {}
 
   '@twemoji/svg@15.0.0': {}
 
