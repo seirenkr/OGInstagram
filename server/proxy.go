@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"log/slog"
 	"math"
@@ -47,6 +48,33 @@ type SessionPool struct {
 	cfg      Config
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
+	// Set for the IPv6 egress pool; nil means the DC proxy.
+	proxyURL func() string
+	dial     func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+func (p *SessionPool) nextProxyURL() string {
+	if p.proxyURL != nil {
+		return p.proxyURL()
+	}
+	return proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID())
+}
+
+// newEgressPool connects through the IPv6 egress; each session id maps to one source address.
+func newEgressPool(socket, prefix string) *SessionPool {
+	pool := &SessionPool{
+		tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2),
+		proxyURL: func() string { return "http://" + newSessionID() + "@egress" },
+		dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		},
+	}
+	for i := range proxySessionCount {
+		client, _ := buildSessionClient(pool.nextProxyURL(), pool)
+		pool.sessions = append(pool.sessions, &Session{name: prefix + strconv.Itoa(i+1), client: client})
+	}
+	return pool
 }
 
 func newSessionPool(cfg Config) *SessionPool {
@@ -55,7 +83,7 @@ func newSessionPool(cfg Config) *SessionPool {
 		for i := range proxySessionCount {
 			// A stable slot label: rotation replaces the exit IP behind it.
 			name := "us-" + strconv.Itoa(i+1)
-			client, err := buildSessionClient(proxyURL(cfg.ProxyUser, cfg.ProxyPass, newSessionID()), pool)
+			client, err := buildSessionClient(pool.nextProxyURL(), pool)
 			if err != nil {
 				slog.Warn("proxy session skipped: invalid proxy configuration", "session", name, "error", err)
 				continue
@@ -76,9 +104,13 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 		return nil, err
 	}
 	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
+	dial := dialer.DialContext
+	if pool.dial != nil {
+		dial = pool.dial
+	}
 	transport := &http.Transport{
 		Proxy:               http.ProxyURL(parsed),
-		DialContext:         dialer.DialContext,
+		DialContext:         dial,
 		ForceAttemptHTTP2:   true,
 		DisableCompression:  true,
 		TLSHandshakeTimeout: 3 * time.Second,
@@ -183,7 +215,7 @@ func (s *Session) getClient() *http.Client {
 // fail moves s off client to a new exit IP and cools it down. A late failure
 // from an already retired client leaves its replacement alone and reports false.
 func (p *SessionPool) fail(s *Session, client *http.Client) bool {
-	next, err := buildSessionClient(proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), p)
+	next, err := buildSessionClient(p.nextProxyURL(), p)
 	if err != nil {
 		slog.Warn("proxy session rotation failed", "session", s.name, "error", err)
 	}

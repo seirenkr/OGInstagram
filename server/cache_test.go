@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -122,15 +121,22 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
+// graphQLPool answers the post query with an image post whose media URL is
+// https://scontent.cdninstagram.com/big.jpg?oe=1, counting the calls.
+func graphQLPool(calls *atomic.Int32) *SessionPool {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return mediaTestResponse(r, http.StatusOK, nil, []byte(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"DaD8phTyclR",`+
+			`"user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/big.jpg?oe=1","media_type":1}]}}}`)), nil
+	})}
+	return &SessionPool{sessions: []*Session{{name: "us-1", client: client}}}
+}
+
 func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	store := newTestStore(t)
 
-	directCalls := 0
-	stubDefaultTransport(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
-		directCalls++
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(trustedEmbedImagePage))}, nil
-	}))
-	a := newApp(Config{BaseURL: "https://example.test", Store: store}, &SessionPool{}, mustOffloadSigner(testOffloadSigningKeys))
+	var calls atomic.Int32
+	a := newApp(Config{BaseURL: "https://example.test", Store: store}, graphQLPool(&calls), mustOffloadSigner(testOffloadSigningKeys))
 
 	note := httptest.NewRequest(http.MethodGet, "https://example.test/p/DaD8phTyclR", nil)
 	note.Header.Set("Accept", asMediaType)
@@ -140,26 +146,19 @@ func TestStatusRequestWarmsLocalEntryUsedByOffload(t *testing.T) {
 	}
 
 	if _, stored := a.posts.localGet("DaD8phTyclR"); !stored {
-		t.Fatal("captioned result did not warm the local model cache")
+		t.Fatal("the GraphQL result did not warm the local model cache")
 	}
 
 	offload := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
 	media := serveApp(t, a, offload)
-	if media.status != http.StatusFound || directCalls != 1 {
-		t.Fatalf("offload = %d, Instagram fetches = %d; want 302 and one fetch", media.status, directCalls)
+	if media.status != http.StatusFound || calls.Load() != 1 {
+		t.Fatalf("offload = %d, Instagram fetches = %d; want 302 and one fetch", media.status, calls.Load())
 	}
 }
 
 func TestOffloadMissFetchesOrigin(t *testing.T) {
 	var originFetches atomic.Int32
-	stubDefaultTransport(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
-		originFetches.Add(1)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(trustedEmbedImagePage)),
-		}, nil
-	}))
-	a := newApp(Config{}, &SessionPool{}, mustOffloadSigner(testOffloadSigningKeys))
+	a := newApp(Config{}, graphQLPool(&originFetches), mustOffloadSigner(testOffloadSigningKeys))
 	req := httptest.NewRequest(http.MethodGet, "https://example.test/offload/DaD8phTyclR/1", nil)
 	result := serveApp(t, a, req)
 	if want := "https://scontent.cdninstagram.com/big.jpg?oe=1"; result.status != http.StatusFound || result.headers["Location"] != want {

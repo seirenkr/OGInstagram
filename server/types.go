@@ -44,6 +44,8 @@ type Config struct {
 	Version                string
 	ProxyUser              string
 	ProxyPass              string
+	EgressSocket           string
+	EgressPercent          int
 	BaseURL                string
 	OffloadSigningKeys     string
 	DiscordBrandEmojiID    string

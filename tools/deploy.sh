@@ -10,6 +10,18 @@ test -s secrets/tunnel-token || { echo 'Install secrets/tunnel-token first.' >&2
 test -d data || { echo 'Create data/ owned by UID 65532 first.' >&2; exit 1; }
 
 docker compose config --quiet
+
+# IPv6 egress, started before the switch. Never fatal: the app falls back to
+# the DC proxy. An image without --egress (a rollback) leaves it stopped.
+sh tools/ipv6-pool.sh || echo 'ipv6 pool setup failed; Instagram requests use the DC proxy' >&2
+if sed "s#/opt/oginstagram#$(pwd)#" tools/oginstagram-ipv6-pool.service > /etc/systemd/system/oginstagram-ipv6-pool.service; then
+  systemctl daemon-reload && systemctl enable --quiet oginstagram-ipv6-pool || true
+fi
+if [ -s /etc/oginstagram/ipv6-pool.txt ] && docker compose run --rm --no-deps -T egress -h 2>&1 | grep -q -- -egress; then
+  docker compose up -d --no-deps egress || echo 'egress did not start; Instagram requests use the DC proxy' >&2
+else
+  docker compose stop egress 2>/dev/null || true
+fi
 # The app image is loaded with `docker load` (no registry), and cloudflared is
 # pulled only when missing, so a rollback works while Docker Hub is down.
 docker compose pull --policy missing cloudflared

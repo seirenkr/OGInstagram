@@ -3,11 +3,16 @@ package main
 import (
 	"context"
 	"html"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 var storyIDRE = regexp.MustCompile(`^[0-9]{1,32}$`)
@@ -19,10 +24,65 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 		return Story{}, igErr(404, errorCodeNotFound, "invalid story")
 	}
 	username = strings.ToLower(username)
-	return a.stories.get(ctx, username+"/"+id, meta, func(fetchCtx context.Context) (Story, time.Duration, bool, *AppError) {
-		story, err := externalHelperStoryImpl(a, fetchCtx, username, id)
-		return story, cacheTTLFromURLs(story.ProfilePic, story.Media.URL, story.Media.Thumbnail), true, err
+	key := username + "/" + id
+	valid := validSourceModel[Story](key)
+	return a.stories.get(ctx, key, meta, func(fetchCtx context.Context) (Story, time.Duration, bool, *AppError) {
+		var sources []stagedSource[Story]
+		if pk, err := strconv.ParseUint(id, 10, 64); err == nil {
+			sources = append(sources, stagedSource[Story]{name: "story_graphql", persist: true, fetch: func(ctx context.Context) (Story, *AppError) {
+				spec := webLoggedOutSpec(pkShortcode(pk))
+				spec.operation = "story_graphql"
+				_, body, err := a.fetchViaProxy(ctx, spec)
+				if err != nil {
+					return Story{}, err
+				}
+				story, perr := parseGraphQLStory(username, id, body)
+				if live := time.Since(time.UnixMilli(int64(pk>>23)+igEpochMs)) < 24*time.Hour; live {
+					// Final unless the path looks closed: the helper serves deleted stories from cache.
+					if a.storyDoor.closed(perr != nil && perr.Code == errorCodeGraphQL) {
+						return Story{}, perr
+					}
+				}
+				if perr != nil && perr.Code == errorCodeGraphQL && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode {
+					notFound := igErr(http.StatusNotFound, errorCodeMediaNotFound, "story not available")
+					notFound.Final = true
+					return Story{}, notFound
+				}
+				return valid(story, perr)
+			}})
+		}
+		sources = append(sources, stagedSource[Story]{name: "story_helper", after: storyHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Story, *AppError) {
+			return valid(externalHelperStoryImpl(a, ctx, username, id))
+		}})
+		if len(sources) == 1 {
+			sources[0].after = 0
+		}
+		story, persist, err := stagedFetch(fetchCtx, sources...)
+		return story, cacheTTLFromURLs(story.ProfilePic, story.Media.URL, story.Media.Thumbnail), persist, err
 	})
+}
+
+// parseGraphQLStory checks owner, id and kind: the post query ignores the URL's username.
+func parseGraphQLStory(username, id, body string) (Story, *AppError) {
+	post, err := parseInstagramPost(body)
+	if err != nil {
+		return Story{}, err
+	}
+	item := gjson.Get(body, "data.xdt_api__v1__media__shortcode__web_info.items.0")
+	if item.Get("product_type").String() != "story" || item.Get("pk").String() != id || !strings.EqualFold(post.Username, username) {
+		notFound := igErr(http.StatusNotFound, errorCodeMediaNotFound, "story not available")
+		notFound.Final = true
+		return Story{}, notFound
+	}
+	return Story{
+		ID:         id,
+		Username:   post.Username,
+		FullName:   post.FullName,
+		ProfilePic: post.ProfilePic,
+		IsVerified: post.IsVerified,
+		Media:      post.Attachments[0],
+		CreatedAt:  post.CreatedAt,
+	}, nil
 }
 
 func storyOriginURL(username, id string) string {
@@ -105,4 +165,39 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 	h = append(h, apLinkTags(storyRefs(baseURL, story))...)
 	h = append(h, a.storyComponentEmbed(baseURL, story, gallery, support))
 	return embedDocument(h)
+}
+
+// storySideDoor watches 1675030 among live stories (normally ~8%); far more
+// means the post query no longer serves stories, and the helper takes over.
+type storySideDoor struct {
+	mu       sync.Mutex
+	ring     [100]bool // true: 1675030
+	n, i     int
+	hidden   int
+	loggedAt time.Time
+}
+
+const storySideDoorClosedPercent = 40
+
+func (d *storySideDoor) closed(hidden bool) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.n == len(d.ring) {
+		if d.ring[d.i] {
+			d.hidden--
+		}
+	} else {
+		d.n++
+	}
+	d.ring[d.i] = hidden
+	if hidden {
+		d.hidden++
+	}
+	d.i = (d.i + 1) % len(d.ring)
+	closed := d.n >= len(d.ring)/2 && d.hidden*100 > d.n*storySideDoorClosedPercent
+	if closed && time.Since(d.loggedAt) > time.Minute {
+		d.loggedAt = time.Now()
+		slog.Warn("story graphql looks closed; the external helper answers 1675030 stories", "hidden", d.hidden, "of", d.n)
+	}
+	return closed && hidden
 }

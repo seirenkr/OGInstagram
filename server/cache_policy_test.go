@@ -20,7 +20,7 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 		{"captioned_after_proxy_started", "post", "captioned", true},
 		{"post_graphql", "post", "graphql", true},
 		{"post_external_helper", "post", "helper", true},
-		{"post_oembed", "post", "oembed", true},
+		{"post_oembed", "post", "oembed", false}, // a thumbnail stand-in, never persisted
 		{"profile_api", "profile", "api", true},
 		{"profile_embed", "profile", "embed", false},
 		{"story_external_helper", "story", "helper", true},
@@ -67,16 +67,30 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 				proxyStarted, proxyDone = make(chan struct{}), make(chan struct{})
 				proxyClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 					originCalls.Add(1)
-					switch tc.source {
-					case "captioned":
+					embed := strings.HasSuffix(req.URL.Path, "/embed/") || strings.HasSuffix(req.URL.Path, "/embed/captioned/")
+					switch {
+					case tc.source == "captioned" && embed:
+						select {
+						case <-proxyStarted:
+							return response(200, trustedEmbedImagePage), nil
+						case <-req.Context().Done():
+							return nil, req.Context().Err()
+						}
+					case tc.source == "captioned":
 						close(proxyStarted)
 						defer close(proxyDone)
 						<-req.Context().Done()
 						return nil, req.Context().Err()
+					case tc.source == "embed" && embed:
+						return response(200, `{"contextJSON":"{\"context\":{\"username\":\"instagram\",\"profile_pic_url\":\"https://scontent.cdninstagram.com/avatar.jpg\"}}"}`), nil
+					}
+					switch tc.source {
 					case "graphql":
 						return response(200, `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"DaD8phTyclR","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}]}}}`), nil
 					case "api":
-						return response(200, `{"data":{"user":{"username":"instagram","profile_pic_url":"https://scontent.cdninstagram.com/avatar.jpg"}}}`), nil
+						if req.URL.Path == "/api/graphql/" {
+							return response(200, `{"data":{"xig_user_by_username":{"username":"instagram","profile_pic_url":"https://scontent.cdninstagram.com/avatar.jpg"}}}`), nil
+						}
 					case "oembed":
 						if req.URL.Path == "/api/v1/oembed/" {
 							return response(200, `{"author_name":"instagram","thumbnail_url":"https://scontent.cdninstagram.com/image.jpg","title":"oEmbed"}`), nil
@@ -85,7 +99,7 @@ func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
 					return response(200, `{"data":{}}`), nil
 				})}
 				pool := &SessionPool{
-					sessions: []*Session{{client: proxyClient}},
+					sessions: []*Session{{client: proxyClient}, {client: proxyClient}, {client: proxyClient}},
 				}
 				store := newTestStore(t)
 				a := newApp(Config{Store: store}, pool, offloadSigner{})
@@ -193,7 +207,7 @@ func TestFetchPostFallbacks(t *testing.T) {
 	}
 }
 
-func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
+func TestConfirmedMissAnswersAtOnceAndStays(t *testing.T) {
 	const shortcode = "ABC123"
 	gqlError := `{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`
 	helperPost := Post{Shortcode: shortcode, Username: "dave",
@@ -203,7 +217,7 @@ func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
 		rulingStatus int
 		missing      bool
 	}{
-		{"ruling miss answers 404 at once", `{"message":"Media cannot be found","status":"fail"}`, http.StatusNotFound, true},
+		{"ruling and oEmbed misses answer 404 at once", `{"message":"Media cannot be found","status":"fail"}`, http.StatusNotFound, true},
 		{"gated post still waits for the helper", `{"title":"This content isn't available to everyone","status":"ok"}`, http.StatusOK, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,6 +240,9 @@ func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
 						return mediaTestResponse(r, tc.rulingStatus, nil, []byte(tc.ruling)), nil
 					}
 					if r.URL.Path == "/api/v1/oembed/" {
+						if tc.missing {
+							return mediaTestResponse(r, http.StatusNotFound, nil, []byte(`{"message":"Media cannot be found","status":"fail"}`)), nil
+						}
 						<-r.Context().Done()
 						return nil, r.Context().Err()
 					}
@@ -248,8 +265,9 @@ func TestRulingMissAnswersAtOnceAndHelperFillsCache(t *testing.T) {
 				}
 				time.Sleep(cacheSharedWorkTimeout)
 				synctest.Wait()
-				if entry, ok := a.posts.localGet(shortcode); !ok || entry.err != nil || entry.value.Username != "dave" {
-					t.Fatalf("background helper result did not replace the cached miss: %+v", entry)
+				// Gone for both: the helper is cancelled, it could only add a stale copy.
+				if entry, ok := a.posts.localGet(shortcode); !ok || entry.err == nil || entry.err.Code != errorCodeMediaNotFound {
+					t.Fatalf("the confirmed miss was replaced: %+v", entry)
 				}
 			})
 		})

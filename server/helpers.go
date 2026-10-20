@@ -18,6 +18,20 @@ func shortcodePK(shortcode string) *big.Int {
 	return new(big.Int).SetBytes(raw)
 }
 
+// pkShortcode is the inverse of shortcodePK.
+func pkShortcode(pk uint64) string {
+	const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	var out [11]byte
+	i := len(out)
+	for {
+		i--
+		out[i] = digits[pk%64]
+		if pk /= 64; pk == 0 {
+			return string(out[i:])
+		}
+	}
+}
+
 const igEpochMs = 1314220021721
 
 func shortcodeTime(shortcode string) time.Time {

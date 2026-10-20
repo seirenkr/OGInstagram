@@ -19,3 +19,4 @@ secrets/
 # Local operator notes.
 docs/private/
 nginx/runtime/
+run/
