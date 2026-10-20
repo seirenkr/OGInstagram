@@ -122,7 +122,7 @@ func TestOffloadAuthorizeRejectsQueryMutations(t *testing.T) {
 	resigned := func(expires int64) string {
 		return capability(v, kid, strconv.FormatInt(expires, 10), signer.signature(path, expires))
 	}
-	ttl := int64(offloadCapabilityTTL / time.Second)
+	ttl := int64(offloadAcceptTTL / time.Second)
 	for _, tt := range []struct {
 		name, query string
 		want        bool
@@ -134,6 +134,7 @@ func TestOffloadAuthorizeRejectsQueryMutations(t *testing.T) {
 		{"v=3", capability("3", kid, exp, sig), false},
 		{"unknown kid", capability(v, "nope", exp, sig), false},
 		{"expired", resigned(now.Unix() - 1), false},
+		{"30-day link", resigned(now.Unix() + ttl - 60), true},
 		{"beyond TTL", resigned(now.Unix() + ttl + 1), false},
 		{"non-canonical exp", capability(v, kid, "0"+exp, sig), false},
 		{"padded sig", capability(v, kid, exp, sig+"="), false},
