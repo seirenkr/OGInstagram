@@ -32,10 +32,6 @@ const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichE
 	`<div class="Caption"><a class="CaptionUsername" href="/x">instagram</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
 	`<div class="CaptionComments"><a href="/x">View all 19 comments</a></div></div>`
 
-// trustedEmbedImagePage is simpleEmbedImagePage with media on an Instagram CDN host,
-// for tests whose parsed post must pass cached-model validation.
-var trustedEmbedImagePage = strings.ReplaceAll(simpleEmbedImagePage, "https://cdn/", "https://scontent.cdninstagram.com/")
-
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestCacheLimitsDistinctFetchesGlobally(t *testing.T) {
