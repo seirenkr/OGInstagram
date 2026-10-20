@@ -45,7 +45,6 @@
     "submit": "生成预览",
     "previewDesc": "Instagram 网址变为 OGInstagram 网址并展示丰富预览",
     "you": "我",
-    "rateLimited": "请求过多，请一分钟后再试。",
-    "videoUnavailable": "预览中无法播放视频。"
+    "rateLimited": "请求过多，请一分钟后再试。"
   }
 }

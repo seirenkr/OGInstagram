@@ -45,7 +45,6 @@
     "submit": "Create preview",
     "previewDesc": "An Instagram URL transformed into an OGInstagram URL with a rich preview",
     "you": "You",
-    "rateLimited": "Too many requests. Try again in a minute.",
-    "videoUnavailable": "Video not available in preview."
+    "rateLimited": "Too many requests. Try again in a minute."
   }
 }

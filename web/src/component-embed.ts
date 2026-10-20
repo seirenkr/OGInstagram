@@ -190,9 +190,8 @@ export function galleryRows<T>(items: T[]): T[][] {
   return (GALLERY_ROWS[items.length - 1] ?? []).map((size) => items.slice(start, start += size));
 }
 
-// Offload URLs redirect to the file itself, and WebKit plays an mp4 in <img>;
-// the same signed query with a thumbnail=1 prefix gives its still (a photo's is
-// the photo), so the preview never fetches video.
+// Offload URLs redirect to the file itself; the same signed query with a
+// thumbnail=1 prefix gives its still (a photo's is the photo).
 export function offloadPoster(raw: string, origin: string): string | undefined {
   const url = new URL(raw);
   if (url.origin !== origin || !url.pathname.startsWith("/offload/") || url.searchParams.has("thumbnail")) return undefined;

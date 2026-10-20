@@ -3,7 +3,6 @@ import { Button } from "@cloudflare/kumo/components/button";
 import { Input } from "@cloudflare/kumo/components/input";
 import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { ArrowSquareOutIcon as ArrowSquareOut } from "@phosphor-icons/react/ArrowSquareOut";
-import { PlayIcon as Play } from "@phosphor-icons/react/Play";
 import { SealCheckIcon as SealCheck } from "@phosphor-icons/react/SealCheck";
 import { parse as parseEmoji } from "@twemoji/parser";
 import { version as twemojiVersion } from "@twemoji/svg/package.json";
@@ -49,7 +48,6 @@ type PreviewPost = {
   statsText?: string;
   caption?: string;
   media?: Media;
-  mediaIsVideo?: boolean;
   date?: string;
   component?: ComponentEmbed;
 };
@@ -155,6 +153,7 @@ function parseHTMLPreview(doc: Document, serviceHost: string, dateFormatter: Int
   const hasStats = STATS_EMOJI_RE.test(firstBlock);
   const isProfile = meta("og:type") === "profile";
   const image = previewMediaUrl(meta("og:image"), serviceHost);
+  const video = previewMediaUrl(meta("og:video"), serviceHost);
   const authorIcon = previewMediaUrl(
     doc.querySelector('link[rel="apple-touch-icon"]')?.getAttribute("href") ?? "",
     serviceHost
@@ -166,8 +165,7 @@ function parseHTMLPreview(doc: Document, serviceHost: string, dateFormatter: Int
     authorIconUrl: authorIcon || undefined,
     statsText: hasStats ? firstBlock : undefined,
     caption: (hasStats ? restBlocks.join("\n\n") : description) || undefined,
-    media: image && !image.includes("/favicon-") ? { url: image, alt: "" } : undefined,
-    mediaIsVideo: Boolean(meta("og:video")),
+    media: video ? { url: video, alt: "" } : image && !image.includes("/favicon-") ? { url: image, alt: "" } : undefined,
     date: previewDate(meta("article:published_time"), dateFormatter),
   };
 }
@@ -245,41 +243,49 @@ function LinkButtonView({ button }: { button: LinkButton }) {
     : <span className={`${className} opacity-50`} aria-disabled="true">{content}</span>;
 }
 
-type TileProps = { item: Media; videoUnavailable: string; video?: boolean; single?: boolean; className?: string };
+type TileProps = { item: Media; single?: boolean; className?: string };
 
-function GalleryTile({ item, videoUnavailable, video = false, single = false, className = "" }: TileProps) {
+function GalleryTile({ item, single = false, className = "" }: TileProps) {
   const [failed, setFailed] = useState(false);
+  const [video, setVideo] = useState(false);
+  const poster = offloadPoster(item.url, location.origin);
+  // Only offload links can be video; their Content-Type says which.
+  useEffect(() => {
+    if (!poster) return;
+    const controller = new AbortController();
+    fetch(item.url, { method: "HEAD", signal: controller.signal })
+      .then((response) => setVideo(response.headers.get("content-type")?.startsWith("video/") ?? false), () => {});
+    return () => controller.abort();
+  }, [item.url, poster]);
   if (failed) return <div className={`min-h-16 bg-kumo-recessed ${className}`} />;
+  const mediaClass = `block saturate-[0.72] contrast-[1.02] ${single ? "h-auto max-h-80 w-auto max-w-full" : "h-full w-full object-cover"}`;
   return <div className={`relative min-h-0 min-w-0 overflow-hidden bg-kumo-recessed ${className}`}>
-    <img className={`block saturate-[0.72] contrast-[1.02] ${single ? "h-auto max-h-80 w-auto max-w-full" : "h-full w-full object-cover"}`}
-      src={offloadPoster(item.url, location.origin) ?? item.url} alt={item.alt} loading="lazy" decoding="async"
-      onError={() => setFailed(true)} />
-    {video ? <span className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/25 px-2 text-center text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.5)]">
-      <Play size={26} weight="fill" aria-hidden="true" />
-      <span className={single ? "text-[0.65rem] leading-tight" : "sr-only"}>{videoUnavailable}</span>
-    </span> : null}
+    {video
+      ? <video className={mediaClass} src={item.url} poster={poster} controls playsInline preload="metadata" aria-label={item.alt || undefined}
+        onError={() => setVideo(false)} />
+      : <img className={mediaClass} src={poster ?? item.url} alt={item.alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />}
   </div>;
 }
 
 const GALLERY_ROW_CLASS = ["", "aspect-[2/1] grid-cols-1", "aspect-[2/1] grid-cols-2", "aspect-[3/1] grid-cols-3"];
 
-function MediaGallery({ items, videoUnavailable }: { items: Media[]; videoUnavailable: string }) {
+function MediaGallery({ items }: { items: Media[] }) {
   if (items.length === 1) {
-    return <div className="w-fit max-w-full overflow-hidden rounded-lg"><GalleryTile item={items[0]} videoUnavailable={videoUnavailable} single /></div>;
+    return <div className="w-fit max-w-full overflow-hidden rounded-lg"><GalleryTile item={items[0]} single /></div>;
   }
   if (items.length === 3) {
     return <div className="grid aspect-[3/2] grid-cols-[2fr_1fr] grid-rows-2 gap-1 overflow-hidden rounded-lg">
-      {items.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} videoUnavailable={videoUnavailable} className={index === 0 ? "row-span-2" : ""} />)}
+      {items.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} className={index === 0 ? "row-span-2" : ""} />)}
     </div>;
   }
   return <div className="flex flex-col gap-1 overflow-hidden rounded-lg">
     {galleryRows(items).map((row, rowIndex) => <div key={rowIndex} className={`grid gap-1 ${GALLERY_ROW_CLASS[row.length]}`}>
-      {row.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} videoUnavailable={videoUnavailable} />)}
+      {row.map((item, index) => <GalleryTile key={`${item.url}-${index}`} item={item} />)}
     </div>)}
   </div>;
 }
 
-function EmbedChildView({ child, lang, videoUnavailable }: { child: EmbedChild; lang: string; videoUnavailable: string }) {
+function EmbedChildView({ child, lang }: { child: EmbedChild; lang: string }) {
   switch (child.type) {
     case "text":
       return <TextDisplay nodes={child.content} lang={lang} />;
@@ -291,7 +297,7 @@ function EmbedChildView({ child, lang, videoUnavailable }: { child: EmbedChild; 
         {child.button ? <div className="flex-none"><LinkButtonView button={child.button} /></div> : null}
       </div>;
     case "gallery":
-      return <MediaGallery items={child.items} videoUnavailable={videoUnavailable} />;
+      return <MediaGallery items={child.items} />;
     case "separator":
       return <hr className={`${child.large ? "my-2" : "my-0.5"} ${child.divider ? "border-kumo-hairline" : "border-transparent"}`} />;
     case "row":
@@ -299,10 +305,11 @@ function EmbedChildView({ child, lang, videoUnavailable }: { child: EmbedChild; 
   }
 }
 
-function ComponentEmbedView({ embed, lang, videoUnavailable }: { embed: ComponentEmbed; lang: string; videoUnavailable: string }) {
-  return <article className="hero-item mt-3 flex max-w-[30rem] flex-col gap-2 rounded-lg border border-l-4 border-kumo-hairline bg-kumo-base p-3 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs"
-    style={embed.accent ? { borderLeftColor: embed.accent } : undefined}>
-    {embed.children.map((child, index) => <EmbedChildView key={index} child={child} lang={lang} videoUnavailable={videoUnavailable} />)}
+// The accent bar sits inside the gray border, which clips it to the corners.
+function ComponentEmbedView({ embed, lang }: { embed: ComponentEmbed; lang: string }) {
+  return <article className="hero-item relative mt-3 flex max-w-[30rem] flex-col gap-2 overflow-hidden rounded-lg border border-kumo-hairline bg-kumo-base py-3 pr-3 pl-4 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs">
+    {embed.accent ? <span className="absolute inset-y-0 left-0 w-1" style={{ backgroundColor: embed.accent }} aria-hidden="true" /> : null}
+    {embed.children.map((child, index) => <EmbedChildView key={index} child={child} lang={lang} />)}
   </article>;
 }
 
@@ -539,8 +546,9 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
                 <div className={`preview-url-target absolute inset-0 truncate text-kumo-default ${visibleStage === "sent" ? "" : "preview-url-visible"}`}><span>https://</span><HighlightedHost host={host} /><span>{visiblePost.path}</span></div>
               </div>
               {visibleStage === "embed" && visiblePost.component
-                ? <ComponentEmbedView embed={visiblePost.component} lang={lang} videoUnavailable={copy.videoUnavailable} />
-                : visibleStage === "embed" && visiblePost.title ? <article className="hero-item mt-3 rounded border-l-4 border-kumo-brand bg-kumo-base py-2 pr-4 pb-4 pl-3 [overflow-wrap:anywhere] max-sm:pr-3">
+                ? <ComponentEmbedView embed={visiblePost.component} lang={lang} />
+                : visibleStage === "embed" && visiblePost.title ? <article className="hero-item relative mt-3 overflow-hidden rounded border border-kumo-hairline bg-kumo-base py-2 pr-4 pb-4 pl-4 [overflow-wrap:anywhere] max-sm:pr-3">
+                <span className="absolute inset-y-0 left-0 w-1 bg-kumo-brand" aria-hidden="true" />
                 <div className="mt-2 flex items-center gap-2">
                   <img className="h-6 w-6 rounded-full object-cover" src={visiblePost.authorIconUrl ?? visiblePost.avatar} alt="" width={24} height={24} />
                   {visiblePost.profileUrl ? <a className="text-sm font-semibold text-kumo-default no-underline hover:underline" href={visiblePost.profileUrl} target="_blank" rel="noreferrer noopener" translate="no">{visiblePost.title}</a> : <span className="text-sm font-semibold text-kumo-default" translate="no">{visiblePost.title}</span>}
@@ -550,7 +558,7 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
                   {visiblePost.caption ? <p className="whitespace-pre-line"><TwemojiText>{visiblePost.caption}</TwemojiText></p> : null}
                 </div> : null}
                 {visiblePost.media ? <div className="mt-2.5 w-fit max-w-[225px] overflow-hidden rounded">
-                  <GalleryTile item={visiblePost.media} videoUnavailable={copy.videoUnavailable} video={visiblePost.mediaIsVideo} single />
+                  <GalleryTile item={visiblePost.media} single />
                 </div> : null}
                 <div className="mt-2.5 flex items-center gap-2"><img className="h-5 w-5 rounded-full object-cover" src="/favicon-64.png" alt="" width={20} height={20} /><span className="text-[0.7rem] leading-tight text-kumo-subtle" translate="no">{brand}{visiblePost.date ? <><i className="mx-1 not-italic">•</i>{visiblePost.date}</> : null}</span></div>
               </article> : null}

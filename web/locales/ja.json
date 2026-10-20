@@ -45,7 +45,6 @@
     "submit": "プレビューを作成",
     "previewDesc": "Instagram URLがOGInstagram URLに変わり、リッチプレビューが表示されるプレビュー",
     "you": "自分",
-    "rateLimited": "リクエストが多すぎます。1分後にもう一度お試しください。",
-    "videoUnavailable": "プレビューでは動画を再生できません。"
+    "rateLimited": "リクエストが多すぎます。1分後にもう一度お試しください。"
   }
 }

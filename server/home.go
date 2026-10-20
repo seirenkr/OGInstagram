@@ -63,7 +63,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	// Every page carries a fresh nonce and can depend on the language cookie.
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("Vary", "Accept-Language, Cookie")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net https://cdn.jsdelivr.net/npm/@twemoji/; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net https://cdn.jsdelivr.net/npm/@twemoji/; media-src 'self' https://*.cdninstagram.com https://*.fbcdn.net; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com https://*.cdninstagram.com https://*.fbcdn.net; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 	if forced != "" && forced != cookieLocale {
 		http.SetCookie(w, &http.Cookie{Name: "hl", Value: forced, Path: "/", MaxAge: 31536000, SameSite: http.SameSiteLaxMode, Secure: base.Scheme == "https"})
 	}

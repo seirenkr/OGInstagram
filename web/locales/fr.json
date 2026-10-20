@@ -45,7 +45,6 @@
     "submit": "Créer l'aperçu",
     "previewDesc": "Une URL Instagram transformée en URL OGInstagram avec un aperçu riche",
     "you": "Moi",
-    "rateLimited": "Trop de requêtes. Réessayez dans une minute.",
-    "videoUnavailable": "Vidéo non disponible dans l'aperçu."
+    "rateLimited": "Trop de requêtes. Réessayez dans une minute."
   }
 }
