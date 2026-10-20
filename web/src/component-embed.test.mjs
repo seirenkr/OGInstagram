@@ -12,9 +12,9 @@ test("parses the post layout the server emits", () => {
     { type: 10, content: "caption" },
     { type: 12, items: [media("Ab/1"), media("Ab/2")] },
     { type: 9, components: [{ type: 10, content: "-# <:OGInstagram:1556597080229810266> OGInstagram · <t:1792079955:s>" }],
-      accessory: { type: 2, style: 5, label: "📷 Instagram", url: "https://www.instagram.com/p/Ab/" } },
+      accessory: { type: 2, style: 5, label: "Instagram", url: "https://www.instagram.com/p/Ab/" } },
     { type: 14 },
-    { type: 1, components: [{ type: 2, style: 5, label: "☕ Support me", url: "https://ko-fi.com/seirenkr" }] },
+    { type: 1, components: [{ type: 2, style: 5, label: "Support me", url: "https://ko-fi.com/seirenkr" }] },
   ), (url) => url.replace("https://oginstagram.com", "http://localhost:8080"));
   assert.equal(embed.accent, "#ff0069");
   assert.deepEqual(embed.children.map((c) => c.type), ["section", "text", "gallery", "section", "separator", "row"]);
@@ -28,7 +28,7 @@ test("parses the post layout the server emits", () => {
   assert.deepEqual(footer.texts[0], [{ tag: "sub", children: [
     { tag: "emoji", name: "OGInstagram" }, " OGInstagram · ", { tag: "time", unix: 1792079955, style: "s" },
   ] }]);
-  assert.deepEqual(footer.button, { label: "📷 Instagram", href: "https://www.instagram.com/p/Ab/" });
+  assert.deepEqual(footer.button, { label: "Instagram", href: "https://www.instagram.com/p/Ab/" });
   assert.deepEqual(separator, { type: "separator", divider: true, large: false });
   assert.equal(row.buttons[0].href, "https://ko-fi.com/seirenkr");
 });
