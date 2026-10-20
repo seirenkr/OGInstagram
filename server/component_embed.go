@@ -48,10 +48,10 @@ type discordCard struct {
 	gallery, support, verified              bool
 }
 
-// The support button rides on a random tenth of renders; ?e=s pins it for
+// The support button rides on a random 5% of renders; ?e=s pins it for
 // testing. Discord caches per URL, so add any other parameter (&n=2) to refetch.
 func discordSupport(req *http.Request) bool {
-	return req.URL.Query().Get("e") == "s" || mathrand.IntN(10) == 0
+	return req.URL.Query().Get("e") == "s" || mathrand.IntN(20) == 0
 }
 
 // cardResp serves an HTML card. id names its AS2 object, actor the author
@@ -276,12 +276,12 @@ func componentEmbedScript(card discordCard) string {
 			children = append(children, discordComponent{Type: 12, Items: items})
 		}
 		if !card.gallery {
-			instagram := discordComponent{Type: 2, Style: 5, Label: "📷 Instagram", URL: card.origin}
+			instagram := discordComponent{Type: 2, Style: 5, Label: "Instagram", URL: card.origin}
 			brand := discordComponent{Type: 10, Content: "-# " + card.footer}
 			if card.support {
 				// Two buttons pair up in their own row below a divider.
 				children = append(children, brand, discordComponent{Type: 14}, discordComponent{Type: 1, Components: []discordComponent{
-					instagram, {Type: 2, Style: 5, Label: "☕ Support me", URL: "https://ko-fi.com/seirenkr"}}})
+					instagram, {Type: 2, Style: 5, Label: "Support me", URL: "https://ko-fi.com/seirenkr"}}})
 			} else {
 				// The lone post button sits beside the brand line as the Section accessory.
 				children = append(children, discordComponent{Type: 9, Components: []discordComponent{brand}, Accessory: &instagram})

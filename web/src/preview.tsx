@@ -314,7 +314,7 @@ function sampleEmbed(): ComponentEmbed | undefined {
     { type: 10, content: "Antalya, where the Taurus Mountains meet the Mediterranean.\nOld town lanes, turquoise coves, and the Red Tower glowing at sunset.\n\n#Antalya #Türkiye #TravelGuide" },
     { type: 12, items: [{ media: asset("antalya.webp") }] },
     { type: 9, components: [{ type: 10, content: `-# <:OGInstagram:1556597080229810266> OGInstagram · <t:${Math.floor(Date.now() / 1000)}:s>` }],
-      accessory: { type: 2, style: 5, label: "📷 Instagram", url: "https://www.instagram.com/" } },
+      accessory: { type: 2, style: 5, label: "Instagram", url: "https://www.instagram.com/" } },
   ] } })) ?? undefined;
 }
 
