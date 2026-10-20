@@ -7,7 +7,6 @@ x-app: &app
   env_file:
     - ${APP_ENV_FILE:-.env}
   environment:
-    PORT: "8080"
     DATA_DIR: /data
     ASSETS_DIR: /app/web
     # Leave room inside the container for one verification browser.

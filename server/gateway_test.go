@@ -145,7 +145,6 @@ func TestGatewayBotHumanGalleryDirectRoutes(t *testing.T) {
 		{"d.oginstagram.com", "/stories/Alice/123", "", "stories", "https://scontent.cdninstagram.com/s.jpg", false},
 		{"g.oginstagram.com", "/stories/alice/123", storyOriginURL("alice", "123"), "stories", "", true},
 		{"d.test.example", "/p/ABC123", "", "posts", "https://scontent.cdninstagram.com/1.jpg", false},
-		{"www.g.test.example", "/p/ABC123", "https://www.instagram.com/p/ABC123/", "posts", "", true},
 		{"oginstagram.com", "/alice?__gallery=1", "https://www.instagram.com/alice/", "profile", "", false},
 		{"g.oginstagram.com", "/alice", "https://www.instagram.com/alice/", "profile", "", true},
 		{"oginstagram.com", "/offload/ABC123/2", "", "", cdn + "2.jpg", false},

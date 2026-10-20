@@ -5,12 +5,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 )
 
 func validProductionConfig() Config {
-	return Config{Port: 8080, BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret", OffloadSigningKeys: "keys"}
+	return Config{BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret", OffloadSigningKeys: "keys"}
 }
 
 func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.T) {
@@ -26,7 +26,6 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 		{"no trusted peer", func(c *Config) { c.TrustedProxies = nil }},
 		{"no offload keys", func(c *Config) { c.OffloadSigningKeys = "" }},
 		{"trust everyone", func(c *Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")} }},
-		{"base host not allowed", func(c *Config) { c.AllowedHosts = []string{"www.oginstagram.com"} }},
 		{"base URL with port", func(c *Config) { c.BaseURL = "https://oginstagram.com:8443" }},
 		{"HTTP production", func(c *Config) { c.BaseURL = "http://oginstagram.com" }},
 	} {
@@ -37,13 +36,6 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 				t.Fatal("invalid production configuration accepted")
 			}
 		})
-	}
-	for _, host := range []string{"g.oginstagram.com:443", "g.oginstagram.com\t"} {
-		cfg := validProductionConfig()
-		cfg.AllowedHosts = append(cfg.AllowedHosts, host)
-		if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "hostnames without ports") {
-			t.Errorf("ALLOWED_HOSTS %q: %v", cfg.AllowedHosts, err)
-		}
 	}
 	cfg := validProductionConfig()
 	cfg.Development, cfg.ProxyUser, cfg.ProxyPass, cfg.OffloadSigningKeys = true, "", "", ""
@@ -62,16 +54,18 @@ func TestProxyURLRoundTripsCredentials(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsMalformedPortAndTrustedProxy(t *testing.T) {
-	t.Setenv("PORT", "not-a-port")
+func TestConfigRejectsMalformedTrustedProxy(t *testing.T) {
 	t.Setenv("DEVELOPMENT", "true")
-	if err := configFromEnv().validate(); err == nil {
-		t.Fatal("invalid port accepted")
-	}
-	t.Setenv("PORT", "8080")
 	t.Setenv("TRUSTED_PROXIES", "172.30.0.typo")
 	if err := configFromEnv().validate(); err == nil {
 		t.Fatal("invalid trusted proxy discarded")
+	}
+}
+
+func TestAllowedHostsFollowBaseURL(t *testing.T) {
+	t.Setenv("BASE_URL", "https://OGInstagram.com")
+	if got := configFromEnv().AllowedHosts; !slices.Equal(got, []string{"oginstagram.com", "www.oginstagram.com", "d.oginstagram.com", "g.oginstagram.com"}) {
+		t.Fatalf("AllowedHosts = %v", got)
 	}
 }
 

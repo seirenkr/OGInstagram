@@ -35,7 +35,7 @@ LABEL org.opencontainers.image.title=oginstagram \
       org.opencontainers.image.version=$OG_VERSION \
       org.opencontainers.image.revision=$OG_REVISION \
       org.opencontainers.image.source=https://github.com/seirenkr/OGInstagram
-ENV PORT=8080 DATA_DIR=/data ASSETS_DIR=/app/web OG_VERSION=$OG_VERSION
+ENV DATA_DIR=/data ASSETS_DIR=/app/web OG_VERSION=$OG_VERSION
 WORKDIR /app
 USER 65532:65532
 EXPOSE 8080

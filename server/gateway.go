@@ -337,8 +337,8 @@ type gatewayRoute struct {
 func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	segments := splitPath(r.URL.Path)
 	route := gatewayRoute{}
-	gallery := strings.HasPrefix(r.Host, "g.") || strings.HasPrefix(r.Host, "www.g.")
-	direct := strings.HasPrefix(r.Host, "d.") || strings.HasPrefix(r.Host, "www.d.")
+	gallery := strings.HasPrefix(r.Host, "g.")
+	direct := strings.HasPrefix(r.Host, "d.")
 	if r.URL.Path == "/.well-known/webfinger" {
 		route.handle = (*App).handleWebFinger
 		return route, true

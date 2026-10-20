@@ -40,7 +40,6 @@ type Story struct {
 }
 
 type Config struct {
-	Port                   int
 	Version                string
 	ProxyUser              string
 	ProxyPass              string

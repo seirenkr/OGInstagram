@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,7 +36,7 @@ func main() {
 	}
 	if *healthcheck {
 		client := &http.Client{Timeout: 2 * time.Second}
-		r, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", cfg.Port))
+		r, err := client.Get("http://127.0.0.1:8080/readyz")
 		if err != nil {
 			os.Exit(1)
 		}
@@ -80,11 +79,10 @@ func main() {
 	app := newApp(cfg, newSessionPool(cfg), signer)
 
 	slog.Info("server starting", "service", serviceName, "version", cfg.Version,
-		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "port", cfg.Port,
-		"offload_kid", signer.active)
+		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "offload_kid", signer.active)
 
 	srv := &http.Server{
-		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
+		Addr:              "0.0.0.0:8080",
 		Handler:           newGateway(cfg, app, home),
 		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
