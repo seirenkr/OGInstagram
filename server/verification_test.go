@@ -22,9 +22,9 @@ func TestVerificationFromAuthorJSON(t *testing.T) {
 				`"owner":{"username":"nasa","full_name":"NASA ✅"` + field + `},"display_url":"https://cdn/p.jpg"}}}`))
 			return post.IsVerified, err
 		}},
-		{"profile API user", func(field string) (bool, *AppError) {
-			profile, err := parseProfile(`{"data":{"user":{"username":"nasa","full_name":"NASA ✅",` +
-				`"edge_followed_by":{"count":100000000}` + field + `}}}`)
+		{"profile RootContent user", func(field string) (bool, *AppError) {
+			profile, err := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa","full_name":"NASA ✅",` +
+				`"follower_count":100000000` + field + `}}}`)
 			return profile.IsVerified, err
 		}},
 		{"profile embed context", func(field string) (bool, *AppError) {

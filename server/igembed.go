@@ -4,58 +4,15 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"html"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/tidwall/gjson"
 )
-
-func (a *App) directGet(ctx context.Context, operation, rawURL string) (string, *AppError) {
-	return a.directFetch(ctx, fetchSpec{operation: operation, url: rawURL})
-}
-
-// directFetch GETs spec.url from this host with the crawler UA.
-func (a *App) directFetch(ctx context.Context, spec fetchSpec) (out string, ferr *AppError) {
-	started := time.Now()
-	status := 0
-	defer func() {
-		logOutbound(ctx, spec.operation, "direct", http.MethodGet, spec.url, started, status, len(out), ferr, false)
-	}()
-	client := *http.DefaultClient
-	loginRedirect := errors.New("Instagram redirected to login or verification")
-	loginStatus := 0
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if isInstagramURL(req.URL.String()) {
-			for _, path := range []string{"/accounts/login", "/challenge", "/checkpoint"} {
-				if req.URL.Path == path || strings.HasPrefix(req.URL.Path, path+"/") {
-					if req.Response != nil {
-						loginStatus = req.Response.StatusCode
-					}
-					return loginRedirect
-				}
-			}
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	spec.method, spec.subject, spec.interpret = http.MethodGet, "Instagram", statusOnly
-	spec.headers = map[string]string{"User-Agent": embedUA}
-	status, out, ferr = fetchRequest(ctx, &client, spec)
-	if ferr != nil && errors.Is(ferr.Cause, loginRedirect) {
-		status = loginStatus
-		ferr = igErr(http.StatusBadGateway, errorCodeLoginRequired, loginRedirect.Error())
-	}
-	return
-}
 
 const rulingAsbdID = "359341"
 
@@ -109,55 +66,14 @@ func embedContextJSON(page string) (string, *AppError) {
 	return inner, nil
 }
 
-// Returned as is, never copied or mutated: stagedFetch tells a skip from a
-// failure by this pointer.
-var errEmbedPaused = ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "embed temporarily paused after Instagram blocked requests")
-
-// enterPause lets a request through a direct path that *paused may hold shut:
-// once the pause lapses, one probe per interval (the CAS winner) goes and
-// everyone else falls through at once. probe is non-zero for that probe.
-func enterPause(paused *atomic.Int64, interval time.Duration) (probe int64, ok bool) {
-	now := time.Now().UnixNano()
-	until := paused.Load()
-	if until == 0 {
-		return 0, true
-	}
-	if now < until || !paused.CompareAndSwap(until, now+int64(interval)) {
-		return 0, false
-	}
-	return now + int64(interval), true
-}
-
-// pauseOn shuts the path after a 429 or login redirect and reports whether
-// this started the pause.
-func pauseOn(paused *atomic.Int64, interval time.Duration, err *AppError) bool {
-	return (err.Status == http.StatusTooManyRequests || err.Code == errorCodeLoginRequired) &&
-		paused.Swap(time.Now().Add(interval).UnixNano()) == 0
-}
-
-// resumeAfter reopens the path after a good probe. A response started before
-// a newer block must not reopen it, hence the CAS on the probe's own deadline.
-func resumeAfter(paused *atomic.Int64, probe int64) bool {
-	return probe != 0 && paused.CompareAndSwap(probe, 0)
-}
-
 func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppError) {
-	probe, ok := enterPause(&a.embedPausedUntil, embedProbeInterval)
-	if !ok {
-		return Post{}, errEmbedPaused
-	}
-	html, err := a.directGet(ctx, "post_embed", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/")
+	_, html, err := a.fetchViaProxy(ctx, pageSpec("post_embed", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/embed/captioned/"))
 	if err != nil {
-		if pauseOn(&a.embedPausedUntil, embedProbeInterval, err) {
-			logger(ctx).WarnContext(ctx, "post embed paused", "error_type", err.errorType(), "app_status", err.Status)
-		}
 		return Post{}, err
 	}
 	post, perr := parseEmbedPost(html)
 	if perr != nil {
 		logEmbedParseFailure(ctx, "post", html, perr)
-	} else if resumeAfter(&a.embedPausedUntil, probe) {
-		logger(ctx).InfoContext(ctx, "post embed resumed")
 	}
 	return post, perr
 }
@@ -165,23 +81,15 @@ func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppE
 // fetchPostOG reads the Open Graph tags Instagram serves crawlers on the post
 // page. Unlike every logged-out API they survive post-level gates.
 func (a *App) fetchPostOG(ctx context.Context, shortcode string) (Post, *AppError) {
-	probe, ok := enterPause(&a.ogPausedUntil, ogPageProbeInterval)
-	if !ok {
-		return Post{}, ephemeralErr(http.StatusServiceUnavailable, errorCodeUpstream, "og page paused after Instagram blocked requests")
-	}
 	ctx, cancel := context.WithTimeout(ctx, ogPageTimeout)
 	defer cancel()
-	// The tags sit in the head; a page past the body cap is cut, not refused.
-	page, err := a.directFetch(ctx, fetchSpec{operation: "og_page", url: instagramOrigin + "/p/" + url.PathEscape(shortcode) + "/", cut: true})
+	// The tags sit in the head. A tagless page from IPv6 is retried through DC.
+	spec := pageSpec("og_page", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/")
+	spec.cut, spec.maxBytes = true, ogPageBytes
+	spec.dcRecheck = func(page string) bool { return !strings.Contains(page, `property="og:url"`) }
+	_, page, err := a.fetchViaProxy(ctx, spec)
 	if err != nil {
-		if pauseOn(&a.ogPausedUntil, ogPageProbeInterval, err) {
-			logger(ctx).WarnContext(ctx, "og page paused", "error_type", err.errorType(), "app_status", err.Status)
-		}
 		return Post{}, err
-	}
-	// Any page counts as unblocked: account-gated posts never carry the tags.
-	if resumeAfter(&a.ogPausedUntil, probe) {
-		logger(ctx).InfoContext(ctx, "og page resumed")
 	}
 	post, perr := parseOGPost(shortcode, page)
 	if perr != nil {
@@ -485,7 +393,7 @@ func bestGraphImageURL(n gjson.Result) string {
 }
 
 func (a *App) fetchProfileEmbed(ctx context.Context, username string) (Profile, *AppError) {
-	html, err := a.directGet(ctx, "profile_embed", instagramOrigin+"/"+url.PathEscape(username)+"/embed/")
+	_, html, err := a.fetchViaProxy(ctx, pageSpec("profile_embed", instagramOrigin+"/"+url.PathEscape(username)+"/embed/"))
 	if err != nil {
 		return Profile{}, err
 	}

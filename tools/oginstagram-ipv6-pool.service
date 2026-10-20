@@ -1,0 +1,13 @@
+# Re-adds the IPv6 egress addresses after a reboot; tools/deploy.sh installs it.
+[Unit]
+Description=oginstagram IPv6 egress addresses
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'for i in $(seq 60); do ip -6 route show default | grep -q . && exit 0; sleep 1; done; exit 1'
+ExecStart=/bin/sh /opt/oginstagram/tools/ipv6-pool.sh
+
+[Install]
+WantedBy=multi-user.target

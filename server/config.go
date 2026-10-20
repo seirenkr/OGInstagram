@@ -29,25 +29,35 @@ const (
 	// Cards link only to signed offload URLs, which outlive this by days.
 	cardEdgeTTL = 3600
 
-	requestTimeout = 4 * time.Second
+	requestTimeout = 5 * time.Second
 
 	// How fast a session's Peak-EWMA latency fades (tower's decay; Linkerd uses 10 s).
 	sessionRTTDecay = 10 * time.Second
 
-	postHedgeDelay           = time.Second
-	profileHedgeDelay        = time.Second
+	// IPv6 gets this long (at most half the time left) before DC.
+	ipv6AttemptTimeout     = time.Second
+	ipv6PageAttemptTimeout = 1500 * time.Millisecond
+	dcAttemptTimeout       = 2500 * time.Millisecond
+	dcRecheckTimeout       = 2 * time.Second // cold DC exits are slow
+	ipv6Strikes            = 3               // failures among the last ipv6Window attempts
+	ipv6Window             = 10
+	ipv6PauseMin           = 2 * time.Minute
+	ipv6PauseMax           = time.Hour
+	// A DC exit that runs this long into a deadline is treated as hung.
+	proxyHungAfter = 3 * time.Second
+
+	postHedgeDelay           = 800 * time.Millisecond
 	externalHelperHedgeDelay = 2 * time.Second
-	// After a direct embed 429 or login redirect, skip embed until one probe is due.
-	embedProbeInterval = 3 * time.Hour
-	// The crawler post page is fetched direct and only for gated posts, so it
-	// pauses briefly. A partial post stands in this long for requests and media
-	// that cannot wait for its flight.
-	ogPageTimeout       = 2500 * time.Millisecond
-	ogPageProbeInterval = 10 * time.Minute
-	partialPostTTL      = 10 * time.Minute
-	// The content-ruling check is a small JSON GET through the DC proxy; past
-	// this it is no signal. It stays under the 3 s after which a 504 marks the
-	// exit IP hung.
+	storyHelperHedgeDelay    = 2 * time.Second
+	// A profile card waits this long (from the start) for thumbnails.
+	profilePostsWait = 1500 * time.Millisecond
+	// A late external helper answer still fills the cache.
+	helperDetachedTimeout = 25 * time.Second
+	ogPageTimeout         = 2500 * time.Millisecond
+	ogPageBytes           = 32 << 10
+	partialPostTTL        = 10 * time.Minute // a partial post or gate notice stands in this long
+	helperBackgroundSlots = 8
+	// The content-ruling check is a small JSON GET; past this it is no signal.
 	rulingTimeout = 2 * time.Second
 	// Past this a profile picture copy gives way to the CDN redirect.
 	avatarTimeout = 2500 * time.Millisecond
@@ -90,13 +100,19 @@ const (
 	defaultDiscordVerifiedEmojiID = "1556598045670514798"
 
 	instagramAppUA = "Instagram 273.0.0.16.70 (iPhone15,2; iOS 17_5_1; en_US; en-US; scale=3.00; 1290x2796; 470085518)"
-	instagramWebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36"
-
-	embedUA         = "facebookexternalhit/1.1"
-	instagramAsbdID = "129477"
+	embedUA        = "facebookexternalhit/1.1"
 )
 
 func env(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+
+// egressPercent is the share of Instagram requests that try IPv6 first (default 100).
+func egressPercent(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 || n > 100 {
+		return 100
+	}
+	return n
+}
 
 func configFromEnv() Config {
 	port := 8080
@@ -127,6 +143,8 @@ func configFromEnv() Config {
 		Version:                cmp.Or(env("OG_VERSION"), "dev"),
 		ProxyUser:              env("PROXY_USERNAME"),
 		ProxyPass:              env("PROXY_PASSWORD"),
+		EgressSocket:           env("EGRESS_SOCKET"),
+		EgressPercent:          egressPercent(env("EGRESS_PERCENT")),
 		BaseURL:                strings.TrimRight(baseURL, "/"),
 		OffloadSigningKeys:     env("OFFLOAD_SIGNING_KEYS"),
 		DataDir:                cmp.Or(env("DATA_DIR"), "./data"),

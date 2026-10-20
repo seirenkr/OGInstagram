@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -22,8 +23,17 @@ import (
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "check the local server readiness")
 	backup := flag.String("backup", "", "write SQLite backups into a new destination directory")
+	egress := flag.Bool("egress", false, "serve the IPv6 egress proxy on EGRESS_SOCKET")
 	flag.Parse()
 	cfg := configFromEnv()
+	if *egress {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		if err := runEgress(cfg.EgressSocket, cmp.Or(env("EGRESS_POOL"), "/etc/oginstagram/ipv6-pool.txt")); err != nil {
+			slog.Error("ipv6 egress stopped", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *healthcheck {
 		client := &http.Client{Timeout: 2 * time.Second}
 		r, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", cfg.Port))
@@ -84,7 +94,7 @@ func main() {
 	app := newApp(cfg, newSessionPool(cfg), signer)
 
 	slog.Info("server starting", "service", serviceName, "version", cfg.Version,
-		"proxies", len(app.pool.sessions), "port", cfg.Port,
+		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "port", cfg.Port,
 		"offload_keys", keySource, "offload_kid", signer.active)
 
 	srv := &http.Server{
