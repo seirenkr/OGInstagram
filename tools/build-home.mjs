@@ -1,13 +1,10 @@
 import { readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 const BRAND = "OGInstagram";
 const BRAND_COLOR = "#ff0069";
-const SUPPORT_URL = "https://ko-fi.com/seirenkr";
-const GITHUB_URL = "https://github.com/seirenkr/OGInstagram";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const root = join(import.meta.dirname, "..");
 const dist = join(root, "web", "dist");
 const template = readFileSync(join(dist, "index.html"), "utf8");
 const localeDir = join(root, "web", "locales");
@@ -34,7 +31,7 @@ for (const [locale, t] of strings) {
 if (!template.includes('<div id="root"></div>')) throw new Error("root container missing from web/index.html");
 if (!template.includes('<meta name="og-head-links-placeholder">')) throw new Error("head-links placeholder missing from web/index.html");
 
-const languageTag = (locale) => locale === "zh-hans" ? "zh-Hans" : locale === "zh-hant" ? "zh-Hant" : locale;
+const languageTag = (locale) => Intl.getCanonicalLocales(locale)[0];
 
 mkdirSync(join(dist, "home"), { recursive: true });
 for (const locale of locales) {
@@ -44,8 +41,6 @@ for (const locale of locales) {
     brand: BRAND,
     version: "__OG_VERSION__",
     host: "__OG_HOST__",
-    supportUrl: SUPPORT_URL,
-    githubUrl: GITHUB_URL,
     turnstileSiteKey: "__OG_TURNSTILE_SITE_KEY__",
     ...t,
     lang,
@@ -60,7 +55,7 @@ for (const locale of locales) {
     `<link rel="alternate" hreflang="x-default" href="__OG_BASE__/">`,
   ].join("");
   const html = template
-    .replaceAll("{{BRAND}}", escapeHTML(BRAND))
+    .replaceAll("{{BRAND}}", BRAND)
     .replaceAll("{{LANG}}", lang)
     .replaceAll("{{T_TAGLINE}}", () => escapeHTML(t.tagline))
     .replace('<meta name="og-head-links-placeholder">', () => headLinks)
