@@ -208,6 +208,9 @@ func (cfg Config) validate() error {
 	if !cfg.Development && (len(cfg.TrustedProxies) == 0 || cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "") {
 		return fmt.Errorf("production requires TRUSTED_PROXIES and Turnstile keys")
 	}
+	if !cfg.Development && cfg.OffloadSigningKeys == "" {
+		return fmt.Errorf("production requires OFFLOAD_SIGNING_KEYS")
+	}
 	if !cfg.Development && (base.Port() != "" || !slices.Contains(cfg.AllowedHosts, strings.ToLower(base.Hostname()))) {
 		return fmt.Errorf("production BASE_URL host must be listed in ALLOWED_HOSTS, without a port")
 	}

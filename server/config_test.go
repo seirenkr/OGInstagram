@@ -10,7 +10,7 @@ import (
 )
 
 func validProductionConfig() Config {
-	return Config{Port: 8080, BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret"}
+	return Config{Port: 8080, BaseURL: "https://oginstagram.com", AllowedHosts: []string{"oginstagram.com"}, TrustedProxies: []netip.Prefix{netip.MustParsePrefix("172.30.0.3/32")}, ProxyUser: "user", ProxyPass: "pass", TurnstileSiteKey: "site", TurnstileSecretKey: "secret", OffloadSigningKeys: "keys"}
 }
 
 func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.T) {
@@ -24,6 +24,7 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 		{"no proxy", func(c *Config) { c.ProxyUser, c.ProxyPass = "", "" }},
 		{"half proxy", func(c *Config) { c.ProxyPass = "" }},
 		{"no trusted peer", func(c *Config) { c.TrustedProxies = nil }},
+		{"no offload keys", func(c *Config) { c.OffloadSigningKeys = "" }},
 		{"trust everyone", func(c *Config) { c.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")} }},
 		{"base host not allowed", func(c *Config) { c.AllowedHosts = []string{"www.oginstagram.com"} }},
 		{"base URL with port", func(c *Config) { c.BaseURL = "https://oginstagram.com:8443" }},
@@ -45,9 +46,9 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 		}
 	}
 	cfg := validProductionConfig()
-	cfg.Development, cfg.ProxyUser, cfg.ProxyPass = true, "", ""
+	cfg.Development, cfg.ProxyUser, cfg.ProxyPass, cfg.OffloadSigningKeys = true, "", "", ""
 	if err := cfg.validate(); err != nil {
-		t.Fatalf("local development without proxy credentials rejected: %v", err)
+		t.Fatalf("local development without proxy credentials or offload keys rejected: %v", err)
 	}
 }
 
@@ -120,26 +121,5 @@ func TestLoadHomeTemplatesRequiresEveryLocale(t *testing.T) {
 	}
 	if _, err := loadHomeTemplates(g.cfg.AssetsDir); err == nil {
 		t.Fatal("incomplete frontend build accepted")
-	}
-}
-
-func TestOptionalSettingsHaveSafeDefaults(t *testing.T) {
-	dir := t.TempDir()
-	first, err := loadOrCreateOffloadKeys(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := loadOrCreateOffloadKeys(dir)
-	if err != nil || second != first {
-		t.Fatalf("generated keyring must persist across restarts: %q vs %q (%v)", first, second, err)
-	}
-	if _, err := parseOffloadSigner(first); err != nil {
-		t.Fatalf("generated keyring is invalid: %v", err)
-	}
-	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-		t.Errorf("temp keyring files were left behind: %v", entries)
-	}
-	if info, _ := os.Stat(filepath.Join(dir, "offload-signing-keys.json")); info.Mode().Perm() != 0o600 {
-		t.Errorf("keyring file mode = %v, want 0600", info.Mode().Perm())
 	}
 }

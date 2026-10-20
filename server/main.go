@@ -3,6 +3,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -64,24 +66,22 @@ func main() {
 		slog.Error("frontend assets unavailable", "error", err)
 		os.Exit(1)
 	}
-	keys, keySource := cfg.OffloadSigningKeys, "env"
-	if keys == "" {
-		keySource = "file"
-		if keys, err = loadOrCreateOffloadKeys(cfg.DataDir); err != nil {
-			slog.Error("cannot load offload signing keys", "source", keySource, "error", err)
-			os.Exit(1)
-		}
+	keys := cfg.OffloadSigningKeys
+	if keys == "" { // development only: links die with the process
+		key := make([]byte, offloadSigningKeySize)
+		rand.Read(key)
+		keys = `{"active":"dev","keys":{"dev":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
 	}
 	signer, err := parseOffloadSigner(keys)
 	if err != nil {
-		slog.Error("invalid offload signing keys", "source", keySource, "error", err)
+		slog.Error("invalid offload signing keys", "error", err)
 		os.Exit(1)
 	}
 	app := newApp(cfg, newSessionPool(cfg), signer)
 
 	slog.Info("server starting", "service", serviceName, "version", cfg.Version,
 		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "port", cfg.Port,
-		"offload_keys", keySource, "offload_kid", signer.active)
+		"offload_kid", signer.active)
 
 	srv := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
