@@ -24,13 +24,10 @@ import (
 )
 
 const (
-	// About a day of models with headroom; the byte cap binds first.
-	persistentModelBytes   int64 = 1 << 30
-	persistentModelEntries       = 393216
-	modelSweepBatch              = 512
-	metricRetention              = 24 * time.Hour
-	metricBucketSeconds          = 600
-	metricLatencyBins            = 64
+	modelSweepBatch     = 512
+	metricRetention     = 24 * time.Hour
+	metricBucketSeconds = 600
+	metricLatencyBins   = 64
 )
 
 var errCorruptSQLite = errors.New("corrupt SQLite database")
@@ -87,43 +84,28 @@ func openLocalStore(dataDir string) (*localStore, error) {
 	return s, nil
 }
 
-// The triggers keep model_usage current for any binary writing this file,
-// including an older one; the recount on open heals whatever drift a file
-// collected before them.
+// Model TTLs are capped at 24 h, so expiry bounds the table; the DROPs clear
+// the capacity bookkeeping older releases created.
 func (s *localStore) initSchema(ctx context.Context) error {
-	tx, err := s.state.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `
+	_, err := s.state.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS models (
 			kind TEXT NOT NULL, key TEXT NOT NULL, value BLOB NOT NULL,
 			expires_at INTEGER NOT NULL, stored_at INTEGER NOT NULL,
 			PRIMARY KEY (kind, key)
 		);
 		CREATE INDEX IF NOT EXISTS model_expiry ON models(expires_at);
-		CREATE INDEX IF NOT EXISTS model_age ON models(stored_at);
-		CREATE INDEX IF NOT EXISTS model_value_size ON models(length(value));
-		CREATE TABLE IF NOT EXISTS model_usage (
-			id INTEGER PRIMARY KEY CHECK (id = 0), entries INTEGER NOT NULL, bytes INTEGER NOT NULL
-		);
-		CREATE TRIGGER IF NOT EXISTS model_usage_insert AFTER INSERT ON models BEGIN
-			UPDATE model_usage SET entries = entries + 1, bytes = bytes + length(NEW.value);
-		END;
-		CREATE TRIGGER IF NOT EXISTS model_usage_delete AFTER DELETE ON models BEGIN
-			UPDATE model_usage SET entries = entries - 1, bytes = bytes - length(OLD.value);
-		END;
-		INSERT OR REPLACE INTO model_usage SELECT 0, COUNT(*), COALESCE(SUM(length(value)), 0) FROM models;
+		DROP TRIGGER IF EXISTS model_usage_insert;
+		DROP TRIGGER IF EXISTS model_usage_delete;
+		DROP TABLE IF EXISTS model_usage;
+		DROP INDEX IF EXISTS model_age;
+		DROP INDEX IF EXISTS model_value_size;
 		CREATE TABLE IF NOT EXISTS metric_buckets (
 			bucket INTEGER NOT NULL, category TEXT NOT NULL, instance TEXT NOT NULL,
 			outcomes TEXT NOT NULL, latency TEXT NOT NULL,
 			PRIMARY KEY (bucket, category, instance)
 		);
-	`); err != nil {
-		return err
-	}
-	return tx.Commit()
+	`)
+	return err
 }
 
 func openSQLite(path string) (*sql.DB, error) {
@@ -141,8 +123,7 @@ func openSQLite(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	params := url.Values{}
-	// max_page_count is 3 GiB at 4 KiB pages: the model byte cap binds first even
-	// at 2.4x file overhead.
+	// max_page_count caps the file at 3 GiB (4 KiB pages).
 	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(NORMAL)", "busy_timeout(1000)", "cache_size(-2048)", "journal_size_limit(8388608)", "max_page_count(786432)"} {
 		params.Add("_pragma", pragma)
 	}
@@ -187,46 +168,17 @@ func (s *localStore) getModel(ctx context.Context, kind, key string) ([]byte, ti
 }
 
 func (s *localStore) putModel(ctx context.Context, kind, key string, value []byte, expires time.Time) error {
-	if !expires.After(time.Now()) {
+	now := time.Now()
+	if !expires.After(now) {
 		return nil
 	}
-	tx, err := s.state.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	// Exclude the replaced value before measuring capacity; rollback preserves it on failure.
-	if _, err = tx.ExecContext(ctx, "DELETE FROM models WHERE kind = ? AND key = ?", kind, key); err != nil {
-		return err
-	}
 	// A bounded sweep keeps a backlog left by hours without writes from
-	// overrunning the put deadline; unswept rows only make eviction early.
-	if _, err = tx.ExecContext(ctx, "DELETE FROM models WHERE rowid IN (SELECT rowid FROM models WHERE expires_at <= ? ORDER BY expires_at LIMIT ?)", time.Now().UnixMilli(), modelSweepBatch); err != nil {
+	// overrunning the put deadline.
+	if _, err := s.state.ExecContext(ctx, "DELETE FROM models WHERE rowid IN (SELECT rowid FROM models WHERE expires_at <= ? ORDER BY expires_at LIMIT ?)", now.UnixMilli(), modelSweepBatch); err != nil {
 		return err
 	}
-	// Evict before insertion so the on-disk page ceiling cannot prevent cleanup.
-	var count int
-	var used int64
-	if err = tx.QueryRowContext(ctx, "SELECT entries, bytes FROM model_usage").Scan(&count, &used); err != nil {
-		return err
-	}
-	for count >= persistentModelEntries || used+int64(len(value)) > persistentModelBytes {
-		var oldestKind, oldestKey string
-		var size int64
-		if err = tx.QueryRowContext(ctx, "SELECT kind, key, length(value) FROM models ORDER BY stored_at LIMIT 1").Scan(&oldestKind, &oldestKey, &size); err != nil {
-			return err
-		}
-		if _, err = tx.ExecContext(ctx, "DELETE FROM models WHERE kind = ? AND key = ?", oldestKind, oldestKey); err != nil {
-			return err
-		}
-		count--
-		used -= size
-	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO models(kind, key, value, expires_at, stored_at) VALUES (?, ?, ?, ?, ?)", kind, key, value, expires.UnixMilli(), time.Now().UnixMilli())
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := s.state.ExecContext(ctx, "INSERT OR REPLACE INTO models(kind, key, value, expires_at, stored_at) VALUES (?, ?, ?, ?, ?)", kind, key, value, expires.UnixMilli(), now.UnixMilli())
+	return err
 }
 
 type StatusSeries struct {
