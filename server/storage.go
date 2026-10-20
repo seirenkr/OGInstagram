@@ -371,29 +371,3 @@ func (s *localStore) Status(ctx context.Context) (StatusReport, error) {
 	}
 	return report, nil
 }
-
-// VACUUM INTO captures committed data including WAL without copying live files.
-// The destination must be new.
-func (s *localStore) Backup(ctx context.Context, destinationDir string) error {
-	if err := os.MkdirAll(filepath.Dir(destinationDir), 0700); err != nil {
-		return err
-	}
-	if err := os.Mkdir(destinationDir, 0700); err != nil {
-		return err
-	}
-	path, err := filepath.Abs(filepath.Join(destinationDir, "state.sqlite"))
-	if err != nil {
-		return err
-	}
-	if _, err = s.state.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
-		return err
-	}
-	if err = os.Chmod(path, 0600); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return err
-	}
-	return errors.Join(file.Sync(), file.Close())
-}

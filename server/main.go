@@ -22,7 +22,6 @@ import (
 
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "check the local server readiness")
-	backup := flag.String("backup", "", "write SQLite backups into a new destination directory")
 	egress := flag.Bool("egress", false, "serve the IPv6 egress proxy on EGRESS_SOCKET")
 	flag.Parse()
 	cfg := configFromEnv()
@@ -60,19 +59,6 @@ func main() {
 	}
 	defer store.Close()
 	cfg.Store = store
-	if *backup != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		err = store.Backup(ctx, *backup)
-		if err == nil {
-			err = backupOffloadKeys(cfg.DataDir, *backup)
-		}
-		if err != nil {
-			slog.Error("storage maintenance failed", "error", err)
-			os.Exit(1)
-		}
-		return
-	}
 	home, err := loadHomeTemplates(cfg.AssetsDir)
 	if err != nil {
 		slog.Error("frontend assets unavailable", "error", err)

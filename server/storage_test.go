@@ -402,25 +402,3 @@ func TestCorruptStateDatabaseIsReplaced(t *testing.T) {
 		t.Fatalf("corrupt state set aside as %v", aside)
 	}
 }
-
-func TestLocalBackupRestore(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		s := newTestStore(t)
-		ctx := context.Background()
-		if err := s.putModel(ctx, "post", "a", []byte(`{"value":42}`), time.Now().Add(time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		destination := filepath.Join(t.TempDir(), "backup")
-		if err := s.Backup(ctx, destination); err != nil {
-			t.Fatal(err)
-		}
-		restored, err := openLocalStore(destination)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer restored.Close()
-		if _, _, err = restored.getModel(ctx, "post", "a"); err != nil {
-			t.Fatal(err)
-		}
-	})
-}
