@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -166,9 +165,6 @@ type resp struct {
 	mediaURL string
 }
 
-func htmlResp(status int, body string) resp {
-	return resp{status: status, headers: map[string]string{"Content-Type": "text/html; charset=utf-8"}, body: []byte(body)}
-}
 func jsonResp(status int, body []byte) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "application/json"}, body: body}
 }
@@ -240,13 +236,11 @@ func (a *App) webFinger(req *http.Request) resp {
 			links = append(links, link)
 		}
 	}
-	r := jsonResp(http.StatusOK, jsonBytes(map[string]any{
+	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": "application/jrd+json"}, body: jsonBytes(map[string]any{
 		"subject": "acct:" + strings.ToLower(username) + "@" + host,
 		"aliases": []any{actor},
 		"links":   links,
-	}))
-	r.headers["Content-Type"] = "application/jrd+json"
-	return r
+	})}
 }
 
 func (a *App) handleActivityCollection(req *http.Request, username, name string) resp {
@@ -324,11 +318,7 @@ func offloadErrorResp(err *AppError, fallbackURL string) resp {
 	return r
 }
 
-func invalidOffloadResp() resp {
-	return resp{status: http.StatusNotFound, headers: map[string]string{}}
-}
-
-// Offload handlers trust their arguments: canonicalOffloadPath or the d. host
+// Offload handlers trust their arguments: offloadRoute or the d. host
 // route has already validated and bounded them.
 func (a *App) handleOffload(req *http.Request, shortcode string, index int, avatar bool) resp {
 	meta := &fetchMeta{}
@@ -367,25 +357,15 @@ func (a *App) handleProfileOffload(req *http.Request, username string, n int) re
 	target := p.ProfilePic
 	if n > 0 {
 		if n > len(p.RecentMedia) {
-			return invalidOffloadResp()
+			return resp{status: http.StatusNotFound, headers: map[string]string{}}
 		}
 		target = p.RecentMedia[n-1].Thumbnail
 	}
 	return tagFetch(a.offloadResp(req, target, n == 0), meta)
 }
 
-// Gateway.ServeHTTP stores the origin it validated; the host rule below is
-// reached only by handler tests that bypass the gateway.
+// Gateway.ServeHTTP stores the origin it validated.
 func (a *App) publicBaseURL(req *http.Request) string {
-	if origin, _ := req.Context().Value(publicOriginKey{}).(string); origin != "" {
-		return origin
-	}
-	host := req.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return "http://" + req.Host
-	}
-	return "https://" + req.Host
+	origin, _ := req.Context().Value(publicOriginKey{}).(string)
+	return origin
 }

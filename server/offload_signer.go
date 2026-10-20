@@ -103,7 +103,7 @@ func (s offloadSigner) url(baseURL, path string, thumbnail bool) string {
 }
 
 func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
-	path, ok := canonicalOffloadPath(u)
+	path, _, ok := offloadRoute(u)
 	if !ok {
 		return false
 	}

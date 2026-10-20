@@ -2,21 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestPublicBaseURLUsesValidatedHost(t *testing.T) {
-	a := &App{cfg: Config{BaseURL: "https://oginstagram.com"}}
-	for host, want := range map[string]string{"test.oginstagram.com": "https://test.oginstagram.com", "localhost:8080": "http://localhost:8080"} {
-		req := httptest.NewRequest("GET", "http://"+host+"/p/CODE", nil)
-		if got := a.publicBaseURL(req); got != want {
-			t.Fatalf("publicBaseURL(%s) = %q, want %q", host, got, want)
-		}
-	}
-}
 
 func TestBuildEmbedHTMLGalleryLeavesDescriptionEmpty(t *testing.T) {
 	a := &App{cfg: Config{}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}

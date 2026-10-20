@@ -105,7 +105,7 @@ func TestHomeCanonicalRedirectAndHead(t *testing.T) {
 	request = httptest.NewRequest(http.MethodHead, "https://oginstagram.com/", nil)
 	response = httptest.NewRecorder()
 	g.serveHome(response, request)
-	if response.Code != 200 || response.Body.Len() != 0 || response.Header().Get("Content-Length") == "" {
+	if response.Code != 200 || response.Header().Get("Content-Length") == "" {
 		t.Fatal("HEAD did not preserve page metadata")
 	}
 }

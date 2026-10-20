@@ -169,7 +169,7 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		"/offload/@User.Name/7",
 		"/offload/@bad!/avatar",
 	} {
-		if _, ok := canonicalOffloadPath(&url.URL{Path: path}); ok {
+		if _, _, ok := offloadRoute(&url.URL{Path: path}); ok {
 			t.Errorf("%s was canonicalized", path)
 		}
 		if _, ok := resolveGatewayRoute(httptest.NewRequest(http.MethodGet, "https://example.test"+path, nil)); ok {
@@ -182,8 +182,8 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		{"/offload/story/Alice/123/avatar", "/offload/story/alice/123/avatar"},
 		{"/offload/@User.Name/6", "/offload/@user.name/6"},
 	} {
-		if got, ok := canonicalOffloadPath(&url.URL{Path: tt.path}); got != tt.want || ok != (tt.want != "") {
-			t.Errorf("canonicalOffloadPath(%s) = %q, %v; want %q", tt.path, got, ok, tt.want)
+		if got, _, ok := offloadRoute(&url.URL{Path: tt.path}); got != tt.want || ok != (tt.want != "") {
+			t.Errorf("offloadRoute(%s) = %q, %v; want %q", tt.path, got, ok, tt.want)
 		}
 	}
 }

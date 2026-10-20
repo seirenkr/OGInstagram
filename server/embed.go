@@ -13,16 +13,16 @@ func videoOGTags(mediaHref string, att Attachment) []string {
 		`<meta property="og:video:secure_url" content="` + html.EscapeString(mediaHref) + `">`,
 		`<meta property="og:video:type" content="video/mp4">`,
 	}
-	return append(tags, dimensionTags("property", "og:video", w, h)...)
+	return append(tags, dimensionTags("og:video", w, h)...)
 }
 
-func dimensionTags(attr, prefix string, w, h int) []string {
+func dimensionTags(prefix string, w, h int) []string {
 	if w <= 0 || h <= 0 {
 		return nil
 	}
 	return []string{
-		`<meta ` + attr + `="` + prefix + `:width" content="` + strconv.Itoa(w) + `">`,
-		`<meta ` + attr + `="` + prefix + `:height" content="` + strconv.Itoa(h) + `">`,
+		`<meta property="` + prefix + `:width" content="` + strconv.Itoa(w) + `">`,
+		`<meta property="` + prefix + `:height" content="` + strconv.Itoa(h) + `">`,
 	}
 }
 
@@ -88,7 +88,7 @@ func (a *App) buildEmbedHTML(baseURL string, post Post, postType string, mediaIn
 		`<link rel="apple-touch-icon" href="`+html.EscapeString(a.postAvatarURL(baseURL, post))+`">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(post.Username)+`/">`,
 	)
-	h = append(h, dimensionTags("property", "og:image", first.Width, first.Height)...)
+	h = append(h, dimensionTags("og:image", first.Width, first.Height)...)
 	if published := isoTime(post.CreatedAt); published != "" {
 		h = append(h, `<meta property="article:published_time" content="`+published+`">`, `<meta property="og:pubdate" content="`+published+`">`)
 	}

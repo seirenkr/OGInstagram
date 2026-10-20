@@ -154,7 +154,7 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 		`<meta property="og:type" content="article">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(story.Username)+`/">`,
 	)
-	h = append(h, dimensionTags("property", "og:image", media.Width, media.Height)...)
+	h = append(h, dimensionTags("og:image", media.Width, media.Height)...)
 	h = append(h, `<link rel="apple-touch-icon" href="`+html.EscapeString(a.storyAvatarURL(baseURL, story))+`">`)
 	if published := isoTime(story.CreatedAt); published != "" {
 		h = append(h, `<meta property="article:published_time" content="`+published+`">`, `<meta property="og:pubdate" content="`+published+`">`)

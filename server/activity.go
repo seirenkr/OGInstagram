@@ -82,10 +82,10 @@ func linkValue(href, rel, mediaType string) string {
 	return "<" + href + `>; rel="` + rel + `"; type="` + mediaType + `"`
 }
 
-// apLinks is the Link header advertising a card's AS2 object and author (SWICG
-// "Publishing HTML"); an actor's own card passes no author.
-func apLinks(id, actor string) string {
-	header := linkValue(id, "alternate", asMediaType)
+// apLinks is the Link header advertising a card's alternate (idType) and author
+// (SWICG "Publishing HTML"); an actor's own card passes no author.
+func apLinks(id, idType, actor string) string {
+	header := linkValue(id, "alternate", idType)
 	if actor != "" {
 		header += ", " + linkValue(actor, "author", asMediaType)
 	}
@@ -103,11 +103,7 @@ func apLinkTags(id, actor string) []string {
 
 // The HTML card shares the object's URL; Vary because the card route negotiates.
 func activityResp(body []byte, id, actor string) resp {
-	link := linkValue(id, "alternate", "text/html")
-	if actor != "" {
-		link += ", " + linkValue(actor, "author", asMediaType)
-	}
-	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": asMediaType, "Vary": "Accept", "Link": link}, body: body}
+	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": asMediaType, "Vary": "Accept", "Link": apLinks(id, "text/html", actor)}, body: body}
 }
 
 // Federated clients get a fixed verdict, never upstream statuses or helper messages.
@@ -160,21 +156,6 @@ func noteObject(id, actor, content, published string, attachment []any) []byte {
 	return jsonBytes(n)
 }
 
-func mediaObject(mediaType, href string, width, height int) map[string]any {
-	m := map[string]any{
-		"type":      "Document",
-		"mediaType": mediaType,
-		"url":       href,
-	}
-	if width > 0 {
-		m["width"] = width
-	}
-	if height > 0 {
-		m["height"] = height
-	}
-	return m
-}
-
 func statusContent(prefix, caption string, gallery bool) string {
 	if gallery {
 		return ""
@@ -201,11 +182,18 @@ func (a *App) postNote(baseURL string, post Post, postType string, mediaIndex in
 }
 
 func activityAttachment(mediaURL string, att Attachment) map[string]any {
-	width, height := videoDisplaySize(att)
+	m := map[string]any{"type": "Document", "mediaType": "image/jpeg", "url": mediaURL}
 	if att.Kind == "video" {
-		return mediaObject("video/mp4", mediaURL, width, height)
+		m["mediaType"] = "video/mp4"
 	}
-	return mediaObject("image/jpeg", mediaURL, width, height)
+	width, height := videoDisplaySize(att)
+	if width > 0 {
+		m["width"] = width
+	}
+	if height > 0 {
+		m["height"] = height
+	}
+	return m
 }
 
 func (a *App) storyNote(baseURL string, story Story, gallery bool) []byte {

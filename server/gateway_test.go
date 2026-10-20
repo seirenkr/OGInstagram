@@ -32,11 +32,17 @@ func testGateway(t *testing.T) *Gateway {
 // serveApp is Gateway.render without the gateway's admission checks and timeout.
 func serveApp(t *testing.T, a *App, r *http.Request) resp {
 	t.Helper()
+	r = withOrigin(r)
 	route, ok := resolveGatewayRoute(r)
 	if !ok {
 		t.Fatalf("%s %s not routed", r.Host, r.URL)
 	}
 	return route.handle(a, r)
+}
+
+// withOrigin stores the origin Gateway.ServeHTTP would validate.
+func withOrigin(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), publicOriginKey{}, "https://"+r.Host))
 }
 
 func publicRequest(method, path string) *http.Request {
@@ -157,7 +163,7 @@ func TestGatewayBotHumanGalleryDirectRoutes(t *testing.T) {
 		if !ok || got.humanRedirect != tt.redirect || got.category != tt.category {
 			t.Fatalf("route %s %s = %+v,%v", tt.host, tt.path, got, ok)
 		}
-		res := got.handle(g.app, r)
+		res := got.handle(g.app, withOrigin(r))
 		if tt.location != "" {
 			if res.status != 302 || res.headers["Location"] != tt.location {
 				t.Fatalf("direct %s %s = %d %v", tt.host, tt.path, res.status, res.headers)

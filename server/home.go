@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -69,9 +68,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "hl", Value: forced, Path: "/", MaxAge: 31536000, SameSite: http.SameSiteLaxMode, Secure: base.Scheme == "https"})
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
-	if r.Method != http.MethodHead {
-		_, _ = io.WriteString(w, page)
-	}
+	_, _ = io.WriteString(w, page) // net/http drops the body for HEAD
 }
 
 func homeJSONString(value string) string {
@@ -87,11 +84,7 @@ func setPublicSecurityHeaders(h http.Header) {
 }
 
 func resolveHomeLocale(acceptLanguage string) string {
-	type languageRange struct {
-		tag     string
-		quality float64
-	}
-	var ranges []languageRange
+	best, bestQ := "en", 0.0
 	for _, part := range strings.Split(acceptLanguage, ",") {
 		parameters := strings.Split(strings.TrimSpace(part), ";")
 		tag, quality := strings.ToLower(parameters[0]), 1.0
@@ -108,28 +101,18 @@ func resolveHomeLocale(acceptLanguage string) string {
 				quality = parsed
 			}
 		}
-		if tag != "" && tag != "*" && quality > 0 {
-			ranges = append(ranges, languageRange{tag, quality})
+		locale, _, _ := strings.Cut(tag, "-")
+		if locale == "zh" {
+			locale = "zh-hans"
+			if !strings.Contains(tag, "hans") && (strings.Contains(tag, "hant") || strings.HasSuffix(tag, "-tw") || strings.HasSuffix(tag, "-hk") || strings.HasSuffix(tag, "-mo")) {
+				locale = "zh-hant"
+			}
+		}
+		if homeLocales[locale] && quality > bestQ {
+			best, bestQ = locale, quality
 		}
 	}
-	sort.SliceStable(ranges, func(i, j int) bool { return ranges[i].quality > ranges[j].quality })
-	for _, candidate := range ranges {
-		tag := candidate.tag
-		if tag == "zh" || strings.HasPrefix(tag, "zh-") {
-			if strings.Contains(tag, "hans") {
-				return "zh-hans"
-			}
-			if strings.Contains(tag, "hant") || strings.HasSuffix(tag, "-tw") || strings.HasSuffix(tag, "-hk") || strings.HasSuffix(tag, "-mo") {
-				return "zh-hant"
-			}
-			return "zh-hans"
-		}
-		primary, _, _ := strings.Cut(tag, "-")
-		if homeLocales[primary] {
-			return primary
-		}
-	}
-	return "en"
+	return best
 }
 
 func publishedAsset(file string) (allowed, immutable bool) {
