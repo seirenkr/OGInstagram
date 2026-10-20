@@ -3,7 +3,6 @@ package main
 import (
 	"cmp"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -27,11 +26,7 @@ func parseInstagramPost(body string) (Post, *AppError) {
 	// gated, hidden and missing posts alike, so it is not proof of absence.
 	if first := root.Get("errors.0"); first.Exists() {
 		code, msg := first.Get("code").Int(), first.Get("message").String()
-		cause := fmt.Errorf("graphql %d: %s", code, msg)
-		if code == graphQLRateLimitedCode || strings.Contains(msg, "Please wait") {
-			return Post{}, causedErr(429, errorCodeRateLimited, "Instagram rate limited the request", cause)
-		}
-		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", cause)
+		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", fmt.Errorf("graphql %d: %s", code, msg))
 	}
 	// Only an explicitly empty items list proves absence; any other shape is schema drift.
 	if items := data.Get("xdt_api__v1__media__shortcode__web_info.items"); items.IsArray() && len(items.Array()) == 0 {
@@ -80,7 +75,7 @@ func parseV1Attachment(item gjson.Result) (Attachment, bool) {
 	if thumbnail == "" {
 		return Attachment{}, false
 	}
-	w, h := mediaWidth(item), mediaHeight(item)
+	w, h := mediaSize(item)
 	if video := bestVideoURL(item); video != "" && uintOf(item, "media_type") == 2 {
 		return Attachment{Kind: "video", URL: video, Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
@@ -106,14 +101,10 @@ func candidateURL(c gjson.Result) string {
 	return cmp.Or(c.Get("url").String(), c.Get("src").String())
 }
 
-func mediaWidth(v gjson.Result) int {
-	return cmp.Or(uintOf(v, "dimensions.width"), uintOf(v, "original_width"), uintOf(v, "width"),
-		candidateWidth(bestImageCandidate(v)))
-}
-
-func mediaHeight(v gjson.Result) int {
-	return cmp.Or(uintOf(v, "dimensions.height"), uintOf(v, "original_height"), uintOf(v, "height"),
-		candidateHeight(bestImageCandidate(v)))
+func mediaSize(v gjson.Result) (int, int) {
+	c := bestImageCandidate(v)
+	return cmp.Or(uintOf(v, "dimensions.width"), uintOf(v, "original_width"), uintOf(v, "width"), candidateWidth(c)),
+		cmp.Or(uintOf(v, "dimensions.height"), uintOf(v, "original_height"), uintOf(v, "height"), candidateHeight(c))
 }
 
 func bestImageCandidate(value gjson.Result) gjson.Result {

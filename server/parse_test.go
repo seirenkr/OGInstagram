@@ -55,8 +55,6 @@ func TestParseNotFound(t *testing.T) {
 func TestParseGraphQLErrors(t *testing.T) {
 	for _, tc := range []struct{ body, code string }{
 		{`{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`, errorCodeGraphQL},
-		{`{"data":null,"errors":[{"message":"Rate limited","code":1675004}]}`, errorCodeRateLimited},
-		{`{"data":null,"errors":[{"message":"Please wait a few minutes before you try again.","code":1}]}`, errorCodeRateLimited},
 		{`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`, errorCodeMediaNotFound},
 		{`{"data":{"xdt_shortcode_media":null}}`, errorCodeGraphQL},
 	} {

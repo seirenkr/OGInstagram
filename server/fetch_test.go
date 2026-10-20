@@ -112,32 +112,32 @@ func TestStagedFetch(t *testing.T) {
 	}
 
 	hedgeCalled := false
-	v, _, err := stagedFetch(ctx, stagedSource[string]{fetch: str("a", nil)},
+	v, err := stagedFetch(ctx, stagedSource[string]{fetch: str("a", nil)},
 		stagedSource[string]{after: time.Second, fetch: func(context.Context) (string, *AppError) { hedgeCalled = true; return "b", nil }})
 	if v != "a" || err != nil || hedgeCalled {
 		t.Fatalf("primary win = %q %v hedge=%v", v, err, hedgeCalled)
 	}
 
 	started := time.Now()
-	v, persist, err := stagedFetch(ctx, stagedSource[string]{fetch: str("", ephemeralErr(502, errorCodeConnection, "x"))},
-		stagedSource[string]{after: time.Second, persist: true, fetch: str("b", nil)})
-	if v != "b" || !persist || err != nil || time.Since(started) > 500*time.Millisecond {
-		t.Fatalf("failure did not pull the hedge in early: %q %v %v %s", v, persist, err, time.Since(started))
+	v, err = stagedFetch(ctx, stagedSource[string]{fetch: str("", ephemeralErr(502, errorCodeConnection, "x"))},
+		stagedSource[string]{after: time.Second, fetch: str("b", nil)})
+	if v != "b" || err != nil || time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("failure did not pull the hedge in early: %q %v %s", v, err, time.Since(started))
 	}
 
 	// A permanent error outranks a later transient one.
-	_, _, err = stagedFetch(ctx, stagedSource[string]{fetch: str("", igErr(404, errorCodeNotFound, "x"))},
+	_, err = stagedFetch(ctx, stagedSource[string]{fetch: str("", igErr(404, errorCodeNotFound, "x"))},
 		stagedSource[string]{after: time.Second, fetch: str("", ephemeralErr(502, errorCodeConnection, "x"))})
 	if err == nil || err.Code != errorCodeNotFound {
 		t.Fatalf("preferred error = %v", err)
 	}
 
-	_, _, err = stagedFetch(ctx, stagedSource[string]{fetch: str("", ephemeralErr(502, errorCodeConnection, "x"))})
+	_, err = stagedFetch(ctx, stagedSource[string]{fetch: str("", ephemeralErr(502, errorCodeConnection, "x"))})
 	if err == nil || err.Code != errorCodeConnection {
 		t.Fatalf("single source error = %v", err)
 	}
 
-	v, _, err = stagedFetch(ctx, stagedSource[string]{fetch: func(context.Context) (string, *AppError) { panic("boom") }},
+	v, err = stagedFetch(ctx, stagedSource[string]{fetch: func(context.Context) (string, *AppError) { panic("boom") }},
 		stagedSource[string]{after: time.Second, fetch: str("b", nil)})
 	if v != "b" || err != nil {
 		t.Fatalf("panicking source should fail like any other: %q %v", v, err)
@@ -189,6 +189,7 @@ func TestFetchViaProxyBlamesOnlyUpstreamFailures(t *testing.T) {
 			{"401", instagramJSON, respond(401, `{"message":"Please wait a few minutes"}`), errorCodeUnauthorized, true, false},
 			{"404", instagramJSON, respond(404, "{}"), errorCodeNotFound, false, true},
 			{"graphql throttle", graphQLJSON, respond(200, `{"data":null,"errors":[{"code":1675004,"message":"x"}]}`), errorCodeRateLimited, true, false},
+			{"graphql please wait", graphQLJSON, respond(200, `{"data":null,"errors":[{"code":1,"message":"Please wait a few minutes"}]}`), errorCodeRateLimited, true, false},
 			{"graphql 400", graphQLJSON, respond(400, `{"status":"fail"}`), errorCodeGraphQL, false, false},
 			{"graphql html 404", graphQLJSON, htmlPage, errorCodeGraphQL, false, false},
 		} {

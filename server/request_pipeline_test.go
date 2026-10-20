@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -467,7 +468,7 @@ func TestFetchRequestCompressedBodyLimits(t *testing.T) {
 			if err == nil || !strings.Contains(err.PublicMessage, "too large") {
 				t.Fatal("decoded body limit was not enforced")
 			}
-			_, body, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodGet, url: "https://example.com/", interpret: statusOnly, cut: true})
+			_, body, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodGet, url: "https://example.com/", interpret: statusOnly, maxBytes: maxResponseBytes})
 			if err != nil || len(body) != maxResponseBytes {
 				t.Fatalf("cut body = %d bytes, %v", len(body), err)
 			}
@@ -554,7 +555,7 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 					return f.pool().sessions[0].client.Transport.RoundTrip(r)
 				})}
 				v6Pool := func() *SessionPool {
-					return &SessionPool{proxyURL: func() string { return "http://x@egress" }, sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
+					return &SessionPool{proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User("x"), Host: "egress"} }, sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
 				}
 				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
 				a.v6, a.v6Pages = v6Pool(), v6Pool()

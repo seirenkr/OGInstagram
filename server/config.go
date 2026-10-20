@@ -198,9 +198,9 @@ func (cfg Config) validate() error {
 	return nil
 }
 
-func proxyURL(user, pass, sessionID string) string {
+func proxyURL(user, pass, sessionID string) *url.URL {
 	username := user + "__cr." + proxyCountry + ";sessid." + sessionID
-	return (&url.URL{Scheme: "http", User: url.UserPassword(username, pass), Host: proxyGateEndpoint}).String()
+	return &url.URL{Scheme: "http", User: url.UserPassword(username, pass), Host: proxyGateEndpoint}
 }
 
 func newSessionID() string {

@@ -168,9 +168,8 @@ func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
 			})}
 			s := &Session{client: client}
 			a := &App{pool: &SessionPool{sessions: []*Session{s}}}
-			got, answered, ungated := a.mediaMissing(context.Background(), "ABC123")
-			if got != tc.missing || answered != (tc.status != http.StatusUnauthorized) || ungated != (tc.body == `{"status":"ok"}`) {
-				t.Fatalf("mediaMissing = %t, %t, %t; want %t", got, answered, ungated, tc.missing)
+			if got := a.mediaMissing(context.Background(), "ABC123"); got != tc.missing {
+				t.Fatalf("mediaMissing = %t, want %t", got, tc.missing)
 			}
 			if s.client != client || !s.cooldownUntil.IsZero() || s.pending != 0 || s.rttAt.IsZero() != (tc.status == http.StatusUnauthorized) {
 				t.Fatalf("session: rotated=%t cooldown=%s pending=%d rttAt=%s", s.client != client, s.cooldownUntil, s.pending, s.rttAt)

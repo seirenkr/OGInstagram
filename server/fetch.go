@@ -40,9 +40,7 @@ type fetchSpec struct {
 	// An advisory request's failures say nothing about the exit IP: they never
 	// rotate its session, and only its successes feed the RTT.
 	advisory bool
-	// cut keeps the first maxResponseBytes of a longer body instead of refusing it.
-	cut      bool
-	maxBytes int // 0: maxResponseBytes
+	maxBytes int // > 0: keep only the first maxBytes; 0: refuse bodies over maxResponseBytes
 	// dcRecheck asks for a successful IPv6 answer to be refetched through DC.
 	dcRecheck func(body string) bool
 	// page: follow redirects, except to the login wall.
@@ -153,7 +151,7 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 		return status, "", requestError(readErr, spec.subject+" response read failed")
 	}
 	if int64(len(raw)) > readLimit {
-		if !spec.cut {
+		if spec.maxBytes == 0 {
 			return status, "", igErr(502, errorCodeUpstream, spec.subject+" response too large")
 		}
 		raw = raw[:readLimit]
@@ -186,50 +184,27 @@ func (c countingReader) Read(p []byte) (int, error) {
 }
 
 func webLoggedOutSpec(shortcode string) fetchSpec {
-	variables, _ := json.Marshal(map[string]any{
+	spec := loggedOutQuerySpec("post", "PolarisPostRootQuery", instagramWebLoggedOutDocID, map[string]any{
 		"shortcode": shortcode,
 		"__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": false,
 	})
-	lsd := rand.Text()
-	form := url.Values{}
-	form.Set("variables", string(variables))
-	form.Set("doc_id", instagramWebLoggedOutDocID)
-	form.Set("lsd", lsd)
-	return fetchSpec{
-		operation:  "post",
-		subject:    "Instagram",
-		expectJSON: true,
-		interpret:  graphQLJSON,
-		dcRecheck:  mutedMusic,
-		method:     http.MethodPost,
-		url:        instagramGraphQLOrigin + "/graphql/query",
-		body:       form.Encode(),
-		headers: map[string]string{
-			"User-Agent":         "Mozilla/5.0",
-			"Accept":             "*/*",
-			"Content-Type":       "application/x-www-form-urlencoded",
-			"X-FB-Friendly-Name": "PolarisPostRootQuery",
-			"X-FB-LSD":           lsd,
-		},
-	}
+	spec.url, spec.dcRecheck = instagramGraphQLOrigin+"/graphql/query", mutedMusic
+	return spec
 }
 
 type stagedSource[T any] struct {
-	name    string // log label
-	after   time.Duration
-	persist bool
-	fetch   func(context.Context) (T, *AppError)
+	name  string // log label
+	after time.Duration
+	fetch func(context.Context) (T, *AppError)
 }
 
 // Sources race on a schedule; first valid result wins. A failure pulls the
 // next source in early. Must be ordered by `after`, first at 0.
-// The boolean is the winning source's persist (SQLite L2) policy; losing hedges do not affect it.
-func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, bool, *AppError) {
+func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, *AppError) {
 	type result struct {
-		name    string
-		value   T
-		persist bool
-		err     *AppError
+		name  string
+		value T
+		err   *AppError
 	}
 	var zero T
 	ctx, cancel := context.WithCancel(parent)
@@ -238,13 +213,7 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 
 	started := time.Now()
 	next, pending := 0, 0
-	var timer *time.Timer
 	var timerC <-chan time.Time
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
 
 	start := func() {
 		if next >= len(sources) || ctx.Err() != nil {
@@ -254,7 +223,7 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 		next++
 		pending++
 		go func() {
-			r := result{name: source.name, persist: source.persist}
+			r := result{name: source.name}
 			defer func() {
 				if p := recover(); p != nil {
 					logger(parent).ErrorContext(parent, "staged source panicked", "source", source.name, "panic", p, "stack", string(debug.Stack()))
@@ -267,17 +236,10 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	}
 
 	arm := func() {
-		if timer != nil {
-			timer.Stop()
-			timer = nil
-		}
 		timerC = nil
-		if next >= len(sources) {
-			return
+		if next < len(sources) {
+			timerC = time.After(max(sources[next].after-time.Since(started), 0))
 		}
-		delay := max(sources[next].after-time.Since(started), 0)
-		timer = time.NewTimer(delay)
-		timerC = timer.C
 	}
 
 	start()
@@ -299,9 +261,9 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 		case <-parent.Done():
 			report("", "cut", parent.Err().Error(), "pending", pending)
 			if lastErr != nil && !isTransient(lastErr.Code) {
-				return zero, false, lastErr
+				return zero, lastErr
 			}
-			return zero, false, contextAppError(parent)
+			return zero, contextAppError(parent)
 		case <-timerC:
 			start()
 			arm()
@@ -309,12 +271,12 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 			pending--
 			if r.err == nil {
 				report(r.name)
-				return r.value, r.persist, nil
+				return r.value, nil
 			}
 			failures = append(failures, r.name+": "+r.err.errorType()+": "+r.err.logMessage())
 			if r.err.Final {
 				report("")
-				return zero, false, r.err
+				return zero, r.err
 			}
 			lastErr = preferredError(lastErr, r.err)
 			start()
@@ -325,7 +287,7 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	if lastErr == nil {
 		lastErr = ephemeralErr(http.StatusBadGateway, errorCodeConnection, "upstream fetch failed")
 	}
-	return zero, false, lastErr
+	return zero, lastErr
 }
 
 func requestError(err error, fallback string) *AppError {

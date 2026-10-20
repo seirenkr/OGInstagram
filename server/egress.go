@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"errors"
 	"hash/fnv"
 	"io"
@@ -57,7 +56,7 @@ func egressHandler(pool []net.IP) http.Handler {
 			return
 		}
 		h := fnv.New32a()
-		h.Write([]byte(egressSession(r.Header.Get("Proxy-Authorization"))))
+		h.Write([]byte(r.Header.Get("Proxy-Authorization")))
 		source := pool[h.Sum32()%uint32(len(pool))]
 		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: source}, Timeout: 5 * time.Second}
 		upstream, err := d.DialContext(r.Context(), "tcp6", r.Host)
@@ -86,14 +85,4 @@ func pipe(dst io.WriteCloser, src io.Reader, other io.Closer) {
 	_, _ = io.Copy(dst, src)
 	dst.Close()
 	other.Close()
-}
-
-// egressSession is the username of a Basic Proxy-Authorization header.
-func egressSession(header string) string {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, "Basic "))
-	if err != nil {
-		return ""
-	}
-	user, _, _ := strings.Cut(string(raw), ":")
-	return user
 }

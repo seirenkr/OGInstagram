@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,10 +44,7 @@ func TestProductionConfigurationRejectsIncompleteTrustAndCredentials(t *testing.
 }
 
 func TestProxyURLRoundTripsCredentials(t *testing.T) {
-	u, err := url.Parse(proxyURL("user;x", "pass word", "abc"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	u := proxyURL("user;x", "pass word", "abc")
 	if pass, _ := u.User.Password(); u.User.Username() != "user;x__cr.us;sessid.abc" || pass != "pass word" {
 		t.Fatalf("proxy credentials = %q", u.User)
 	}
