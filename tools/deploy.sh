@@ -5,7 +5,6 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-test -f .env || { echo 'Create .env from .env.example first.' >&2; exit 1; }
 test -s secrets/tunnel-token || { echo 'Install secrets/tunnel-token first.' >&2; exit 1; }
 test -d data || { echo 'Create data/ owned by UID 65532 first.' >&2; exit 1; }
 
@@ -71,11 +70,9 @@ fi
 docker compose up -d --wait --wait-timeout 90 proxy cloudflared
 printf '%s\n' "$sum" > nginx/runtime/nginx.conf.sha256
 
-if [ -n "$live" ]; then
-  # The reload settles and the old slot's detached flights and background
-  # helpers, bounded by cacheSharedWorkTimeout (10 s), finish before it stops.
-  sleep 12
-fi
+# The reload settles and the old slot's detached flights and background
+# helpers, bounded by cacheSharedWorkTimeout (10 s), finish before it stops.
+[ -z "$live" ] || sleep 12
 echo "draining $other"
 docker compose stop "$other"
 

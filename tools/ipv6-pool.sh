@@ -19,7 +19,7 @@ if [ ! -s "$pool" ]; then
     echo "no global IPv6 address on $dev yet; the egress stays off" >&2
     exit 0
   fi
-  python3 -I - "$addr" "${IPV6_POOL_SIZE:-16}" > "$pool.tmp" <<'PY'
+  python3 -I - "$addr" 16 > "$pool.tmp" <<'PY'
 import ipaddress, secrets, sys
 net = ipaddress.IPv6Interface(sys.argv[1].split('/')[0] + '/64').network
 for _ in range(int(sys.argv[2])):

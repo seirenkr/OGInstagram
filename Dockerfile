@@ -6,9 +6,7 @@ WORKDIR /src
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/server . \
-    && mkdir /out/data
+RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/server .
 # Scans with the toolchain that builds the release, so a reachable stdlib or
 # module vulnerability fails the image build.
 RUN go vet ./... && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
@@ -25,20 +23,9 @@ RUN pnpm run build
 
 # The server is one static binary: no shell, package manager, or root user.
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS app
-COPY --from=build --chown=65532:65532 /out/data /data
 COPY --from=build /out/server /app/server
 COPY --from=web /src/web/dist /app/web
 ARG OG_VERSION=dev
-ARG OG_REVISION=unknown
-# OCI image annotations: https://github.com/opencontainers/image-spec/blob/main/annotations.md
-LABEL org.opencontainers.image.title=oginstagram \
-      org.opencontainers.image.version=$OG_VERSION \
-      org.opencontainers.image.revision=$OG_REVISION \
-      org.opencontainers.image.source=https://github.com/seirenkr/OGInstagram
 ENV DATA_DIR=/data ASSETS_DIR=/app/web OG_VERSION=$OG_VERSION
-WORKDIR /app
 USER 65532:65532
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/app/server", "--healthcheck"]
 ENTRYPOINT ["/app/server"]
