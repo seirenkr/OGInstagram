@@ -172,11 +172,13 @@ func TestVerificationFromAuthorJSON(t *testing.T) {
 	embed, err2 := parseEmbedPost(wrapEmbed(`{"gql_data":{"shortcode_media":{"shortcode":"ABC","is_video":false,"owner":{"username":"nasa"` + v + `},"display_url":"https://cdn/p.jpg"}}}`))
 	root, err3 := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa"` + v + `}}}`)
 	profile, err4 := parseEmbedProfile(wrapEmbed(`{"context":{"username":"instagram"` + v + `,"graphql_media":[]}}`))
+	quoted, err5 := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa","is_verified":"true"}}}`)
 	for name, ok := range map[string]bool{
 		"post GraphQL user":        err1 == nil && post.IsVerified,
 		"post embed owner":         err2 == nil && embed.IsVerified,
 		"profile RootContent user": err3 == nil && root.IsVerified,
 		"profile embed context":    err4 == nil && profile.IsVerified,
+		"only a JSON true counts":  err5 == nil && !quoted.IsVerified,
 	} {
 		if !ok {
 			t.Errorf("%s: is_verified not read", name)
