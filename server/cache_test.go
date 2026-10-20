@@ -32,10 +32,6 @@ const simpleEmbedImagePage = `<script>["PolarisEmbedSimple","init",[],[{"isRichE
 	`<div class="Caption"><a class="CaptionUsername" href="/x">instagram</a><br /><br />Hello &amp; <a href="/explore/tags/x">#world</a><br />line2` +
 	`<div class="CaptionComments"><a href="/x">View all 19 comments</a></div></div>`
 
-// trustedEmbedImagePage is simpleEmbedImagePage with media on an Instagram CDN host,
-// for tests whose parsed post must pass cached-model validation.
-var trustedEmbedImagePage = strings.ReplaceAll(simpleEmbedImagePage, "https://cdn/", "https://scontent.cdninstagram.com/")
-
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestCacheLimitsDistinctFetchesGlobally(t *testing.T) {
@@ -110,17 +106,6 @@ func TestCacheModelBoundaryNormalizesCDNHosts(t *testing.T) {
 	}
 }
 
-func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met before timeout")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 // graphQLPool answers the post query with an image post whose media URL is
 // https://scontent.cdninstagram.com/big.jpg?oe=1, counting the calls.
 func graphQLPool(calls *atomic.Int32) *SessionPool {
@@ -180,7 +165,7 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		"/offload/@User.Name/7",
 		"/offload/@bad!/avatar",
 	} {
-		if _, ok := canonicalOffloadPath(&url.URL{Path: path}); ok {
+		if _, _, ok := offloadRoute(&url.URL{Path: path}); ok {
 			t.Errorf("%s was canonicalized", path)
 		}
 		if _, ok := resolveGatewayRoute(httptest.NewRequest(http.MethodGet, "https://example.test"+path, nil)); ok {
@@ -193,212 +178,79 @@ func TestOffloadRejectsNonCanonicalSuffixBeforeLookup(t *testing.T) {
 		{"/offload/story/Alice/123/avatar", "/offload/story/alice/123/avatar"},
 		{"/offload/@User.Name/6", "/offload/@user.name/6"},
 	} {
-		if got, ok := canonicalOffloadPath(&url.URL{Path: tt.path}); got != tt.want || ok != (tt.want != "") {
-			t.Errorf("canonicalOffloadPath(%s) = %q, %v; want %q", tt.path, got, ok, tt.want)
+		if got, _, ok := offloadRoute(&url.URL{Path: tt.path}); got != tt.want || ok != (tt.want != "") {
+			t.Errorf("offloadRoute(%s) = %q, %v; want %q", tt.path, got, ok, tt.want)
 		}
 	}
 }
 
-func TestCacheLeaderCancellationDoesNotPoisonSharedWork(t *testing.T) {
-	c := newPersistentCache[int](nil, "test", make(chan struct{}, 1), 1<<20)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	var fetches atomic.Int32
-	fetch := func(fetchCtx context.Context) (int, time.Duration, bool, *AppError) {
-		fetches.Add(1)
-		close(started)
-		select {
-		case <-release:
+func TestCacheFlightOutlivesItsLeader(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		type contextKey struct{}
+		c := newPersistentCache[int](nil, "test", make(chan struct{}, 1), 1<<20)
+		release := make(chan struct{})
+		defer close(release)
+		var fetches atomic.Int32
+		fetch := func(fetchCtx context.Context) (int, time.Duration, bool, *AppError) {
+			fetches.Add(1)
+			if deadline, ok := fetchCtx.Deadline(); fetchCtx.Value(contextKey{}) != "request-id" || !ok || time.Until(deadline) != c.workTimeout {
+				t.Error("flight lost the leader's context value or inherited its deadline")
+			}
+			<-release
 			return 7, time.Hour, true, nil
-		case <-fetchCtx.Done():
-			return 0, 0, false, contextAppError(fetchCtx)
 		}
-	}
 
-	leaderCtx, cancelLeader := context.WithCancel(context.Background())
-	leaderDone := make(chan *AppError, 1)
-	go func() {
-		_, appErr := c.get(leaderCtx, "shared", nil, fetch)
-		leaderDone <- appErr
-	}()
-	<-started
-	waiterDone := make(chan struct {
-		value int
-		err   *AppError
-	}, 1)
-	go func() {
-		value, appErr := c.get(context.Background(), "shared", nil, fetch)
-		waiterDone <- struct {
-			value int
-			err   *AppError
-		}{value, appErr}
-	}()
-	cancelLeader()
-	select {
-	case appErr := <-leaderDone:
-		if appErr == nil || appErr.Status != 499 || !appErr.Ephemeral {
-			t.Fatalf("cancelled leader error = %#v, want ephemeral 499", appErr)
+		leaderCtx, cancel := context.WithTimeout(context.WithValue(context.Background(), contextKey{}, "request-id"), 100*time.Millisecond)
+		defer cancel()
+		leader := make(chan *AppError, 1)
+		go func() {
+			_, appErr := c.get(leaderCtx, "shared", nil, fetch)
+			leader <- appErr
+		}()
+		synctest.Wait()
+		waiter := make(chan int, 1)
+		go func() {
+			value, appErr := c.get(context.Background(), "shared", nil, fetch)
+			if appErr != nil {
+				t.Errorf("waiter error = %#v", appErr)
+			}
+			waiter <- value
+		}()
+		synctest.Wait()
+		if appErr := <-leader; appErr == nil || appErr.Status != http.StatusGatewayTimeout {
+			t.Fatalf("leader error = %#v, want 504", appErr)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("cancelled leader did not return promptly")
-	}
-	close(release)
-
-	select {
-	case result := <-waiterDone:
-		if result.err != nil || result.value != 7 {
-			t.Fatalf("waiter result = (%d, %#v), want (7, nil)", result.value, result.err)
+		release <- struct{}{}
+		if value := <-waiter; value != 7 {
+			t.Fatalf("waiter value = %d, want 7", value)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("waiter did not receive shared result")
-	}
-	if got := fetches.Load(); got != 1 {
-		t.Fatalf("origin fetches = %d, want one shared fetch", got)
-	}
-}
-
-func TestCacheLeaderDeadlineDoesNotBoundSharedWork(t *testing.T) {
-	type contextKey struct{}
-	const contextValue = "request-id"
-
-	c := newPersistentCache[int](nil, "test", make(chan struct{}, 1), 1<<20)
-	c.workTimeout = time.Second
-	started := make(chan *AppError, 1)
-	release := make(chan struct{})
-	var fetches atomic.Int32
-	fetch := func(fetchCtx context.Context) (int, time.Duration, bool, *AppError) {
-		fetches.Add(1)
-		if got := fetchCtx.Value(contextKey{}); got != contextValue {
-			appErr := ephemeralErr(500, errorCodeUpstream, "request context value was not preserved")
-			started <- appErr
-			return 0, 0, false, appErr
+		if value, appErr := c.get(context.Background(), "shared", nil, fetch); appErr != nil || value != 7 || fetches.Load() != 1 {
+			t.Fatalf("cached get = (%d, %#v) after %d fetches, want (7, nil) after 1", value, appErr, fetches.Load())
 		}
-		deadline, ok := fetchCtx.Deadline()
-		if !ok || time.Until(deadline) < 500*time.Millisecond {
-			appErr := ephemeralErr(500, errorCodeUpstream, "shared work inherited the leader deadline")
-			started <- appErr
-			return 0, 0, false, appErr
-		}
-		started <- nil
-		select {
-		case <-release:
-			return 11, time.Hour, true, nil
-		case <-fetchCtx.Done():
-			return 0, 0, false, contextAppError(fetchCtx)
-		}
-	}
-
-	parent := context.WithValue(context.Background(), contextKey{}, contextValue)
-	leaderCtx, cancelLeader := context.WithTimeout(parent, 100*time.Millisecond)
-	defer cancelLeader()
-	leaderDone := make(chan *AppError, 1)
-	go func() {
-		_, appErr := c.get(leaderCtx, "deadline", nil, fetch)
-		leaderDone <- appErr
-	}()
-	if appErr := <-started; appErr != nil {
-		t.Fatal(appErr.PublicMessage)
-	}
-	waiterDone := make(chan struct {
-		value int
-		err   *AppError
-	}, 1)
-	go func() {
-		value, appErr := c.get(context.Background(), "deadline", nil, fetch)
-		waiterDone <- struct {
-			value int
-			err   *AppError
-		}{value, appErr}
-	}()
-	select {
-	case appErr := <-leaderDone:
-		if appErr == nil || appErr.Status != http.StatusGatewayTimeout {
-			t.Fatalf("deadline leader error = %#v, want 504", appErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("deadline leader did not return promptly")
-	}
-	close(release)
-	select {
-	case result := <-waiterDone:
-		if result.err != nil || result.value != 11 {
-			t.Fatalf("waiter result = (%d, %#v), want (11, nil)", result.value, result.err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("waiter did not receive work after leader deadline")
-	}
-	if got := fetches.Load(); got != 1 {
-		t.Fatalf("origin fetches = %d, want one shared fetch", got)
-	}
-}
-
-func TestCacheAbandonedFlightCompletesAndWarmsCache(t *testing.T) {
-	c := newPersistentCache[int](nil, "test", make(chan struct{}, 1), 1<<20)
-	started := make(chan struct{})
-	release := make(chan struct{})
-	var fetches atomic.Int32
-	fetch := func(fetchCtx context.Context) (int, time.Duration, bool, *AppError) {
-		fetches.Add(1)
-		close(started)
-		select {
-		case <-release:
-			return 9, time.Hour, true, nil
-		case <-fetchCtx.Done():
-			return 0, 0, false, contextAppError(fetchCtx)
-		}
-	}
-
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	firstDone := make(chan *AppError, 1)
-	go func() {
-		_, appErr := c.get(requestCtx, "abandoned", nil, fetch)
-		firstDone <- appErr
-	}()
-	<-started
-	cancelRequest()
-	if appErr := <-firstDone; appErr == nil || appErr.Status != 499 {
-		t.Fatalf("cancelled request error = %#v, want 499", appErr)
-	}
-
-	close(release)
-	waitUntil(t, time.Second, func() bool {
-		c.flightMu.Lock()
-		defer c.flightMu.Unlock()
-		return len(c.flight) == 0
 	})
-
-	value, appErr := c.get(context.Background(), "abandoned", nil, fetch)
-	if appErr != nil || value != 9 {
-		t.Fatalf("warmed get = (%d, %#v), want (9, nil)", value, appErr)
-	}
-	if got := fetches.Load(); got != 1 {
-		t.Fatalf("origin fetches = %d, want one completed shared fetch", got)
-	}
 }
 
 func TestCacheSemaphoreWaitHonorsSharedWorkDeadline(t *testing.T) {
-	slots := make(chan struct{}, 1)
-	slots <- struct{}{}
-	c := newPersistentCache[int](nil, "test", slots, 1<<20)
-	c.workTimeout = 40 * time.Millisecond
-	var fetches atomic.Int32
+	synctest.Test(t, func(t *testing.T) {
+		slots := make(chan struct{}, 1)
+		slots <- struct{}{}
+		c := newPersistentCache[int](nil, "test", slots, 1<<20)
+		c.workTimeout = 40 * time.Millisecond
+		var fetches atomic.Int32
 
-	_, appErr := c.get(context.Background(), "blocked", nil, func(context.Context) (int, time.Duration, bool, *AppError) {
-		fetches.Add(1)
-		return 1, time.Hour, true, nil
+		_, appErr := c.get(context.Background(), "blocked", nil, func(context.Context) (int, time.Duration, bool, *AppError) {
+			fetches.Add(1)
+			return 1, time.Hour, true, nil
+		})
+		if appErr == nil || appErr.Status != http.StatusGatewayTimeout || !appErr.Ephemeral {
+			t.Fatalf("blocked request error = %#v, want ephemeral 504", appErr)
+		}
+		synctest.Wait()
+		<-slots
+		if got := fetches.Load(); got != 0 {
+			t.Fatalf("origin fetches = %d, want 0", got)
+		}
 	})
-	if appErr == nil || appErr.Status != http.StatusGatewayTimeout || !appErr.Ephemeral {
-		t.Fatalf("blocked request error = %#v, want ephemeral 504", appErr)
-	}
-	waitUntil(t, time.Second, func() bool {
-		c.flightMu.Lock()
-		defer c.flightMu.Unlock()
-		return len(c.flight) == 0
-	})
-	<-slots
-	if got := fetches.Load(); got != 0 {
-		t.Fatalf("origin fetches = %d, want 0", got)
-	}
 }
 
 func TestCacheNeverStoresStatus499(t *testing.T) {
@@ -420,8 +272,7 @@ func TestCacheNeverStoresStatus499(t *testing.T) {
 }
 
 func TestPersistentCacheDetachesStringsAndCapsEntries(t *testing.T) {
-	c := newPersistentCache[Post](nil, "post", make(chan struct{}, 1), 1<<20)
-	c.maxEntries = 2
+	c := newPersistentCache[Post](nil, "post", make(chan struct{}, 1), 1<<30)
 
 	backing := strings.Repeat("x", 1<<20)
 	caption := backing[:64]
@@ -436,18 +287,14 @@ func TestPersistentCacheDetachesStringsAndCapsEntries(t *testing.T) {
 		t.Fatal("cached caption still aliases the large upstream response string")
 	}
 
-	for _, shortcode := range []string{"Second_2", "Third_3"} {
-		post := validTestPost(shortcode, shortcode)
-		if _, appErr := c.get(context.Background(), shortcode, nil, func(context.Context) (Post, time.Duration, bool, *AppError) {
-			return post, time.Hour, true, nil
-		}); appErr != nil {
-			t.Fatalf("get(%q) error = %#v", shortcode, appErr)
-		}
+	for i := range persistentLocalEntryCap {
+		shortcode := "Post_" + strconv.Itoa(i)
+		c.storeLocal(shortcode, &cacheEntry[Post]{value: validTestPost(shortcode, shortcode), expiresAt: time.Now().Add(time.Hour)})
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if got := len(c.entries); got != 2 {
-		t.Fatalf("local entries = %d, want hard cap of 2", got)
+	if got := len(c.entries); got != persistentLocalEntryCap {
+		t.Fatalf("local entries = %d, want hard cap of %d", got, persistentLocalEntryCap)
 	}
 	if _, exists := c.entries[first.Shortcode]; exists {
 		t.Fatal("oldest entry was not evicted at the entry-count cap")
@@ -537,7 +384,7 @@ func TestPutAfterFlightWaitsForRunningLookup(t *testing.T) {
 		c := newPersistentCache[int](nil, "test", nil, 1<<20)
 		call := &flightCall[int]{done: make(chan struct{})}
 		c.flight["k"] = call
-		go c.putAfterFlight(context.Background(), "k", 2, time.Hour, false)
+		go c.putAfterFlight(context.Background(), "k", 2, time.Hour)
 		synctest.Wait()
 		if _, ok := c.localGet("k"); ok {
 			t.Fatal("put ran before the running lookup finished")

@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,14 +22,14 @@ type igAnswer struct {
 	body   string
 }
 
-// fakeIG answers the post sources by path and counts the calls. A zero answer
-// means the source must not be asked.
+// fakeIG answers the post and profile sources by path and counts the calls. A
+// zero answer means the source must not be asked.
 type fakeIG struct {
-	t                         *testing.T
-	gql                       string
-	gqlDelay                  time.Duration
-	ruling, oembed, og, embed igAnswer
-	calls                     sync.Map // source -> *atomic.Int32
+	t                              *testing.T
+	gql                            string
+	gqlDelay                       time.Duration
+	ruling, oembed, og, embed, api igAnswer
+	calls                          sync.Map // source -> *atomic.Int32
 }
 
 func (f *fakeIG) count(source string) int32 {
@@ -47,7 +48,9 @@ func (f *fakeIG) pool() *SessionPool {
 		case r.URL.Path == "/graphql/query":
 			time.Sleep(f.gqlDelay)
 			source, answer = "gql", igAnswer{200, f.gql}
-		case strings.HasSuffix(r.URL.Path, "/embed/captioned/"):
+		case r.URL.Path == "/api/graphql/":
+			source, answer = "api", f.api
+		case strings.Contains(r.URL.Path, "/embed/"):
 			source, answer = "embed", f.embed
 		case r.URL.Path == "/p/ABC123/":
 			source, answer = "og", f.og
@@ -467,7 +470,7 @@ func TestFetchRequestCompressedBodyLimits(t *testing.T) {
 			if err == nil || !strings.Contains(err.PublicMessage, "too large") {
 				t.Fatal("decoded body limit was not enforced")
 			}
-			_, body, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodGet, url: "https://example.com/", interpret: statusOnly, cut: true})
+			_, body, err := fetchRequest(context.Background(), client, fetchSpec{method: http.MethodGet, url: "https://example.com/", interpret: statusOnly, maxBytes: maxResponseBytes})
 			if err != nil || len(body) != maxResponseBytes {
 				t.Fatalf("cut body = %d bytes, %v", len(body), err)
 			}
@@ -554,7 +557,7 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 					return f.pool().sessions[0].client.Transport.RoundTrip(r)
 				})}
 				v6Pool := func() *SessionPool {
-					return &SessionPool{proxyURL: func() string { return "http://x@egress" }, sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
+					return &SessionPool{proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User("x"), Host: "egress"} }, sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
 				}
 				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
 				a.v6, a.v6Pages = v6Pool(), v6Pool()

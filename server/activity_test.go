@@ -101,7 +101,7 @@ func TestActivityContentNegotiation(t *testing.T) {
 			w := apGet(g, http.MethodGet, tc.url, accept)
 			body := w.Body.String()
 			if w.Code != http.StatusOK || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") || w.Header().Get("Vary") != "Accept" ||
-				w.Header().Get("Link") != apLinks(tc.id, tc.actor) || !strings.Contains(body, strings.Join(apLinkTags(tc.id, tc.actor), "")) {
+				w.Header().Get("Link") != apLinks(tc.id, asMediaType, tc.actor) || !strings.Contains(body, strings.Join(apLinkTags(tc.id, tc.actor), "")) {
 				t.Fatalf("%s with %q = %d %v %s", tc.url, accept, w.Code, w.Header(), body)
 			}
 			// Profiles never reach the edge cache; post and story cards do.

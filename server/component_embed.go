@@ -42,10 +42,10 @@ type discordComponent struct {
 }
 
 type discordCard struct {
-	name, username, authorURL, avatar, origin, caption string
-	stats, footer, verifiedEmoji                       string
-	media                                              []string
-	gallery, support, verified                         bool
+	name, username, avatar, origin, caption string
+	stats, footer, verifiedEmoji            string
+	media                                   []string
+	gallery, support, verified              bool
 }
 
 // The support button rides on a random tenth of renders; ?e=s pins it for
@@ -57,12 +57,11 @@ func discordSupport(req *http.Request) bool {
 // cardResp serves an HTML card. id names its AS2 object, actor the author
 // (empty for an actor's own card); error cards pass neither.
 func cardResp(document, id, actor string) resp {
-	r := htmlResp(http.StatusOK, document)
-	r.headers["Vary"] = "Accept"
+	r := resp{status: http.StatusOK, body: []byte(document), headers: map[string]string{
+		"Content-Type": "text/html; charset=utf-8", "Vary": "Accept", "X-OGInstagram-Embed": "opengraph"}}
 	if id != "" {
-		r.headers["Link"] = apLinks(id, actor)
+		r.headers["Link"] = apLinks(id, asMediaType, actor)
 	}
-	r.headers["X-OGInstagram-Embed"] = "opengraph"
 	if strings.Contains(document, `id="discord:component-embed"`) {
 		r.headers["X-OGInstagram-Embed"] = "component"
 	}
@@ -152,11 +151,8 @@ func discordCaption(text string, spans []linkSpan, end int) string {
 }
 
 func validDiscordEmojiID(id string) bool {
-	if len(id) < 17 || len(id) > 20 || strings.Trim(id, "0123456789") != "" {
-		return false
-	}
 	n, err := strconv.ParseUint(id, 10, 64)
-	return err == nil && n != 0
+	return len(id) >= 17 && len(id) <= 20 && err == nil && n != 0
 }
 
 func discordEmoji(name, id string) string {
@@ -180,7 +176,7 @@ func discordFooter(created time.Time, emojiID string) string {
 func (a *App) postComponentEmbed(baseURL string, post Post, postType string, mediaIndex int, specified, gallery, support bool) string {
 	index := mediaIndexFor(post, mediaIndex)
 	card := discordCard{
-		name: post.FullName, username: post.Username, authorURL: profileURL(post.Username),
+		name: post.FullName, username: post.Username,
 		avatar: a.postAvatarURL(baseURL, post), origin: instagramPostURL(postType, post.Shortcode, index, specified),
 		caption: post.Caption, stats: discordText(truncateFlat(post.StatsLine, 128)),
 		footer: discordFooter(post.CreatedAt, a.cfg.DiscordBrandEmojiID), gallery: gallery, support: support,
@@ -190,16 +186,13 @@ func (a *App) postComponentEmbed(baseURL string, post Post, postType string, med
 		if !specified || i == index {
 			card.media = append(card.media, a.offloadURL(baseURL, post.Shortcode, i, false))
 		}
-		if len(card.media) == 10 {
-			break
-		}
 	}
 	return componentEmbedScript(card)
 }
 
 func (a *App) profileComponentEmbed(baseURL string, p Profile, gallery, support bool) string {
 	card := discordCard{
-		name: p.FullName, username: p.Username, authorURL: profileURL(p.Username),
+		name: p.FullName, username: p.Username,
 		avatar: a.profileAvatarURL(baseURL, p), origin: profileURL(p.Username),
 		caption: p.Biography, stats: discordText(profileStatsLine(p)),
 		footer: discordFooter(time.Time{}, a.cfg.DiscordBrandEmojiID), gallery: gallery, support: support,
@@ -208,7 +201,7 @@ func (a *App) profileComponentEmbed(baseURL string, p Profile, gallery, support 
 	if p.IsPrivate {
 		card.stats += "\n-# " + discordText(profilePrivateNotice)
 	}
-	for i := range p.RecentMedia[:min(len(p.RecentMedia), 10)] {
+	for i := range p.RecentMedia {
 		card.media = append(card.media, a.profileMediaOffloadURL(baseURL, p.Username, i))
 	}
 	if gallery && len(card.media) == 0 {
@@ -219,7 +212,7 @@ func (a *App) profileComponentEmbed(baseURL string, p Profile, gallery, support 
 
 func (a *App) storyComponentEmbed(baseURL string, story Story, gallery, support bool) string {
 	return componentEmbedScript(discordCard{
-		name: story.FullName, username: story.Username, authorURL: profileURL(story.Username),
+		name: story.FullName, username: story.Username,
 		avatar: a.storyAvatarURL(baseURL, story), origin: storyOriginURL(story.Username, story.ID),
 		caption: story.Caption, footer: discordFooter(story.CreatedAt, a.cfg.DiscordBrandEmojiID), gallery: gallery, support: support,
 		verified: story.IsVerified, verifiedEmoji: discordEmoji("verified", a.cfg.DiscordVerifiedEmojiID),
@@ -240,9 +233,6 @@ func discordJSON(v any) []byte {
 }
 
 func componentEmbedScript(card discordCard) string {
-	if !discordMediaURL(card.origin) || !discordMediaURL(card.authorURL) {
-		return ""
-	}
 	var items []discordGalleryItem
 	for _, mediaURL := range card.media {
 		if !discordMediaURL(mediaURL) {
@@ -264,7 +254,7 @@ func componentEmbedScript(card discordCard) string {
 	// Instagram handles are [A-Za-z0-9._]{1,30}: nothing in them can break a
 	// masked link, so a valid handle is linked as is.
 	if validUsername(card.username) {
-		author += "\n[@" + card.username + "](" + card.authorURL + ")"
+		author += "\n[@" + card.username + "](" + profileURL(card.username) + ")"
 	}
 	if !card.gallery && card.stats != "" {
 		// A third line fills the fixed-size avatar thumbnail's height.

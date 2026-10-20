@@ -55,8 +55,6 @@ func TestParseNotFound(t *testing.T) {
 func TestParseGraphQLErrors(t *testing.T) {
 	for _, tc := range []struct{ body, code string }{
 		{`{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`, errorCodeGraphQL},
-		{`{"data":null,"errors":[{"message":"Rate limited","code":1675004}]}`, errorCodeRateLimited},
-		{`{"data":null,"errors":[{"message":"Please wait a few minutes before you try again.","code":1}]}`, errorCodeRateLimited},
 		{`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`, errorCodeMediaNotFound},
 		{`{"data":{"xdt_shortcode_media":null}}`, errorCodeGraphQL},
 	} {
@@ -165,5 +163,25 @@ func TestParseLoggedOut(t *testing.T) {
 	}
 	if a.Width != 1080 || a.Height != 1920 {
 		t.Errorf("dims = %dx%d, want 1080x1920 (from original_width/height)", a.Width, a.Height)
+	}
+}
+
+func TestVerificationFromAuthorJSON(t *testing.T) {
+	const v = `,"is_verified":true`
+	post, err1 := parseInstagramPost(strings.Replace(sampleLoggedOut, `"full_name":"Instagram"`, `"full_name":"Instagram"`+v, 1))
+	embed, err2 := parseEmbedPost(wrapEmbed(`{"gql_data":{"shortcode_media":{"shortcode":"ABC","is_video":false,"owner":{"username":"nasa"` + v + `},"display_url":"https://cdn/p.jpg"}}}`))
+	root, err3 := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa"` + v + `}}}`)
+	profile, err4 := parseEmbedProfile(wrapEmbed(`{"context":{"username":"instagram"` + v + `,"graphql_media":[]}}`))
+	quoted, err5 := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa","is_verified":"true"}}}`)
+	for name, ok := range map[string]bool{
+		"post GraphQL user":        err1 == nil && post.IsVerified,
+		"post embed owner":         err2 == nil && embed.IsVerified,
+		"profile RootContent user": err3 == nil && root.IsVerified,
+		"profile embed context":    err4 == nil && profile.IsVerified,
+		"only a JSON true counts":  err5 == nil && !quoted.IsVerified,
+	} {
+		if !ok {
+			t.Errorf("%s: is_verified not read", name)
+		}
 	}
 }

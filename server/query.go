@@ -16,27 +16,19 @@ func parseCanonicalDecimal(raw string) (int, bool) {
 	return int(n), true
 }
 
-func queryInt(values url.Values, key string) (int, bool) {
-	if !values.Has(key) {
-		return 0, false
-	}
-	// Present but empty or non-canonical selects 0.
-	n, _ := parseCanonicalDecimal(values.Get(key))
-	return n, true
-}
-
 func mediaSelection(values url.Values, pathIndex int) (index int, specified bool) {
 	if pathIndex >= 0 {
 		return boundedMediaIndex(pathIndex - 1), true
 	}
-	if n, ok := queryInt(values, "img_index"); ok {
-		return boundedMediaIndex(n - 1), true
-	}
-	if n, ok := queryInt(values, "index"); ok {
-		return boundedMediaIndex(n), true
-	}
-	if n, ok := queryInt(values, "order"); ok {
-		return boundedMediaIndex(n), true
+	for _, q := range []struct {
+		key  string
+		base int
+	}{{"img_index", 1}, {"index", 0}, {"order", 0}} {
+		if values.Has(q.key) {
+			// Present but empty or non-canonical selects 0.
+			n, _ := parseCanonicalDecimal(values.Get(q.key))
+			return boundedMediaIndex(n - q.base), true
+		}
 	}
 	return 0, false
 }

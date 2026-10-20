@@ -18,13 +18,11 @@ const rulingAsbdID = "359341"
 
 // mediaMissing asks Instagram's content-ruling endpoint (~200 B) whether a post
 // exists for logged-out viewers. Only a definite "Media cannot be found" counts
-// as missing; answered is false when errors or timeouts left the question open.
-// ungated means an explicit "ok" without a gating mark: no gate, or an
-// account-level age limit, whose crawler page carries no Open Graph tags.
-func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answered, ungated bool) {
+// as missing.
+func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
 	pk := shortcodePK(shortcode)
 	if pk == nil {
-		return false, false, false
+		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, rulingTimeout)
 	defer cancel()
@@ -46,11 +44,7 @@ func (a *App) mediaMissing(ctx context.Context, shortcode string) (missing, answ
 			return statusOnly(status, raw)
 		},
 	})
-	if ferr != nil {
-		return false, false, false
-	}
-	return gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found", true,
-		gjson.Get(out, "status").String() == "ok" && gjson.Get(out, "gating_type_thrift").Int() == 0
+	return ferr == nil && gjson.Get(out, "status").String() == "fail" && gjson.Get(out, "message").String() == "Media cannot be found"
 }
 
 func embedContextJSON(page string) (string, *AppError) {
@@ -85,7 +79,7 @@ func (a *App) fetchPostOG(ctx context.Context, shortcode string) (Post, *AppErro
 	defer cancel()
 	// The tags sit in the head. A tagless page from IPv6 is retried through DC.
 	spec := pageSpec("og_page", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/")
-	spec.cut, spec.maxBytes = true, ogPageBytes
+	spec.maxBytes = ogPageBytes
 	spec.dcRecheck = func(page string) bool { return !strings.Contains(page, `property="og:url"`) }
 	_, page, err := a.fetchViaProxy(ctx, spec)
 	if err != nil {
@@ -240,22 +234,13 @@ func parseEmbedSimple(page string) (Post, *AppError) {
 		h = int(float64(w) * ratio / 100)
 	}
 
-	att := Attachment{
-		Kind:      "image",
-		URL:       imgURL,
-		Thumbnail: imgURL,
-		Width:     w,
-		Height:    h,
-	}
-
 	return Post{
 		Shortcode:   firstGroup(simplePermalinkRE, page),
 		Username:    username,
-		FullName:    "",
 		ProfilePic:  html.UnescapeString(cmp.Or(firstGroup(simpleAvatarRE, page), firstGroup(simpleCollabAvatarRE, page))),
 		Caption:     simpleCaption(page),
 		StatsLine:   statsLine("", parseCount(firstGroup(simpleLikesRE, page)), simpleCommentCount(page)),
-		Attachments: []Attachment{att},
+		Attachments: []Attachment{{Kind: "image", URL: imgURL, Thumbnail: imgURL, Width: w, Height: h}},
 	}, nil
 }
 

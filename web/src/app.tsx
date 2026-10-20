@@ -25,7 +25,7 @@ const StatusCharts = React.lazy(() => import("./status.tsx"));
 
 // Locale strings plus the fields tools/build-home.mjs merges in.
 type AppData = typeof en & {
-  brand: string; version: string; host: string; lang: string; turnstileSiteKey: string; supportUrl: string; githubUrl: string;
+  brand: string; version: string; host: string; lang: string; turnstileSiteKey: string;
 };
 
 const data = JSON.parse(document.getElementById("app-data")!.textContent!) as AppData;
@@ -35,7 +35,6 @@ const languages = { en: "English", es: "Español", fr: "Français", ja: "日本�
 class ChartBoundary extends React.Component<React.PropsWithChildren, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
-  componentDidCatch(error: unknown) { console.error("status chart failed", error); }
   render() {
     return this.state.failed
       ? <Banner icon={<WarningCircle weight="fill" />} variant="error" title={data.js.statsUnavailable} />
@@ -186,8 +185,8 @@ export function App() {
             </h1>
             <div className="hero-item hero-copy mt-5 max-w-xl [&>*]:leading-[1.68]"><Text size="lg" variant="secondary">{data.tagline}</Text></div>
             <div className="hero-item hero-actions mt-6 flex flex-wrap justify-center gap-3 lg:justify-start">
-              {data.supportUrl ? <span className="motion-lift inline-flex"><LinkButton href={data.supportUrl} external variant="primary" icon={Coffee}>{data.supportCta}</LinkButton></span> : null}
-              {data.githubUrl ? <span className="motion-lift inline-flex"><LinkButton href={data.githubUrl} external variant="secondary" icon={GithubLogo} translate="no">GitHub</LinkButton></span> : null}
+              <span className="motion-lift inline-flex"><LinkButton href="https://ko-fi.com/seirenkr" external variant="primary" icon={Coffee}>{data.supportCta}</LinkButton></span>
+              <span className="motion-lift inline-flex"><LinkButton href="https://github.com/seirenkr/OGInstagram" external variant="secondary" icon={GithubLogo} translate="no">GitHub</LinkButton></span>
             </div>
           </div>
           <div className="hero-preview relative w-full min-w-0 max-lg:max-w-sm">

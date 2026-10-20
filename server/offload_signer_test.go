@@ -122,7 +122,7 @@ func TestOffloadAuthorizeRejectsQueryMutations(t *testing.T) {
 	resigned := func(expires int64) string {
 		return capability(v, kid, strconv.FormatInt(expires, 10), signer.signature(path, expires))
 	}
-	ttl := int64(offloadAcceptTTL / time.Second)
+	ttl := int64(offloadCapabilityTTL / time.Second)
 	for _, tt := range []struct {
 		name, query string
 		want        bool

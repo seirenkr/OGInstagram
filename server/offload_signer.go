@@ -2,17 +2,13 @@ package main
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,9 +19,7 @@ const (
 	offloadSignatureVersion = "2"
 	offloadSigningKeySize   = 32
 
-	offloadCapabilityTTL = 14 * 24 * time.Hour
-	// Accepts the next release's 30-day links, so that release can roll back here.
-	offloadAcceptTTL = 30 * 24 * time.Hour
+	offloadCapabilityTTL = 30 * 24 * time.Hour
 )
 
 var offloadKeyIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
@@ -38,49 +32,6 @@ type offloadSigner struct {
 type offloadSigningConfig struct {
 	Active string            `json:"active"`
 	Keys   map[string]string `json:"keys"`
-}
-
-// Without OFFLOAD_SIGNING_KEYS, the keyring generated on first start persists in
-// DATA_DIR, so issued links stay valid across restarts and deploys.
-func loadOrCreateOffloadKeys(dataDir string) (string, error) {
-	path := filepath.Join(dataDir, "offload-signing-keys.json")
-	if b, err := os.ReadFile(path); !errors.Is(err, fs.ErrNotExist) {
-		return string(b), err
-	}
-	key := make([]byte, offloadSigningKeySize)
-	rand.Read(key)
-	raw := `{"active":"local","keys":{"local":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
-	// Write a complete 0600 temp file, then link it into place: a crash never
-	// leaves a partial keyring, and a concurrent creator's keyring wins intact.
-	tmp, err := os.CreateTemp(dataDir, ".offload-signing-keys-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err = tmp.WriteString(raw); err == nil {
-		err = tmp.Sync()
-	}
-	if err = errors.Join(err, tmp.Close()); err != nil {
-		return "", err
-	}
-	if err = os.Link(tmp.Name(), path); errors.Is(err, fs.ErrExist) {
-		b, err := os.ReadFile(path)
-		return string(b), err
-	}
-	return raw, err
-}
-
-// backupOffloadKeys copies the generated keyring, if any, into a backup so
-// restored data keeps already shared links valid.
-func backupOffloadKeys(dataDir, destinationDir string) error {
-	b, err := os.ReadFile(filepath.Join(dataDir, "offload-signing-keys.json"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(destinationDir, "offload-signing-keys.json"), b, 0o600)
 }
 
 func parseOffloadSigner(raw string) (offloadSigner, error) {
@@ -152,7 +103,7 @@ func (s offloadSigner) url(baseURL, path string, thumbnail bool) string {
 }
 
 func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
-	path, ok := canonicalOffloadPath(u)
+	path, _, ok := offloadRoute(u)
 	if !ok {
 		return false
 	}
@@ -175,7 +126,7 @@ func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
 		return false
 	}
 	expires, err := strconv.ParseInt(exp, 10, 64)
-	if err != nil || strconv.FormatInt(expires, 10) != exp || expires <= now.Unix() || expires > now.Unix()+int64(offloadAcceptTTL/time.Second) {
+	if err != nil || strconv.FormatInt(expires, 10) != exp || expires <= now.Unix() || expires > now.Unix()+int64(offloadCapabilityTTL/time.Second) {
 		return false
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(sig)

@@ -16,10 +16,6 @@ const urlChars = `[^\s\p{Z}\p{Cc}\p{Cf}<>。、，！？「」『』【】（）
 var (
 	schemeLinkRE = regexp.MustCompile(`(?i)\bhttps?://` + urlChars + `+|\bmailto:` + urlChars + `+`)
 
-	emailRE = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}\b`)
-
-	domainRE = regexp.MustCompile(`(?i)\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]` + urlChars + `*)?`)
-
 	// A mention may not end in a dot; a hashtag needs a letter or digit.
 	mentionRE = regexp.MustCompile(`@[A-Za-z0-9._]*[A-Za-z0-9_]`)
 	hashtagRE = regexp.MustCompile(`#[\p{L}\p{M}\p{N}_]*[\p{L}\p{N}][\p{L}\p{M}\p{N}_]*`)
@@ -71,22 +67,6 @@ func detectLinks(text string) []linkSpan {
 		s, e := m[0], trimURLEnd(text, m[0], m[1])
 		add(s, e, text[s:e])
 	}
-	for _, m := range emailRE.FindAllStringIndex(text, -1) {
-		add(m[0], m[1], "mailto:"+text[m[0]:m[1]])
-	}
-	for _, m := range domainRE.FindAllStringIndex(text, -1) {
-		s, e := m[0], trimURLEnd(text, m[0], m[1])
-		if s > 0 && (text[s-1] == '@' || text[s-1] == '#') {
-			continue
-		}
-		if s >= 3 && text[s-3:s] == "://" {
-			continue
-		}
-		if !hasKnownTLD(text[s:e]) {
-			continue
-		}
-		add(s, e, "https://"+text[s:e])
-	}
 	for _, sp := range scanSigil(text, mentionRE, func(handle string) string { return instagramOrigin + "/" + handle }) {
 		if h := text[sp.start+1 : sp.end]; validUsername(h) && !strings.Contains(h, "..") {
 			add(sp.start, sp.end, sp.href)
@@ -100,23 +80,6 @@ func detectLinks(text string) []linkSpan {
 
 	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	return spans
-}
-
-func hasKnownTLD(candidate string) bool {
-	host := candidate
-	if i := strings.IndexAny(host, "/?#"); i >= 0 {
-		host = host[:i]
-	}
-	if i := strings.IndexByte(host, ':'); i >= 0 {
-		host = host[:i]
-	}
-	labels := strings.Split(host, ".")
-	if len(labels) < 2 {
-		return false
-	}
-	// No case folding: a capitalized last label ("day.Love", "Mr.Kim") is prose.
-	_, ok := tldSet[labels[len(labels)-1]]
-	return ok
 }
 
 var closingToOpening = map[rune]rune{')': '(', ']': '[', '}': '{'}

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -33,10 +34,7 @@ func TestProxyTransportResumesTLSAcrossClients(t *testing.T) {
 	})
 
 	for attempt := range 2 {
-		client, err := buildSessionClient("http://proxy.invalid:823", pool)
-		if err != nil {
-			t.Fatal(err)
-		}
+		client := buildSessionClient(&url.URL{Scheme: "http", Host: "proxy.invalid:823"}, pool)
 		transport := client.Transport.(*http.Transport)
 		transport.Proxy = nil
 		transport.TLSClientConfig.RootCAs = roots

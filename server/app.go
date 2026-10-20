@@ -32,7 +32,7 @@ type App struct {
 	helperSlots chan struct{} // helper calls outliving their flights
 	storyDoor   storySideDoor
 
-	gateNotices sync.Map // shortcode -> *gateNotice
+	gateNotices sync.Map // shortcode -> *AppError
 }
 
 func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
@@ -73,8 +73,8 @@ func (a *App) getPost(ctx context.Context, shortcode string, meta *fetchMeta) (P
 			logger(ctx).InfoContext(ctx, "partial post served at deadline")
 			return e.value, nil
 		}
-		if v, ok := a.gateNotices.Load(shortcode); ok && time.Now().Before(v.(*gateNotice).until) {
-			notice := v.(*gateNotice).err
+		if v, ok := a.gateNotices.Load(shortcode); ok {
+			notice := *v.(*AppError)
 			return Post{}, &notice
 		}
 	}
@@ -149,9 +149,6 @@ func (h *postHelper) wait(ctx context.Context) (Post, *AppError) {
 
 // asked: the helper finished and reached Instagram.
 func (h *postHelper) asked() bool {
-	if !h.begun.Load() {
-		return false
-	}
 	select {
 	case <-h.done:
 		return helperAsked(h.err)
@@ -204,7 +201,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	}()
 
 	sources := []stagedSource[Post]{
-		{name: "post_graphql", persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+		{name: "post_graphql", fetch: func(ctx context.Context) (Post, *AppError) {
 			_, body, gqlErr := a.fetchViaProxy(ctx, webLoggedOutSpec(shortcode))
 			if gqlErr != nil {
 				return Post{}, gqlErr
@@ -216,16 +213,16 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 			}
 			return valid(post, perr)
 		}},
-		{name: "post_embed", after: postHedgeDelay, persist: true, fetch: func(ctx context.Context) (Post, *AppError) {
+		{name: "post_embed", after: postHedgeDelay, fetch: func(ctx context.Context) (Post, *AppError) {
 			return valid(a.fetchPostEmbed(ctx, shortcode))
 		}},
 	}
 	if externalHelperPostImpl != nil {
-		sources = append(sources, stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, persist: true, fetch: helper.wait})
+		sources = append(sources, stagedSource[Post]{name: "post_helper", after: externalHelperHedgeDelay, fetch: helper.wait})
 	}
-	post, persist, err = stagedFetch(ctx, sources...)
+	post, err = stagedFetch(ctx, sources...)
 	if err == nil {
-		return post, postCacheTTL(post), persist, nil
+		return post, postCacheTTL(post), true, nil
 	}
 	if hidden.Load() {
 		return a.hiddenPost(ctx, shortcode, helper)
@@ -312,7 +309,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			switch {
 			case card.Shortcode != "":
 				partial = card
-				a.ogPosts.put(ctx, shortcode, card, min(postCacheTTL(card), partialPostTTL), false)
+				a.ogPosts.put(ctx, shortcode, card, min(postCacheTTL(card), partialPostTTL))
 				retryDC()
 			case cardErr.CardTitle != "":
 				gate = cardErr
@@ -326,15 +323,14 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 				}
 			case o.ok && o.status == http.StatusNotFound:
 				follow(func() {
-					missing, _, _ := a.mediaMissing(ctx, shortcode)
-					missingC <- missing
+					missingC <- a.mediaMissing(ctx, shortcode)
 				})
 			}
 		case og := <-ogC:
 			pending--
 			if og.Shortcode != "" {
 				partial = og
-				a.ogPosts.put(ctx, shortcode, og, min(postCacheTTL(og), partialPostTTL), false)
+				a.ogPosts.put(ctx, shortcode, og, min(postCacheTTL(og), partialPostTTL))
 			}
 		case post := <-dcC:
 			pending--
@@ -365,14 +361,9 @@ func gateOrRetry(err *AppError, helper *postHelper) *AppError {
 
 // publishGate keeps a gate notice for requests that hit their deadline first.
 func (a *App) publishGate(shortcode string, err *AppError) {
-	notice := &gateNotice{err: *err, until: time.Now().Add(partialPostTTL)}
-	a.gateNotices.Store(shortcode, notice)
-	time.AfterFunc(partialPostTTL, func() { a.gateNotices.CompareAndDelete(shortcode, notice) })
-}
-
-type gateNotice struct {
-	err   AppError
-	until time.Time
+	notice := *err
+	a.gateNotices.Store(shortcode, &notice)
+	time.AfterFunc(partialPostTTL, func() { a.gateNotices.CompareAndDelete(shortcode, &notice) })
 }
 
 func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) {
@@ -381,5 +372,5 @@ func (a *App) storeHelperPost(ctx context.Context, shortcode string, post Post) 
 	if post.CreatedAt.IsZero() {
 		post.CreatedAt = shortcodeTime(shortcode)
 	}
-	a.posts.putAfterFlight(ctx, shortcode, post, postCacheTTL(post), true)
+	a.posts.putAfterFlight(ctx, shortcode, post, postCacheTTL(post))
 }

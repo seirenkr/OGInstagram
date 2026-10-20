@@ -29,7 +29,7 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 	return a.stories.get(ctx, key, meta, func(fetchCtx context.Context) (Story, time.Duration, bool, *AppError) {
 		var sources []stagedSource[Story]
 		if pk, err := strconv.ParseUint(id, 10, 64); err == nil {
-			sources = append(sources, stagedSource[Story]{name: "story_graphql", persist: true, fetch: func(ctx context.Context) (Story, *AppError) {
+			sources = append(sources, stagedSource[Story]{name: "story_graphql", fetch: func(ctx context.Context) (Story, *AppError) {
 				spec := webLoggedOutSpec(pkShortcode(pk))
 				spec.operation = "story_graphql"
 				_, body, err := a.fetchViaProxy(ctx, spec)
@@ -51,14 +51,14 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 				return valid(story, perr)
 			}})
 		}
-		sources = append(sources, stagedSource[Story]{name: "story_helper", after: storyHelperHedgeDelay, persist: true, fetch: func(ctx context.Context) (Story, *AppError) {
+		sources = append(sources, stagedSource[Story]{name: "story_helper", after: storyHelperHedgeDelay, fetch: func(ctx context.Context) (Story, *AppError) {
 			return valid(externalHelperStoryImpl(a, ctx, username, id))
 		}})
 		if len(sources) == 1 {
 			sources[0].after = 0
 		}
-		story, persist, err := stagedFetch(fetchCtx, sources...)
-		return story, cacheTTLFromURLs(story.ProfilePic, story.Media.URL, story.Media.Thumbnail), persist, err
+		story, err := stagedFetch(fetchCtx, sources...)
+		return story, cacheTTLFromURLs(story.ProfilePic, story.Media.URL, story.Media.Thumbnail), true, err
 	})
 }
 
@@ -154,7 +154,7 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 		`<meta property="og:type" content="article">`,
 		`<meta property="article:author" content="`+instagramOrigin+"/"+html.EscapeString(story.Username)+`/">`,
 	)
-	h = append(h, dimensionTags("property", "og:image", media.Width, media.Height)...)
+	h = append(h, dimensionTags("og:image", media.Width, media.Height)...)
 	h = append(h, `<link rel="apple-touch-icon" href="`+html.EscapeString(a.storyAvatarURL(baseURL, story))+`">`)
 	if published := isoTime(story.CreatedAt); published != "" {
 		h = append(h, `<meta property="article:published_time" content="`+published+`">`, `<meta property="og:pubdate" content="`+published+`">`)

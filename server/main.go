@@ -3,18 +3,18 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +22,6 @@ import (
 
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "check the local server readiness")
-	backup := flag.String("backup", "", "write SQLite backups into a new destination directory")
 	egress := flag.Bool("egress", false, "serve the IPv6 egress proxy on EGRESS_SOCKET")
 	flag.Parse()
 	cfg := configFromEnv()
@@ -36,7 +35,7 @@ func main() {
 	}
 	if *healthcheck {
 		client := &http.Client{Timeout: 2 * time.Second}
-		r, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", cfg.Port))
+		r, err := client.Get("http://127.0.0.1:8080/readyz")
 		if err != nil {
 			os.Exit(1)
 		}
@@ -60,45 +59,29 @@ func main() {
 	}
 	defer store.Close()
 	cfg.Store = store
-	if *backup != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		err = store.Backup(ctx, *backup)
-		if err == nil {
-			err = backupOffloadKeys(cfg.DataDir, *backup)
-		}
-		if err != nil {
-			slog.Error("storage maintenance failed", "error", err)
-			os.Exit(1)
-		}
-		return
-	}
 	home, err := loadHomeTemplates(cfg.AssetsDir)
 	if err != nil {
 		slog.Error("frontend assets unavailable", "error", err)
 		os.Exit(1)
 	}
-	keys, keySource := cfg.OffloadSigningKeys, "env"
-	if keys == "" {
-		keySource = "file"
-		if keys, err = loadOrCreateOffloadKeys(cfg.DataDir); err != nil {
-			slog.Error("cannot load offload signing keys", "source", keySource, "error", err)
-			os.Exit(1)
-		}
+	keys := cfg.OffloadSigningKeys
+	if keys == "" { // development only: links die with the process
+		key := make([]byte, offloadSigningKeySize)
+		rand.Read(key)
+		keys = `{"active":"dev","keys":{"dev":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
 	}
 	signer, err := parseOffloadSigner(keys)
 	if err != nil {
-		slog.Error("invalid offload signing keys", "source", keySource, "error", err)
+		slog.Error("invalid offload signing keys", "error", err)
 		os.Exit(1)
 	}
 	app := newApp(cfg, newSessionPool(cfg), signer)
 
 	slog.Info("server starting", "service", serviceName, "version", cfg.Version,
-		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "port", cfg.Port,
-		"offload_keys", keySource, "offload_kid", signer.active)
+		"proxies", len(app.pool.sessions), "ipv6_egress", cfg.EgressSocket != "", "offload_kid", signer.active)
 
 	srv := &http.Server{
-		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.Port),
+		Addr:              "0.0.0.0:8080",
 		Handler:           newGateway(cfg, app, home),
 		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -182,9 +165,6 @@ type resp struct {
 	mediaURL string
 }
 
-func htmlResp(status int, body string) resp {
-	return resp{status: status, headers: map[string]string{"Content-Type": "text/html; charset=utf-8"}, body: []byte(body)}
-}
 func jsonResp(status int, body []byte) resp {
 	return resp{status: status, headers: map[string]string{"Content-Type": "application/json"}, body: body}
 }
@@ -256,13 +236,11 @@ func (a *App) webFinger(req *http.Request) resp {
 			links = append(links, link)
 		}
 	}
-	r := jsonResp(http.StatusOK, jsonBytes(map[string]any{
+	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": "application/jrd+json"}, body: jsonBytes(map[string]any{
 		"subject": "acct:" + strings.ToLower(username) + "@" + host,
 		"aliases": []any{actor},
 		"links":   links,
-	}))
-	r.headers["Content-Type"] = "application/jrd+json"
-	return r
+	})}
 }
 
 func (a *App) handleActivityCollection(req *http.Request, username, name string) resp {
@@ -340,11 +318,7 @@ func offloadErrorResp(err *AppError, fallbackURL string) resp {
 	return r
 }
 
-func invalidOffloadResp() resp {
-	return resp{status: http.StatusNotFound, headers: map[string]string{}}
-}
-
-// Offload handlers trust their arguments: canonicalOffloadPath or the d. host
+// Offload handlers trust their arguments: offloadRoute or the d. host
 // route has already validated and bounded them.
 func (a *App) handleOffload(req *http.Request, shortcode string, index int, avatar bool) resp {
 	meta := &fetchMeta{}
@@ -383,25 +357,15 @@ func (a *App) handleProfileOffload(req *http.Request, username string, n int) re
 	target := p.ProfilePic
 	if n > 0 {
 		if n > len(p.RecentMedia) {
-			return invalidOffloadResp()
+			return resp{status: http.StatusNotFound, headers: map[string]string{}}
 		}
 		target = p.RecentMedia[n-1].Thumbnail
 	}
 	return tagFetch(a.offloadResp(req, target, n == 0), meta)
 }
 
-// Gateway.ServeHTTP stores the origin it validated; the host rule below is
-// reached only by handler tests that bypass the gateway.
+// Gateway.ServeHTTP stores the origin it validated.
 func (a *App) publicBaseURL(req *http.Request) string {
-	if origin, _ := req.Context().Value(publicOriginKey{}).(string); origin != "" {
-		return origin
-	}
-	host := req.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return "http://" + req.Host
-	}
-	return "https://" + req.Host
+	origin, _ := req.Context().Value(publicOriginKey{}).(string)
+	return origin
 }

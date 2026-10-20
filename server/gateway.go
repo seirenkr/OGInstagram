@@ -110,12 +110,7 @@ func peerAddress(r *http.Request) netip.Addr {
 
 func (g *Gateway) trustedPeer(r *http.Request) bool {
 	peer := peerAddress(r)
-	for _, p := range g.cfg.TrustedProxies {
-		if p.Contains(peer) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(g.cfg.TrustedProxies, func(p netip.Prefix) bool { return p.Contains(peer) })
 }
 
 func (g *Gateway) publicOrigin(r *http.Request) (string, bool) {
@@ -126,10 +121,8 @@ func (g *Gateway) publicOrigin(r *http.Request) (string, bool) {
 	if g.cfg.Development && peerAddress(r).IsLoopback() && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
 		return "http://" + r.Host, true
 	}
-	for _, allowed := range g.cfg.AllowedHosts {
-		if host == allowed && r.Host == host {
-			return "https://" + host, true
-		}
+	if r.Host == host && slices.Contains(g.cfg.AllowedHosts, host) {
+		return "https://" + host, true
 	}
 	return "", false
 }
@@ -142,18 +135,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			g.problem(w, r, 404, "not found")
 			return
 		}
-		if !allowMethod(w, r, http.MethodGet, http.MethodHead) {
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
-		defer cancel()
-		if err := g.cfg.Store.Healthy(ctx); err != nil {
-			g.problemCause(w, r, 503, "storage unavailable", err)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		if r.Method != http.MethodHead {
-			_, _ = w.Write([]byte("ok\n"))
+		if allowMethod(w, r, http.MethodGet, http.MethodHead) {
+			g.writeResult(w, r, textResp(http.StatusOK, "ok\n"))
 		}
 		return
 	}
@@ -287,10 +270,8 @@ func directEdgeTTL(location string, now time.Time) int {
 }
 
 func allowMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
-	for _, method := range methods {
-		if r.Method == method {
-			return true
-		}
+	if slices.Contains(methods, r.Method) {
+		return true
 	}
 	w.Header().Set("Allow", strings.Join(methods, ", "))
 	w.WriteHeader(http.StatusMethodNotAllowed)
@@ -343,20 +324,16 @@ type gatewayRoute struct {
 func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	segments := splitPath(r.URL.Path)
 	route := gatewayRoute{}
-	gallery := strings.HasPrefix(r.Host, "g.") || strings.HasPrefix(r.Host, "www.g.")
-	direct := strings.HasPrefix(r.Host, "d.") || strings.HasPrefix(r.Host, "www.d.")
+	gallery := strings.HasPrefix(r.Host, "g.")
+	direct := strings.HasPrefix(r.Host, "d.")
 	if r.URL.Path == "/.well-known/webfinger" {
 		route.handle = (*App).handleWebFinger
 		return route, true
 	}
 	if len(segments) > 0 && segments[0] == "offload" {
-		canonical, ok := canonicalOffloadPath(r.URL)
-		if !ok {
-			return route, false
-		}
-		route.handle = offloadHandler(splitPath(canonical))
-		route.offload = true
-		return route, true
+		_, handle, ok := offloadRoute(r.URL)
+		route.handle, route.offload = handle, true
+		return route, ok
 	}
 	// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
 	if len(segments) == 3 && segments[0] == "stories" && segments[1] != "highlights" && validUsername(segments[1]) && validStoryID(segments[2]) {
@@ -401,55 +378,49 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	return route, false
 }
 
-func canonicalOffloadPath(u *url.URL) (string, bool) {
-	segments := splitPath(u.Path)
-	if len(segments) < 2 || segments[0] != "offload" || u.EscapedPath() != "/"+strings.Join(segments, "/") {
-		return "", false
+// offloadRoute validates an offload path and returns its canonical form, with
+// usernames lowercased, and the handler for it.
+func offloadRoute(u *url.URL) (string, func(*App, *http.Request) resp, bool) {
+	s := splitPath(u.Path)
+	if len(s) < 2 || s[0] != "offload" || u.EscapedPath() != "/"+strings.Join(s, "/") {
+		return "", nil, false
 	}
-	if segments[1] == "story" && (len(segments) == 4 || len(segments) == 5) {
-		if !validUsername(segments[2]) || !validStoryID(segments[3]) || (len(segments) == 5 && segments[4] != "avatar") {
-			return "", false
+	var handle func(*App, *http.Request) resp
+	if s[1] == "story" && (len(s) == 4 || len(s) == 5) {
+		if !validUsername(s[2]) || !validStoryID(s[3]) || (len(s) == 5 && s[4] != "avatar") {
+			return "", nil, false
 		}
-		segments[2] = strings.ToLower(segments[2])
+		s[2] = strings.ToLower(s[2])
+		username, id, avatar := s[2], s[3], len(s) == 5
+		handle = func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, username, id, avatar) }
 	} else {
-		if len(segments) != 2 && len(segments) != 3 {
-			return "", false
+		if len(s) != 2 && len(s) != 3 {
+			return "", nil, false
 		}
-		maxIndex := maxCachedMediaItems
-		if username, ok := strings.CutPrefix(segments[1], "@"); ok {
+		avatar, n, maxIndex := len(s) == 3 && s[2] == "avatar", 0, maxCachedMediaItems
+		username, profile := strings.CutPrefix(s[1], "@")
+		if profile {
 			if !validUsername(username) {
-				return "", false
+				return "", nil, false
 			}
-			segments[1] = "@" + strings.ToLower(username)
-			maxIndex = profileGalleryMax
-		} else if !validShortcode(segments[1]) {
-			return "", false
+			username, maxIndex = strings.ToLower(username), profileGalleryMax
+			s[1] = "@" + username
+		} else if !validShortcode(s[1]) {
+			return "", nil, false
 		}
-		if len(segments) == 3 && segments[2] != "avatar" {
-			n, ok := parseCanonicalDecimal(segments[2])
-			if !ok || n < 1 || n > maxIndex {
-				return "", false
+		if len(s) == 3 && !avatar {
+			var ok bool
+			if n, ok = parseCanonicalDecimal(s[2]); !ok || n < 1 || n > maxIndex {
+				return "", nil, false
 			}
 		}
+		shortcode := s[1]
+		handle = func(a *App, r *http.Request) resp { return a.handleOffload(r, shortcode, max(n-1, 0), avatar) }
+		if profile {
+			handle = func(a *App, r *http.Request) resp { return a.handleProfileOffload(r, username, n) }
+		}
 	}
-	return "/" + strings.Join(segments, "/"), true
-}
-
-// offloadHandler dispatches canonicalOffloadPath's segments, whose usernames
-// are lowercased and whose media number is already within range.
-func offloadHandler(s []string) func(*App, *http.Request) resp {
-	if s[1] == "story" && len(s) >= 4 {
-		return func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, s[2], s[3], len(s) == 5) }
-	}
-	avatar := len(s) == 3 && s[2] == "avatar"
-	n := 0
-	if len(s) == 3 && !avatar {
-		n, _ = parseCanonicalDecimal(s[2])
-	}
-	if username, ok := strings.CutPrefix(s[1], "@"); ok {
-		return func(a *App, r *http.Request) resp { return a.handleProfileOffload(r, username, n) }
-	}
-	return func(a *App, r *http.Request) resp { return a.handleOffload(r, s[1], max(n-1, 0), avatar) }
+	return "/" + strings.Join(s, "/"), handle, true
 }
 
 func (g *Gateway) render(r *http.Request, route gatewayRoute) resp {
@@ -641,8 +612,5 @@ func (g *Gateway) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	body := g.statusBody
 	g.statusMu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(body)
-	}
+	g.writeResult(w, r, jsonResp(http.StatusOK, body))
 }

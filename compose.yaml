@@ -1,35 +1,37 @@
 name: oginstagram
 
+x-hardened: &hardened
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  # journald keeps a slot's logs after deploys recreate its container.
+  logging:
+    driver: journald
+
 # Blue/green app slots: tools/deploy.sh starts the idle slot, waits for it to
 # be healthy, points nginx at it, then stops the old slot (graceful drain).
 x-app: &app
+  <<: *hardened
   image: ${OG_IMAGE:-oginstagram:local}
-  env_file:
-    - ${APP_ENV_FILE:-.env}
+  env_file: .env
   environment:
-    PORT: "8080"
     DATA_DIR: /data
     ASSETS_DIR: /app/web
     # Leave room inside the container for one verification browser.
     GOMEMLIMIT: 128MiB
-    GOMAXPROCS: "1"
     # Exact nginx address below, never the entire subnet.
     TRUSTED_PROXIES: 172.30.0.4
     # Without the egress, Instagram requests use the DC proxy.
     EGRESS_SOCKET: /run/egress/egress.sock
   user: "65532:65532"
-  restart: unless-stopped
   init: true
-  read_only: true
   mem_limit: 768m
-  cpus: 1
   # Chromium verification briefly needs more than 128 threads, even one at a time.
   pids_limit: 256
-  cap_drop: [ALL]
-  security_opt:
-    - no-new-privileges:true
   stop_grace_period: 40s
-  # Image check plus start_interval, so a new slot reports healthy within seconds.
+  # start_interval lets a new slot report healthy within seconds.
   healthcheck:
     test: [CMD, /app/server, --healthcheck]
     interval: 30s
@@ -42,9 +44,6 @@ x-app: &app
   volumes:
     - ./data:/data
     - ./run/egress:/run/egress:ro
-  # journald keeps a slot's logs after deploys recreate its container.
-  logging:
-    driver: journald
 
 services:
   app_blue:
@@ -62,39 +61,25 @@ services:
   # IPv6 egress: host network for the addresses tools/ipv6-pool.sh assigns;
   # serves the app only over the socket in run/egress. tools/deploy.sh starts it.
   egress:
+    <<: *hardened
     image: ${OG_IMAGE:-oginstagram:local}
     command: [--egress]
     environment:
       EGRESS_SOCKET: /run/egress/egress.sock
-      EGRESS_POOL: /etc/oginstagram/ipv6-pool.txt
     network_mode: host
     user: "65532:65532"
-    restart: unless-stopped
-    read_only: true
     mem_limit: 64m
     pids_limit: 64
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    # The image's check probes the app's HTTP port, which this service lacks.
-    healthcheck:
-      disable: true
     volumes:
       - ./run/egress:/run/egress
       - /etc/oginstagram:/etc/oginstagram:ro
-    logging:
-      driver: journald
 
   # Access log, visitor IP (realip), and preview rate limit.
   proxy:
+    <<: *hardened
     image: nginxinc/nginx-unprivileged:1.30-alpine@sha256:15c994d10d6d78658721c3bcafff14cb281fba2a4bdf9d5ba92c416a472516e3
-    restart: unless-stopped
-    read_only: true
     mem_limit: 64m
     pids_limit: 64
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
     tmpfs:
       - /tmp:size=16m,mode=1777
     volumes:
@@ -109,20 +94,14 @@ services:
     networks:
       origin:
         ipv4_address: 172.30.0.4
-    logging:
-      driver: journald
 
   cloudflared:
+    <<: *hardened
     image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07}
     command: [tunnel, --no-autoupdate, run, --token-file, /run/secrets/tunnel_token]
     user: "65532:65532"
-    restart: unless-stopped
-    read_only: true
     mem_limit: 128m
     pids_limit: 64
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
     secrets:
       - tunnel_token
     depends_on:

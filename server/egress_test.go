@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,14 +48,8 @@ func TestParseGraphQLStoryChecksTheURL(t *testing.T) {
 }
 
 // v6 answers with fn on ipv6Strikes+1 sessions; both pools count their calls,
-// and DC always succeeds.
-func fallbackApp(fn func() (int, string)) (a *App, v6Calls, dcCalls *atomic.Int32) {
-	return fallbackAppReq(func(*http.Request) (int, string) { return fn() })
-}
-
-// fallbackAppReq is fallbackApp with the request in hand; status 0 hangs until
-// the request is cancelled, like a dead path.
-func fallbackAppReq(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls *atomic.Int32) {
+// and DC always succeeds. Status 0 hangs until the request is cancelled, like a dead path.
+func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls *atomic.Int32) {
 	v6Calls, dcCalls = new(atomic.Int32), new(atomic.Int32)
 	reply := func(status int, body string) *http.Response {
 		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
@@ -73,7 +67,7 @@ func fallbackAppReq(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCa
 		dcCalls.Add(1)
 		return reply(200, `{"data":{"ok":true}}`), nil
 	})}
-	v6Pool := &SessionPool{proxyURL: func() string { return "http://x@egress" }}
+	v6Pool := &SessionPool{proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User("x"), Host: "egress"} }}
 	for i := range ipv6Strikes + 1 {
 		v6Pool.sessions = append(v6Pool.sessions, &Session{name: "v6-" + string(rune('a'+i)), client: v6})
 	}
@@ -81,7 +75,9 @@ func fallbackAppReq(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCa
 }
 
 func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
-	throttled := func() (int, string) { return 200, `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}` }
+	throttled := func(*http.Request) (int, string) {
+		return 200, `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`
+	}
 	a, v6Calls, dcCalls := fallbackApp(throttled)
 	for i := 1; i <= ipv6Strikes+1; i++ {
 		if _, body, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(body, `"ok"`) {
@@ -105,24 +101,24 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 
 	// Muted licensed music gets one DC recheck.
 	muted := `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"clips_metadata":{"music_info":{"music_consumption_info":{"should_mute_audio":true}}}}]}}}`
-	a, _, dcCalls = fallbackApp(func() (int, string) { return 200, muted })
+	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, muted })
 	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, `"ok"`) || dcCalls.Load() != 1 {
 		t.Fatalf("muted: body %q, err %v, DC calls %d; want the DC copy", got, err, dcCalls.Load())
 	}
 	// 1675030 comes back at once; hiddenPost races DC separately.
-	a, _, dcCalls = fallbackApp(func() (int, string) { return 200, `{"data":null,"errors":[{"code":1675030}]}` })
+	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, `{"data":null,"errors":[{"code":1675030}]}` })
 	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, "1675030") || dcCalls.Load() != 0 {
 		t.Fatalf("hidden: body %q, err %v, DC calls %d; want the IPv6 answer as is", got, err, dcCalls.Load())
 	}
 
 	// Other answers about the content come back as is.
-	a, _, dcCalls = fallbackApp(func() (int, string) { return 400, `{"message":"bad request","status":"fail"}` })
+	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 400, `{"message":"bad request","status":"fail"}` })
 	if _, _, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err == nil || err.Code != errorCodeGraphQL || dcCalls.Load() != 0 {
 		t.Fatalf("err %v, DC calls %d; want the IPv6 answer as is", err, dcCalls.Load())
 	}
 
 	// A short deadline leaves DC half of it: a hung IPv6 path still falls back.
-	a, _, dcCalls = fallbackAppReq(func(*http.Request) (int, string) { return 0, "" })
+	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 0, "" })
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if _, body, err := a.fetchViaProxy(ctx, webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(body, `"ok"`) || dcCalls.Load() != 1 {
@@ -144,9 +140,6 @@ func TestEgressRefusesOtherHosts(t *testing.T) {
 		if resp.StatusCode != http.StatusForbidden {
 			t.Fatalf("CONNECT %s = %d, want 403", target, resp.StatusCode)
 		}
-	}
-	if got := egressSession("Basic " + base64.StdEncoding.EncodeToString([]byte("abc123:"))); got != "abc123" {
-		t.Fatalf("egressSession = %q, want abc123", got)
 	}
 }
 

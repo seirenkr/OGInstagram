@@ -49,11 +49,11 @@ type SessionPool struct {
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
 	// Set for the IPv6 egress pool; nil means the DC proxy.
-	proxyURL func() string
+	proxyURL func() *url.URL
 	dial     func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func (p *SessionPool) nextProxyURL() string {
+func (p *SessionPool) nextProxyURL() *url.URL {
 	if p.proxyURL != nil {
 		return p.proxyURL()
 	}
@@ -64,15 +64,14 @@ func (p *SessionPool) nextProxyURL() string {
 func newEgressPool(socket, prefix string) *SessionPool {
 	pool := &SessionPool{
 		tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2),
-		proxyURL: func() string { return "http://" + newSessionID() + "@egress" },
+		proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User(newSessionID()), Host: "egress"} },
 		dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
 	for i := range proxySessionCount {
-		client, _ := buildSessionClient(pool.nextProxyURL(), pool)
-		pool.sessions = append(pool.sessions, &Session{name: prefix + strconv.Itoa(i+1), client: client})
+		pool.sessions = append(pool.sessions, &Session{name: prefix + strconv.Itoa(i+1), client: buildSessionClient(pool.nextProxyURL(), pool)})
 	}
 	return pool
 }
@@ -82,13 +81,7 @@ func newSessionPool(cfg Config) *SessionPool {
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
 		for i := range proxySessionCount {
 			// A stable slot label: rotation replaces the exit IP behind it.
-			name := "us-" + strconv.Itoa(i+1)
-			client, err := buildSessionClient(pool.nextProxyURL(), pool)
-			if err != nil {
-				slog.Warn("proxy session skipped: invalid proxy configuration", "session", name, "error", err)
-				continue
-			}
-			pool.sessions = append(pool.sessions, &Session{name: name, client: client})
+			pool.sessions = append(pool.sessions, &Session{name: "us-" + strconv.Itoa(i+1), client: buildSessionClient(pool.nextProxyURL(), pool)})
 		}
 	}
 
@@ -98,18 +91,14 @@ func newSessionPool(cfg Config) *SessionPool {
 	return pool
 }
 
-func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error) {
-	parsed, err := url.Parse(proxyURL)
-	if err != nil {
-		return nil, err
-	}
+func buildSessionClient(proxy *url.URL, pool *SessionPool) *http.Client {
 	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
 	dial := dialer.DialContext
 	if pool.dial != nil {
 		dial = pool.dial
 	}
 	transport := &http.Transport{
-		Proxy:               http.ProxyURL(parsed),
+		Proxy:               http.ProxyURL(proxy),
 		DialContext:         dial,
 		ForceAttemptHTTP2:   true,
 		DisableCompression:  true,
@@ -125,7 +114,7 @@ func buildSessionClient(proxyURL string, pool *SessionPool) (*http.Client, error
 		},
 		IdleConnTimeout: 90 * time.Second,
 	}
-	return &http.Client{Transport: transport}, nil
+	return &http.Client{Transport: transport}
 }
 
 // www.instagram.com traffic (oEmbed, profile, ruling) is sparse: spread over
@@ -215,25 +204,18 @@ func (s *Session) getClient() *http.Client {
 // fail moves s off client to a new exit IP and cools it down. A late failure
 // from an already retired client leaves its replacement alone and reports false.
 func (p *SessionPool) fail(s *Session, client *http.Client) bool {
-	next, err := buildSessionClient(p.nextProxyURL(), p)
-	if err != nil {
-		slog.Warn("proxy session rotation failed", "session", s.name, "error", err)
-	}
+	next := buildSessionClient(p.nextProxyURL(), p)
 	s.mu.Lock()
 	if s.client != client {
 		s.mu.Unlock()
 		return false
 	}
-	if next != nil {
-		s.client = next
-		s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
-	}
+	s.client = next
+	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
 	if until := time.Now().Add(rotateCooldown); until.After(s.cooldownUntil) {
 		s.cooldownUntil = until
 	}
 	s.mu.Unlock()
-	if next != nil {
-		client.CloseIdleConnections()
-	}
+	client.CloseIdleConnections()
 	return true
 }

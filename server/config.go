@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -115,17 +114,11 @@ func egressPercent(raw string) int {
 }
 
 func configFromEnv() Config {
-	port := 8080
-	if raw := env("PORT"); raw != "" {
-		port, _ = strconv.Atoi(raw)
-	}
 	baseURL := cmp.Or(env("BASE_URL"), "https://oginstagram.com")
-	hosts := envList("ALLOWED_HOSTS")
-	if len(hosts) == 0 {
-		if base, err := url.Parse(baseURL); err == nil && base.Hostname() != "" {
-			h := base.Hostname()
-			hosts = []string{h, "www." + h, "d." + h, "www.d." + h, "g." + h, "www.g." + h}
-		}
+	var hosts []string
+	if base, err := url.Parse(baseURL); err == nil && base.Hostname() != "" {
+		h := strings.ToLower(base.Hostname())
+		hosts = []string{h, "www." + h, "d." + h, "g." + h}
 	}
 	var proxies []netip.Prefix
 	for _, raw := range envList("TRUSTED_PROXIES") {
@@ -139,7 +132,6 @@ func configFromEnv() Config {
 		proxies = append(proxies, p)
 	}
 	return Config{
-		Port:                   port,
 		Version:                cmp.Or(env("OG_VERSION"), "dev"),
 		ProxyUser:              env("PROXY_USERNAME"),
 		ProxyPass:              env("PROXY_PASSWORD"),
@@ -175,17 +167,6 @@ func (cfg Config) validate() error {
 		(base.Scheme != "https" && !(cfg.Development && base.Scheme == "http")) {
 		return fmt.Errorf("BASE_URL must be an HTTPS origin (HTTP is allowed in development)")
 	}
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return fmt.Errorf("PORT must be between 1 and 65535")
-	}
-	if len(cfg.AllowedHosts) == 0 {
-		return fmt.Errorf("ALLOWED_HOSTS is required")
-	}
-	for _, host := range cfg.AllowedHosts {
-		if strings.ContainsAny(host, "/:@?# ") || host == "" || strings.IndexFunc(host, func(r rune) bool { return r <= 32 || r == 92 }) >= 0 {
-			return fmt.Errorf("ALLOWED_HOSTS must contain hostnames without ports")
-		}
-	}
 	for _, proxy := range cfg.TrustedProxies {
 		if !proxy.IsValid() || proxy.Bits() == 0 {
 			return fmt.Errorf("TRUSTED_PROXIES must contain explicit IP addresses or bounded CIDRs")
@@ -208,15 +189,18 @@ func (cfg Config) validate() error {
 	if !cfg.Development && (len(cfg.TrustedProxies) == 0 || cfg.TurnstileSiteKey == "" || cfg.TurnstileSecretKey == "") {
 		return fmt.Errorf("production requires TRUSTED_PROXIES and Turnstile keys")
 	}
-	if !cfg.Development && (base.Port() != "" || !slices.Contains(cfg.AllowedHosts, strings.ToLower(base.Hostname()))) {
-		return fmt.Errorf("production BASE_URL host must be listed in ALLOWED_HOSTS, without a port")
+	if !cfg.Development && cfg.OffloadSigningKeys == "" {
+		return fmt.Errorf("production requires OFFLOAD_SIGNING_KEYS")
+	}
+	if !cfg.Development && base.Port() != "" {
+		return fmt.Errorf("production BASE_URL must not carry a port")
 	}
 	return nil
 }
 
-func proxyURL(user, pass, sessionID string) string {
+func proxyURL(user, pass, sessionID string) *url.URL {
 	username := user + "__cr." + proxyCountry + ";sessid." + sessionID
-	return (&url.URL{Scheme: "http", User: url.UserPassword(username, pass), Host: proxyGateEndpoint}).String()
+	return &url.URL{Scheme: "http", User: url.UserPassword(username, pass), Host: proxyGateEndpoint}
 }
 
 func newSessionID() string {

@@ -32,13 +32,12 @@ type cacheEntry[V any] struct {
 
 type flightCall[V any] struct {
 	done    chan struct{}
-	entry   *cacheEntry[V]
+	value   V
 	err     *AppError
 	fetched bool
 }
 
 type cache[V any] struct {
-	maxEntries  int
 	maxBytes    int64
 	fetchSlots  chan struct{}
 	store       *localStore
@@ -64,7 +63,7 @@ type cachePayload[V any] struct {
 
 func newPersistentCache[V any](store *localStore, kind string, fetchSlots chan struct{}, maxLocalBytes int64) *cache[V] {
 	return &cache[V]{
-		maxEntries: persistentLocalEntryCap, maxBytes: maxLocalBytes, fetchSlots: fetchSlots,
+		maxBytes: maxLocalBytes, fetchSlots: fetchSlots,
 		store: store, storeKind: kind, workTimeout: cacheSharedWorkTimeout,
 		entries: map[string]*cacheEntry[V]{}, errEntries: map[string]*cacheEntry[V]{}, flight: map[string]*flightCall[V]{},
 	}
@@ -105,11 +104,7 @@ func (c *cache[V]) get(ctx context.Context, key string, meta *fetchMeta, fetch f
 		if meta != nil {
 			meta.fetched = call.fetched
 		}
-		if call.entry != nil {
-			return call.entry.value, call.err
-		}
-		var zero V
-		return zero, call.err
+		return call.value, call.err
 	}
 }
 
@@ -133,8 +128,7 @@ func (c *cache[V]) runFlight(
 	defer release()
 
 	if entry, ok := c.persistentGet(ctx, key); ok {
-		call.entry = entry
-		call.err = entry.err
+		call.value = entry.value
 		c.storeLocal(key, entry)
 		return
 	}
@@ -161,7 +155,7 @@ func (c *cache[V]) runFlight(
 		call.err = contextAppError(ctx)
 		return
 	}
-	if cacheErrorIsUncacheable(err) {
+	if err != nil && (err.Ephemeral || err.Status == 499) {
 		call.err = err
 		return
 	}
@@ -178,17 +172,12 @@ func (c *cache[V]) runFlight(
 		err = &cloned
 		ttl = time.Duration(errorCacheSeconds(err.Code)) * time.Second
 	}
+	call.value, call.err = value, err
 	if ttl <= 0 {
-		if err == nil {
-			call.entry = &cacheEntry[V]{value: value}
-		}
-		call.err = err
 		return
 	}
 
 	entry := &cacheEntry[V]{value: value, err: err, expiresAt: time.Now().Add(ttl)}
-	call.entry = entry
-	call.err = err
 	c.storeLocal(key, entry)
 	release()
 	if c.store != nil && err == nil && persist {
@@ -203,13 +192,13 @@ func (c *cache[V]) runFlight(
 
 // put stores a value fetched outside get, replacing any cached entry,
 // including a cached error.
-func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Duration, persist bool) {
+func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Duration) {
 	value, ok := cloneAndValidateCacheValue(key, value)
 	if !ok || ttl <= 0 {
 		return
 	}
 	entry := &cacheEntry[V]{value: value, expiresAt: time.Now().Add(ttl)}
-	if c.store != nil && persist {
+	if c.store != nil {
 		c.persistentPut(ctx, key, entry)
 	}
 	c.storeLocal(key, entry)
@@ -217,7 +206,7 @@ func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Durati
 
 // putAfterFlight lets a running lookup of key store its verdict first, so that
 // verdict cannot replace value.
-func (c *cache[V]) putAfterFlight(ctx context.Context, key string, value V, ttl time.Duration, persist bool) {
+func (c *cache[V]) putAfterFlight(ctx context.Context, key string, value V, ttl time.Duration) {
 	c.flightMu.Lock()
 	call := c.flight[key]
 	c.flightMu.Unlock()
@@ -228,11 +217,7 @@ func (c *cache[V]) putAfterFlight(ctx context.Context, key string, value V, ttl 
 			return
 		}
 	}
-	c.put(ctx, key, value, ttl, persist)
-}
-
-func cacheErrorIsUncacheable(err *AppError) bool {
-	return err != nil && (err.Ephemeral || err.Status == 499)
+	c.put(ctx, key, value, ttl)
 }
 
 func (c *cache[V]) persistentGet(ctx context.Context, key string) (*cacheEntry[V], bool) {
@@ -338,13 +323,11 @@ func (c *cache[V]) storeLocal(key string, entry *cacheEntry[V]) {
 	c.order = append(c.order, key)
 	c.usedBytes += entry.size
 
-	for (c.usedBytes > c.maxBytes || len(c.entries) > c.maxEntries) && len(c.order) > 0 {
+	for (c.usedBytes > c.maxBytes || len(c.entries) > persistentLocalEntryCap) && len(c.order) > 0 {
 		oldest := c.order[0]
 		c.order = c.order[1:]
-		if e, ok := c.entries[oldest]; ok {
-			c.usedBytes -= e.size
-			delete(c.entries, oldest)
-		}
+		c.usedBytes -= c.entries[oldest].size
+		delete(c.entries, oldest)
 	}
 }
 
@@ -373,20 +356,17 @@ func cloneAndValidateCacheValue[V any](key string, value V) (V, bool) {
 		for i := range typed.Attachments {
 			typed.Attachments[i] = normalizeCachedAttachment(typed.Attachments[i])
 		}
-		value = any(typed).(V)
-		return value, validCachedPost(key, typed)
+		return any(typed).(V), validCachedPost(key, typed)
 	case Profile:
 		typed.ProfilePic = normalizeCDNHost(typed.ProfilePic)
 		for i := range typed.RecentMedia {
 			typed.RecentMedia[i].Thumbnail = normalizeCDNHost(typed.RecentMedia[i].Thumbnail)
 		}
-		value = any(typed).(V)
-		return value, validCachedProfile(key, typed)
+		return any(typed).(V), validCachedProfile(key, typed)
 	case Story:
 		typed.ProfilePic = normalizeCDNHost(typed.ProfilePic)
 		typed.Media = normalizeCachedAttachment(typed.Media)
-		value = any(typed).(V)
-		return value, validCachedStory(key, typed)
+		return any(typed).(V), validCachedStory(key, typed)
 	default:
 		return value, true
 	}

@@ -149,7 +149,7 @@ func isoTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.UTC().Format("2006-01-02T15:04:05Z")
+	return t.UTC().Format(time.RFC3339)
 }
 
 const (
@@ -227,10 +227,11 @@ func selectActivityAttachments(post Post, mediaIndex int, specified bool) attach
 	total := len(post.Attachments)
 	if specified || total <= 1 {
 		sel := mediaIndexFor(post, mediaIndex)
-		return attachmentSelection{
-			items:     []selectedAttachment{{post.Attachments[sel], sel}},
-			indicator: singleAttachmentIndicator(post, sel),
+		s := attachmentSelection{items: []selectedAttachment{{post.Attachments[sel], sel}}}
+		if total > 1 {
+			s.indicator = galleryEmoji + " " + strconv.Itoa(sel+1) + " / " + strconv.Itoa(total)
 		}
+		return s
 	}
 	if post.Attachments[0].Kind == "video" {
 		return attachmentSelection{
@@ -249,14 +250,6 @@ func selectActivityAttachments(post Post, mediaIndex int, specified bool) attach
 	}
 
 	return attachmentSelection{items: images, indicator: galleryEmoji + " " + strconv.Itoa(total)}
-}
-
-func singleAttachmentIndicator(post Post, selectedIndex int) string {
-	total := len(post.Attachments)
-	if total > 1 {
-		return galleryEmoji + " " + strconv.Itoa(selectedIndex+1) + " / " + strconv.Itoa(total)
-	}
-	return ""
 }
 
 func withIndicator(indicator, statsLine string) string {

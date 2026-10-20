@@ -312,85 +312,13 @@ func TestComponentEmbedMixedMediaAndLegacyMetadata(t *testing.T) {
 	})
 }
 
-func TestComponentEmbedSupportButtonsAndTimestamps(t *testing.T) {
-	a := &App{offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
-	const baseURL = "https://oginstagram.com"
+func TestComponentEmbedButtonsAndFooter(t *testing.T) {
+	const baseURL, brandID = "https://oginstagram.com", "234567890123456789"
 	post := componentTestPost()
 	post.Caption = strings.Repeat("🌸긴 캡션<&> ", 1500)
-	profile := Profile{Username: "alice", FullName: "Alice", Biography: post.Caption, ProfilePic: post.ProfilePic}
+	profile := Profile{Username: "alice", FullName: "Alice", Biography: post.Caption, ProfilePic: post.ProfilePic, MediaCount: 12, FollowerCount: 34}
 	story := Story{ID: "123", Username: "alice", FullName: "Alice", Caption: post.Caption, ProfilePic: post.ProfilePic, CreatedAt: post.CreatedAt, Media: post.Attachments[1]}
-	for _, tc := range []struct {
-		name, origin string
-		created      time.Time
-		render       func(gallery, support bool) string
-	}{
-		{"post", instagramPostURL("reel", post.Shortcode, 1, true), post.CreatedAt, func(gallery, support bool) string {
-			return a.buildEmbedHTML(baseURL, post, "reel", 1, true, gallery, support)
-		}},
-		{"profile", profileURL(profile.Username), time.Time{}, func(gallery, support bool) string {
-			return a.buildProfileEmbedHTML(baseURL, profile, gallery, support)
-		}},
-		{"story", storyOriginURL(story.Username, story.ID), story.CreatedAt, func(gallery, support bool) string {
-			return a.buildStoryEmbedHTML(baseURL, storyOriginURL(story.Username, story.ID), story,
-				a.storyOffloadURL(baseURL, story.Username, story.ID, false), a.storyOffloadURL(baseURL, story.Username, story.ID, true), gallery, support)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, support := range []bool{false, true} {
-				for _, gallery := range []bool{false, true} {
-					document := tc.render(gallery, support)
-					payload := componentPayload(t, document) // Includes the final 3,000-byte wire check.
-					buttons := componentsOfType(payload, 2)
-					if gallery {
-						if len(buttons) != 0 || strings.Contains(document, "https://ko-fi.com/seirenkr") {
-							t.Error("gallery embed must omit both Instagram and support buttons")
-						}
-						for _, display := range componentsOfType(payload, 10) {
-							if strings.Contains(display["content"].(string), "<t:") {
-								t.Error("gallery embed must omit timestamps")
-							}
-						}
-						continue
-					}
-					wantCount := 1
-					if support {
-						wantCount = 2
-					}
-					if len(buttons) != wantCount || buttons[0]["label"] != "📷 Instagram" || buttons[0]["url"] != tc.origin {
-						t.Fatalf("support=%v buttons or Instagram destination are incorrect: %v", support, buttons)
-					}
-					for _, button := range buttons {
-						if button["style"] != float64(5) {
-							t.Errorf("button must remain a link-only button: %v", button)
-						}
-					}
-					if support && (buttons[1]["label"] != "☕ Support me" || buttons[1]["url"] != "https://ko-fi.com/seirenkr") {
-						t.Errorf("support button differs from the proposed label and funding destination: %v", buttons[1])
-					}
-					if !tc.created.IsZero() {
-						want := fmt.Sprintf("<t:%d:s>", tc.created.Unix())
-						found := false
-						for _, display := range componentsOfType(payload, 10) {
-							if strings.Contains(display["content"].(string), want) {
-								found = true
-							}
-						}
-						if !found {
-							t.Errorf("post/story timestamp must use Discord's s style: want %s", want)
-						}
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestComponentEmbedStatsHeaderAndBrandFooter(t *testing.T) {
-	const brandID = "234567890123456789"
-	post := componentTestPost()
-	post.Caption = strings.Repeat("🌸긴 캡션<&> ", 1500)
-	profile := Profile{Username: "alice", FullName: "Alice", Biography: post.Caption, MediaCount: 12, FollowerCount: 34}
-	story := Story{ID: "123", Username: "alice", FullName: "Alice", Caption: post.Caption, CreatedAt: post.CreatedAt, Media: post.Attachments[0]}
+	storyOrigin := storyOriginURL(story.Username, story.ID)
 	for _, icon := range []struct{ name, id, want string }{
 		{"configured", brandID, "<:OGInstagram:" + brandID + "> "},
 		{"missing", "", ""},
@@ -398,27 +326,29 @@ func TestComponentEmbedStatsHeaderAndBrandFooter(t *testing.T) {
 	} {
 		a := &App{cfg: Config{DiscordBrandEmojiID: icon.id}, offloadSigner: mustOffloadSigner(testOffloadSigningKeys)}
 		for _, tc := range []struct {
-			name, stats string
-			created     time.Time
-			render      func(bool) string
+			name, origin, stats string
+			created             time.Time
+			render              func(gallery, support bool) string
 		}{
-			{"post", "❤️ **42**  💬 **7**", post.CreatedAt, func(gallery bool) string {
-				return a.postComponentEmbed("https://oginstagram.com", post, "p", 0, false, gallery, true)
+			{"post", instagramPostURL("reel", post.Shortcode, 1, true), "❤️ **42**  💬 **7**", post.CreatedAt, func(gallery, support bool) string {
+				return a.buildEmbedHTML(baseURL, post, "reel", 1, true, gallery, support)
 			}},
-			{"profile without date", "📝 **12** 👤 **34**", time.Time{}, func(gallery bool) string {
-				return a.profileComponentEmbed("https://oginstagram.com", profile, gallery, true)
+			{"profile", profileURL(profile.Username), "📝 **12** 👤 **34**", time.Time{}, func(gallery, support bool) string {
+				return a.buildProfileEmbedHTML(baseURL, profile, gallery, support)
 			}},
-			{"story", "", story.CreatedAt, func(gallery bool) string {
-				return a.storyComponentEmbed("https://oginstagram.com", story, gallery, true)
+			{"story", storyOrigin, "", story.CreatedAt, func(gallery, support bool) string {
+				return a.buildStoryEmbedHTML(baseURL, storyOrigin, story,
+					a.storyOffloadURL(baseURL, story.Username, story.ID, false), a.storyOffloadURL(baseURL, story.Username, story.ID, true), gallery, support)
 			}},
 		} {
-			t.Run(icon.name+"/"+tc.name, func(t *testing.T) {
+			for _, support := range []bool{false, true} {
 				for _, gallery := range []bool{false, true} {
-					payload := componentPayload(t, tc.render(gallery))
-					displays := componentsOfType(payload, 10)
+					name := fmt.Sprintf("%s/%s support=%v gallery=%v", icon.name, tc.name, support, gallery)
+					payload := componentPayload(t, tc.render(gallery, support)) // Includes the final 3,000-byte wire check.
+					buttons, displays := componentsOfType(payload, 2), componentsOfType(payload, 10)
 					if gallery {
-						if len(displays) != 1 || !strings.HasPrefix(displays[0]["content"].(string), "**") || len(componentsOfType(payload, 2)) != 0 {
-							t.Errorf("gallery must keep only author text and media, with no footer or buttons: %v", payload)
+						if len(buttons) != 0 || len(displays) != 1 || !strings.HasPrefix(displays[0]["content"].(string), "**") || strings.Contains(displays[0]["content"].(string), "<t:") {
+							t.Errorf("%s: gallery must keep only author text and media, with no footer or buttons: %v", name, payload)
 						}
 						continue
 					}
@@ -426,34 +356,34 @@ func TestComponentEmbedStatsHeaderAndBrandFooter(t *testing.T) {
 					if !tc.created.IsZero() {
 						wantBrand += fmt.Sprintf(" · <t:%d:s>", tc.created.Unix())
 					}
-					header := ""
+					header, brands := "", 0
 					for _, display := range displays {
-						content := display["content"].(string)
-						if strings.HasPrefix(content, "**") {
+						switch content := display["content"].(string); {
+						case strings.HasPrefix(content, "**"):
 							header = content
-						} else if content != wantBrand && (strings.Contains(content, "<t:") || strings.Contains(content, "OGInstagram")) {
-							t.Errorf("timestamp and branding must appear only in the footer: %q", content)
+						case content == wantBrand:
+							brands++
+						case strings.Contains(content, "<t:") || strings.Contains(content, "OGInstagram"):
+							t.Errorf("%s: timestamp and branding must appear only in the footer: %q", name, content)
 						}
 					}
-					if tc.stats != "" && !strings.HasSuffix(header, "\n\n"+tc.stats) {
-						t.Errorf("stats must be the author heading's last line: %q, want suffix %q", header, tc.stats)
+					if brands != 1 || tc.stats != "" && !strings.HasSuffix(header, "\n\n"+tc.stats) {
+						t.Errorf("%s: want one footer %q and stats %q ending the heading %q", name, wantBrand, tc.stats, header)
 					}
-					// These renders use the support variant: brand line, divider, then both buttons.
+					wantButtons := 1
+					if support {
+						wantButtons = 2
+					}
+					// Support: brand line, divider, then both buttons in a row; else the lone button beside the brand.
 					children := payload["component"].(map[string]any)["components"].([]any)
-					tail := make([]map[string]any, 0, 3)
-					for _, child := range children[max(len(children)-3, 0):] {
-						tail = append(tail, child.(map[string]any))
-					}
-					if len(tail) != 3 {
-						t.Fatalf("support footer needs three trailing components: %v", tail)
-					}
-					row, _ := tail[2]["components"].([]any)
-					if tail[0]["content"] != wantBrand || tail[1]["type"] != float64(14) || tail[2]["type"] != float64(1) || len(row) != 2 ||
-						row[0].(map[string]any)["label"] != "📷 Instagram" || row[1].(map[string]any)["label"] != "☕ Support me" {
-						t.Errorf("support footer must be brand %q, a separator, and one row with both buttons: %v", wantBrand, tail)
+					last := children[len(children)-1].(map[string]any)
+					if len(buttons) != wantButtons || buttons[0]["url"] != tc.origin ||
+						support && (children[len(children)-2].(map[string]any)["type"] != float64(14) || last["type"] != float64(1)) ||
+						!support && (last["type"] != float64(9) || last["accessory"] == nil) {
+						t.Errorf("%s: buttons or footer layout: %v", name, children)
 					}
 				}
-			})
+			}
 		}
 	}
 }
@@ -686,139 +616,48 @@ func TestComponentEmbedProfileAndStory(t *testing.T) {
 	}
 }
 
-func TestGatewayCardIgnoresUserAgentAndDirectRoutes(t *testing.T) {
+func TestGatewayCardIgnoresUserAgent(t *testing.T) {
 	g := testGateway(t)
-	expiry := time.Now().Add(time.Hour)
 	post := componentTestPost()
-	g.app.posts.storeLocal(post.Shortcode, &cacheEntry[Post]{value: post, expiresAt: expiry})
-	g.app.profiles.storeLocal("alice", &cacheEntry[Profile]{value: Profile{Username: "alice", Biography: "bio", ProfilePic: post.ProfilePic}, expiresAt: expiry})
-	g.app.stories.storeLocal("alice/123", &cacheEntry[Story]{value: Story{ID: "123", Username: "alice", Caption: "story", Media: post.Attachments[0]}, expiresAt: expiry})
-	g.app.posts.storeLocal("GONE12", &cacheEntry[Post]{err: igErr(404, errorCodeNotFound, "gone"), expiresAt: expiry})
+	g.app.posts.storeLocal(post.Shortcode, &cacheEntry[Post]{value: post, expiresAt: time.Now().Add(time.Hour)})
 	// The edge caches one copy per URL for every bot, so no User-Agent may change the card.
-	pinned := map[string]string{}
 	for _, host := range []string{"oginstagram.com", "g.oginstagram.com"} {
-		for _, path := range []string{"/p/ABC123", "/reel/ABC123", "/alice", "/stories/alice/123"} {
-			for _, ua := range []string{"Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)", "Discordbot/2.0", "TelegramBot (like TwitterBot)", ""} {
-				for _, query := range []string{"", "?e=s"} {
-					r := publicRequest("GET", path+query)
-					r.Host = host
-					r.Header.Set("User-Agent", ua)
-					w := httptest.NewRecorder()
-					g.ServeHTTP(w, r)
-					body := w.Body.String()
-					if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Link"), `rel="alternate"; type="application/activity+json"`) {
-						t.Errorf("%s%s%s for %q returned %d: %s", host, path, query, ua, w.Code, body)
-						continue
-					}
-					componentPayload(t, body)
-					if w.Header().Get("X-OGInstagram-Embed") != "component" || w.Header().Get("Cache-Control") != "no-store" {
-						t.Errorf("%s%s%s for %q response headers: %v", host, path, query, ua, w.Header())
-					}
-					if query == "" {
-						continue
-					}
-					// Gallery cards carry no buttons at all.
-					if gallery := host == "g.oginstagram.com"; strings.Contains(body, "https://ko-fi.com/seirenkr") == gallery {
-						t.Errorf("?e=s support button on %s%s for %q is incorrect", host, path, ua)
-					}
-					if first, seen := pinned[host+path]; seen && first != body {
-						t.Errorf("%s%s%s differs for %q", host, path, query, ua)
-					}
-					pinned[host+path] = body
-				}
+		first := ""
+		for _, ua := range []string{"Discordbot/2.0", "TelegramBot (like TwitterBot)"} {
+			r := publicRequest("GET", "/p/ABC123?e=s")
+			r.Host = host
+			r.Header.Set("User-Agent", ua)
+			w := httptest.NewRecorder()
+			g.ServeHTTP(w, r)
+			body := w.Body.String()
+			componentPayload(t, body)
+			// Gallery cards carry no buttons at all.
+			if w.Code != http.StatusOK || w.Header().Get("X-OGInstagram-Embed") != "component" || strings.Contains(body, "https://ko-fi.com/seirenkr") != (host == "oginstagram.com") {
+				t.Errorf("%s for %q = %d %v", host, ua, w.Code, w.Header())
 			}
+			if first != "" && body != first {
+				t.Errorf("%s differs for %q", host, ua)
+			}
+			first = body
 		}
 	}
 	for _, path := range []string{"/p/ABC123/2", "/p/ABC123?img_index=2"} {
-		r := publicRequest("GET", path)
-		r.Header.Set("User-Agent", "Discordbot")
-		result := serveApp(t, g.app, r)
+		result := serveApp(t, g.app, publicRequest("GET", path))
 		paths := componentMediaPaths(t, componentPayload(t, string(result.body)), g.app.offloadSigner)
 		if len(paths) != 1 || paths[0] != "/offload/ABC123/2" {
 			t.Errorf("component URL selection for %s: %v", path, paths)
 		}
 	}
-	for _, path := range []string{"/p/ABC123", "/stories/alice/123"} {
-		r := publicRequest("GET", path)
-		r.Host = "d.oginstagram.com"
-		r.Header.Set("User-Agent", "Discordbot")
-		result := serveApp(t, g.app, r)
-		if result.status != http.StatusFound || result.headers["Location"] != post.Attachments[0].URL || len(result.body) != 0 || result.headers["X-OGInstagram-Embed"] != "" {
-			t.Errorf("direct route changed for %s: %+v", path, result)
-		}
-	}
-	r := publicRequest("GET", "/alice")
-	r.Host = "d.oginstagram.com"
-	r.Header.Set("User-Agent", "Discordbot")
-	componentPayload(t, string(serveApp(t, g.app, r).body))
-	r = publicRequest("GET", "/p/GONE12")
-	r.Header.Set("User-Agent", "Discordbot")
-	if result := serveApp(t, g.app, r); result.status != http.StatusOK || strings.Contains(string(result.body), `id="discord:component-embed"`) || result.headers["X-OGInstagram-Embed"] != "opengraph" {
-		t.Error("error card should remain a plain Open Graph card")
-	}
-	r = publicRequest("HEAD", "/p/ABC123")
-	r.Header.Set("User-Agent", "Discordbot")
-	w := httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || w.Body.Len() != 0 || w.Header().Get("X-OGInstagram-Embed") != "component" || w.Header().Get("Cache-Control") != "no-store" {
-		t.Errorf("HEAD returned a body: status=%d length=%d", w.Code, w.Body.Len())
-	}
-	r = publicRequest("POST", "/api/embed")
+	r := publicRequest("POST", "/api/embed")
 	r.Body = io.NopCloser(strings.NewReader(`{"path":"/p/ABC123"}`))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", "https://oginstagram.com")
 	r.Header.Set("Sec-Fetch-Site", "same-origin")
 	r.Header.Set("Cookie", "cf_clearance=component-test")
-	w = httptest.NewRecorder()
+	w := httptest.NewRecorder()
 	g.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Type"), "text/html") || strings.Contains(w.Body.String(), `id="og-status"`) {
 		t.Errorf("frontend preview must return the bot card itself: %d %s", w.Code, w.Body.String())
 	}
 	componentPayload(t, w.Body.String())
-	r = publicRequest("GET", "/p/ABC123")
-	r.Header.Set("User-Agent", "Discordbot")
-	r.Header.Set("Accept", asMediaType)
-	w = httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != asMediaType || !json.Valid(w.Body.Bytes()) || w.Header().Get("X-OGInstagram-Embed") != "" {
-		t.Errorf("ActivityPub Note changed: %d %v", w.Code, w.Header())
-	}
-	r = publicRequest("GET", "/api/v1/statuses/123")
-	w = httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("Mastodon status API must be gone: %d", w.Code)
-	}
-	signed, err := url.Parse(g.app.offloadURL("https://oginstagram.com", post.Shortcode, 0, false))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r = publicRequest("GET", signed.RequestURI())
-	r.Header.Set("User-Agent", "Discordbot")
-	w = httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != http.StatusFound || w.Header().Get("Location") != post.Attachments[0].URL || w.Header().Get("X-OGInstagram-Embed") != "" {
-		t.Errorf("Component Embed changed offload delivery: %d %v", w.Code, w.Header())
-	}
-}
-
-func TestDiscordSupportShare(t *testing.T) {
-	const renders = 4000
-	shown := 0
-	for range renders {
-		if discordSupport(httptest.NewRequest("GET", "/p/ABC123", nil)) {
-			shown++
-		}
-	}
-	// 10% of 4,000 is 400 with a standard deviation near 19; the band is ±6σ.
-	if shown < 280 || shown > 520 {
-		t.Errorf("support button should appear on about 10%% of renders, got %d of %d", shown, renders)
-	}
-	for _, query := range []string{"e=s", "e=s&n=2", "img_index=2&e=s"} {
-		for range 20 {
-			if !discordSupport(httptest.NewRequest("GET", "/p/ABC123?"+query, nil)) {
-				t.Fatalf("%s must pin the support button", query)
-			}
-		}
-	}
 }

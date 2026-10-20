@@ -5,10 +5,7 @@ import (
 	"net/http"
 )
 
-type externalHelperClient interface {
-	request(ctx context.Context, operation, endpoint, contentType, unsigned string) (string, *AppError)
-	close()
-}
+type externalHelperClient interface{ close() }
 
 var (
 	newExternalHelperClient func(*SessionPool) externalHelperClient
