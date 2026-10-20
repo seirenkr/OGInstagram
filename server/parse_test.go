@@ -165,3 +165,21 @@ func TestParseLoggedOut(t *testing.T) {
 		t.Errorf("dims = %dx%d, want 1080x1920 (from original_width/height)", a.Width, a.Height)
 	}
 }
+
+func TestVerificationFromAuthorJSON(t *testing.T) {
+	const v = `,"is_verified":true`
+	post, err1 := parseInstagramPost(strings.Replace(sampleLoggedOut, `"full_name":"Instagram"`, `"full_name":"Instagram"`+v, 1))
+	embed, err2 := parseEmbedPost(wrapEmbed(`{"gql_data":{"shortcode_media":{"shortcode":"ABC","is_video":false,"owner":{"username":"nasa"` + v + `},"display_url":"https://cdn/p.jpg"}}}`))
+	root, err3 := parseProfileRoot(`{"data":{"xig_user_by_username":{"username":"nasa"` + v + `}}}`)
+	profile, err4 := parseEmbedProfile(wrapEmbed(`{"context":{"username":"instagram"` + v + `,"graphql_media":[]}}`))
+	for name, ok := range map[string]bool{
+		"post GraphQL user":        err1 == nil && post.IsVerified,
+		"post embed owner":         err2 == nil && embed.IsVerified,
+		"profile RootContent user": err3 == nil && root.IsVerified,
+		"profile embed context":    err4 == nil && profile.IsVerified,
+	} {
+		if !ok {
+			t.Errorf("%s: is_verified not read", name)
+		}
+	}
+}

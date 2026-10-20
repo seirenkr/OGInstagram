@@ -22,14 +22,14 @@ type igAnswer struct {
 	body   string
 }
 
-// fakeIG answers the post sources by path and counts the calls. A zero answer
-// means the source must not be asked.
+// fakeIG answers the post and profile sources by path and counts the calls. A
+// zero answer means the source must not be asked.
 type fakeIG struct {
-	t                         *testing.T
-	gql                       string
-	gqlDelay                  time.Duration
-	ruling, oembed, og, embed igAnswer
-	calls                     sync.Map // source -> *atomic.Int32
+	t                              *testing.T
+	gql                            string
+	gqlDelay                       time.Duration
+	ruling, oembed, og, embed, api igAnswer
+	calls                          sync.Map // source -> *atomic.Int32
 }
 
 func (f *fakeIG) count(source string) int32 {
@@ -48,7 +48,9 @@ func (f *fakeIG) pool() *SessionPool {
 		case r.URL.Path == "/graphql/query":
 			time.Sleep(f.gqlDelay)
 			source, answer = "gql", igAnswer{200, f.gql}
-		case strings.HasSuffix(r.URL.Path, "/embed/captioned/"):
+		case r.URL.Path == "/api/graphql/":
+			source, answer = "api", f.api
+		case strings.Contains(r.URL.Path, "/embed/"):
 			source, answer = "embed", f.embed
 		case r.URL.Path == "/p/ABC123/":
 			source, answer = "og", f.og
