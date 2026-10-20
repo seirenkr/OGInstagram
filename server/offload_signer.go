@@ -23,9 +23,7 @@ const (
 	offloadSignatureVersion = "2"
 	offloadSigningKeySize   = 32
 
-	offloadCapabilityTTL = 14 * 24 * time.Hour
-	// Accepts the next release's 30-day links, so that release can roll back here.
-	offloadAcceptTTL = 30 * 24 * time.Hour
+	offloadCapabilityTTL = 30 * 24 * time.Hour
 )
 
 var offloadKeyIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
@@ -175,7 +173,7 @@ func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
 		return false
 	}
 	expires, err := strconv.ParseInt(exp, 10, 64)
-	if err != nil || strconv.FormatInt(expires, 10) != exp || expires <= now.Unix() || expires > now.Unix()+int64(offloadAcceptTTL/time.Second) {
+	if err != nil || strconv.FormatInt(expires, 10) != exp || expires <= now.Unix() || expires > now.Unix()+int64(offloadCapabilityTTL/time.Second) {
 		return false
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(sig)
