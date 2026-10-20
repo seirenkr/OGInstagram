@@ -74,6 +74,24 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 	return &App{cfg: Config{EgressPercent: 100}, pool: &SessionPool{sessions: []*Session{{name: "us-1", client: dc}}}, v6: v6Pool}, v6Calls, dcCalls
 }
 
+func TestV6GateResumesAfterPause(t *testing.T) {
+	g := &v6Gate{}
+	for range ipv6Strikes {
+		g.fail("post")
+	}
+	if g.allow() {
+		t.Fatal("gate open right after the pause began")
+	}
+	g.until = time.Now().Add(-time.Second)
+	if !g.allow() {
+		t.Fatal("no probe after the pause ended")
+	}
+	g.ok("post") // used to clear the held mutex and crash on Unlock
+	if !g.allow() || !g.until.IsZero() || g.failures != 0 {
+		t.Fatalf("gate not reset after a successful probe: %+v", g)
+	}
+}
+
 func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 	throttled := func(*http.Request) (int, string) {
 		return 200, `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`

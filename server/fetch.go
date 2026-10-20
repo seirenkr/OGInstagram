@@ -586,7 +586,8 @@ func (g *v6Gate) ok(operation string) {
 	g.mu.Lock()
 	resumed := !g.until.IsZero()
 	if resumed {
-		*g = v6Gate{}
+		// Reset field by field: assigning a zero v6Gate would also clear the held mutex.
+		g.recent, g.next, g.failures, g.until, g.pause, g.probeAt = [ipv6Window]bool{}, 0, 0, time.Time{}, 0, time.Time{}
 	} else {
 		g.record(false)
 	}
