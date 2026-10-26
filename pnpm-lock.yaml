@@ -15,11 +15,8 @@ importers:
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@twemoji/parser':
-        specifier: 15.0.0
-        version: 15.0.0
-      '@twemoji/svg':
-        specifier: 15.0.0
-        version: 15.0.0
+        specifier: 17.0.1
+        version: 17.0.1
       echarts:
         specifier: ^6.1.0
         version: 6.1.0
@@ -678,11 +675,8 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@twemoji/parser@15.0.0':
-    resolution: {integrity: sha512-lh9515BNsvKSNvyUqbj5yFu83iIDQ77SwVcsN/SnEGawczhsKU6qWuogewN1GweTi5Imo5ToQ9s+nNTf97IXvg==}
-
-  '@twemoji/svg@15.0.0':
-    resolution: {integrity: sha512-ZSPef2B6nBaYnfgdTbAy4jgW95o7pi2xPGwGCU+WMTxo7J6B1lMPTWwSq/wTuiMq+N0khQ90CcvYp1wFoQpo/w==}
+  '@twemoji/parser@17.0.1':
+    resolution: {integrity: sha512-Uiq5sq1Wx91Y6C0DczMlu4Gj4nC/0z8UIhT7S53hi/JATaS1oLM5jXygjot7STtyVoIagfnpsBCWaNy3ayfyFw==}
 
   '@types/esrecurse@4.3.1':
     resolution: {integrity: sha512-xJBAbDifo5hpffDBuHl0Y8ywswbiAp/Wi7Y/GtAgSlZyIABppyurxVueOPE8LUQOxdlgi6Zqce7uoEpqNTeiUw==}
@@ -2072,9 +2066,7 @@ snapshots:
       tailwindcss: 4.3.3
       vite: 8.3.5(esbuild@0.28.1)(jiti@2.7.0)
 
-  '@twemoji/parser@15.0.0': {}
-
-  '@twemoji/svg@15.0.0': {}
+  '@twemoji/parser@17.0.1': {}
 
   '@types/esrecurse@4.3.1': {}
 

@@ -5,7 +5,7 @@ import { PaperPlaneRightIcon as PaperPlaneRight } from "@phosphor-icons/react/Pa
 import { ArrowSquareOutIcon as ArrowSquareOut } from "@phosphor-icons/react/ArrowSquareOut";
 import { SealCheckIcon as SealCheck } from "@phosphor-icons/react/SealCheck";
 import { parse as parseEmoji } from "@twemoji/parser";
-import { version as twemojiVersion } from "@twemoji/svg/package.json";
+import { version as twemojiVersion } from "@twemoji/parser/package.json";
 import { canonicalServiceHost, instagramEmbedPath } from "../../shared/routes.ts";
 import type en from "../locales/en.json";
 import { requestPreview } from "./preview-request.ts";
@@ -63,7 +63,7 @@ type PreviewProps = {
 
 const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onloadTurnstileCallback";
 const STATS_EMOJI_RE = /❤️|💬|📝|👤|▶️/;
-const TWEMOJI_BASE = `https://cdn.jsdelivr.net/npm/@twemoji/svg@${twemojiVersion}/`;
+const TWEMOJI_BASE = `https://cdn.jsdelivr.net/gh/jdecked/twemoji@${twemojiVersion}/assets/svg/`;
 const COMPONENT_EMBED_TYPES = new Set(["application/json", "application/vnd.discord.component-embed+json"]);
 let turnstileReady: Promise<void> | null = null;
 
