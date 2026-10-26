@@ -1,6 +1,6 @@
 # Base images are pinned by digest (Docker build best practices); bump tag and
 # digest together.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine3.24@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
