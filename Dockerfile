@@ -1,6 +1,6 @@
 # Base images are pinned by digest (Docker build best practices); bump tag and
 # digest together.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine3.24@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
@@ -12,10 +12,10 @@ RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out
 RUN go vet ./... && go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 # Build the frontend natively on the build platform; its output is arch-independent.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim@sha256:86f07bc9c5dce4578cf37e5a418b7bfc7f817cda25cde66e2b66e95ed86c4567 AS web
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+RUN npm install -g corepack@0.36.0 && corepack enable && pnpm install --frozen-lockfile
 COPY web/ web/
 COPY shared/ shared/
 COPY tools/build-home.mjs tools/build-home.mjs

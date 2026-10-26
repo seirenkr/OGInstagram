@@ -24,6 +24,9 @@ var homeQualityPattern = regexp.MustCompile(`^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3}
 // Must match the Pretendard stylesheets in web/index.html; their fonts load from the same roots.
 const pretendardSources = "https://cdn.jsdelivr.net/npm/pretendard@1.3.9/ https://cdn.jsdelivr.net/gh/orioncactus/pretendard@5c41199ea0024a9e0b2cb31735265056e5472d76/"
 
+// The tag follows the @twemoji/parser version in package.json.
+const twemojiSource = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@17.0.1/assets/svg/"
+
 func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	base, _ := url.Parse(g.cfg.BaseURL) // validated at startup
 	if !g.cfg.Development && !strings.EqualFold(r.Host, base.Host) {
@@ -63,7 +66,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	// Every page carries a fresh nonce and can depend on the language cookie.
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("Vary", "Accept-Language, Cookie")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net https://cdn.jsdelivr.net/npm/@twemoji/; media-src 'self' https://*.cdninstagram.com https://*.fbcdn.net; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com https://*.cdninstagram.com https://*.fbcdn.net; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net "+twemojiSource+"; media-src 'self' https://*.cdninstagram.com https://*.fbcdn.net; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com https://*.cdninstagram.com https://*.fbcdn.net; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 	if forced != "" && forced != cookieLocale {
 		http.SetCookie(w, &http.Cookie{Name: "hl", Value: forced, Path: "/", MaxAge: 31536000, SameSite: http.SameSiteLaxMode, Secure: base.Scheme == "https"})
 	}

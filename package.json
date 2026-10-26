@@ -17,11 +17,10 @@
   "dependencies": {
     "@cloudflare/kumo": "^2.14.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@twemoji/parser": "15.0.0",
-    "@twemoji/svg": "15.0.0",
+    "@twemoji/parser": "17.0.1",
     "echarts": "^6.1.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -31,8 +30,8 @@
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.71.0",
-    "vite": "^8.3.2"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.0",
+    "vite": "^8.3.5"
   }
 }

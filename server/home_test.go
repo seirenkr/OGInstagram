@@ -209,6 +209,22 @@ func TestHomeLocalesMatchWeb(t *testing.T) {
 	}
 }
 
+func TestHomeCSPCoversTwemoji(t *testing.T) {
+	raw, err := os.ReadFile("../package.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pkg struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(raw, &pkg); err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://cdn.jsdelivr.net/gh/jdecked/twemoji@" + pkg.Dependencies["@twemoji/parser"] + "/assets/svg/"; twemojiSource != want {
+		t.Fatalf("twemojiSource = %s, want %s", twemojiSource, want)
+	}
+}
+
 func TestHomeCSPCoversPretendardLinks(t *testing.T) {
 	page, err := os.ReadFile("../web/index.html")
 	if err != nil {

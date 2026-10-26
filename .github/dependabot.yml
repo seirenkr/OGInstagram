@@ -12,7 +12,17 @@ updates:
     directory: /server
     schedule:
       interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # 17.0.2 stops matching text-default emoji such as ✌️ (jdecked/twemoji-parser#16).
+      - dependency-name: "@twemoji/parser"
+        versions: ["17.0.2"]
