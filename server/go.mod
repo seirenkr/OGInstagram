@@ -3,7 +3,7 @@ module oginstagram
 go 1.26.9
 
 require (
-	github.com/andybalholm/brotli v1.2.6
+	github.com/andybalholm/brotli v1.2.7
 	github.com/tidwall/gjson v1.20.0
 	modernc.org/sqlite v1.60.1
 )
