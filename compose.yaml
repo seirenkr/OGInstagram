@@ -97,7 +97,7 @@ services:
 
   cloudflared:
     <<: *hardened
-    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39}
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba}
     command: [tunnel, --no-autoupdate, run, --token-file, /run/secrets/tunnel_token]
     user: "65532:65532"
     mem_limit: 128m
