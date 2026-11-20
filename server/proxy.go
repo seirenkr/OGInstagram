@@ -139,21 +139,13 @@ func buildSessionClient(proxy *url.URL, pool *SessionPool) *http.Client {
 	return &http.Client{Transport: transport}
 }
 
-// www.instagram.com traffic (oEmbed, profile, ruling) is sparse: spread over
-// every session it would mostly open new connections, so it keeps to the first
-// wwwSessions unless none of them is ready.
-const wwwSessions = 3
-
-func (p *SessionPool) pick(www bool) *Session {
+func (p *SessionPool) pick() *Session {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
 
 	ready := make([]*Session, 0, len(p.sessions))
-	for i, s := range p.sessions {
-		if www && i == wwwSessions && len(ready) > 0 {
-			break
-		}
+	for _, s := range p.sessions {
 		s.mu.Lock()
 		if !s.cooldownUntil.After(now) {
 			ready = append(ready, s)

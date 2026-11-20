@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -76,7 +77,7 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if spec.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", spec.method)
 	}
-	if spec.url != "https://i.instagram.com/api/graphql/" || !spec.expectJSON {
+	if spec.url != "https://www.instagram.com/api/graphql/" || !spec.expectJSON {
 		t.Errorf("url = %q", spec.url)
 	}
 	if spec.headers["X-FB-Friendly-Name"] != "PolarisLoggedOutDesktopWWWPostRootContentQuery" {
@@ -98,6 +99,22 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	}
 	if lsd := vals.Get("lsd"); lsd == "" || lsd != spec.headers["X-FB-LSD"] {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
+	}
+	// The web client's BitMap.toCompressedString: the first bit, then run lengths
+	// in Elias gamma code, six bits per character.
+	bits := "1" + strings.Repeat("0", len(strconv.FormatInt(200000, 2))-1) + strconv.FormatInt(200000, 2) + "00000"
+	var haveAll string
+	for i := 0; i+6 <= len(bits); i += 6 {
+		n, _ := strconv.ParseInt(bits[i:i+6], 2, 0)
+		haveAll += string("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"[n])
+	}
+	for _, key := range []string{"__hblp", "__hsdp", "__sjsp", "__csr", "__dyn"} {
+		if vals.Get(key) != haveAll {
+			t.Errorf("%s = %q, want %q (200,000 set bits)", key, vals.Get(key), haveAll)
+		}
+	}
+	if vals.Get("__a") != "1" || vals.Get("__comet_req") != "7" {
+		t.Errorf("__a = %q, __comet_req = %q; the bitmaps need both", vals.Get("__a"), vals.Get("__comet_req"))
 	}
 	v := vals.Get("variables")
 	if v != `{"media_id":"3928396500541181492"}` {
@@ -327,7 +344,7 @@ func TestLateFailureFromRetiredClientSparesReplacement(t *testing.T) {
 		return mediaTestResponse(req, http.StatusTooManyRequests, nil, []byte(`{}`)), nil
 	})}
 	a := &App{pool: pool}
-	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: instagramGraphQLOrigin + "/graphql/query", interpret: instagramJSON})
+	_, _, err := a.fetchViaProxy(context.Background(), fetchSpec{method: http.MethodGet, url: instagramOrigin + "/graphql/query", interpret: instagramJSON})
 	if err == nil || err.Code != errorCodeRateLimited || s.getClient() != replacement || !s.cooldownUntil.IsZero() ||
 		!s.rttAt.Equal(measured) || s.pending != 0 {
 		t.Fatalf("late failure touched the replacement: err=%v cooldown=%v rttAt=%v pending=%d", err, s.cooldownUntil, s.rttAt, s.pending)
@@ -348,7 +365,7 @@ func TestPickAvoidsHungSession(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3")
 	counts := map[string]int{}
 	for range 30 {
-		s := p.pick(false)
+		s := p.pick()
 		counts[s.name]++
 		if s.name != "us-3" {
 			p.done(s, nil, 300*time.Millisecond, true)
@@ -363,7 +380,7 @@ func TestPickSpreadsLoadAcrossHealthySessions(t *testing.T) {
 	p := newTestPool("us-1", "us-2", "us-3", "us-4")
 	counts := map[string]int{}
 	for range 400 {
-		s := p.pick(false)
+		s := p.pick()
 		counts[s.name]++
 		p.done(s, nil, 300*time.Millisecond, true)
 	}
@@ -374,32 +391,15 @@ func TestPickSpreadsLoadAcrossHealthySessions(t *testing.T) {
 	}
 }
 
-func TestPickKeepsWWWOnFirstSessions(t *testing.T) {
-	p := newTestPool("us-1", "us-2", "us-3", "us-4", "us-5")
-	for range 50 {
-		s := p.pick(true)
-		p.done(s, nil, 300*time.Millisecond, true)
-		if s.name == "us-4" || s.name == "us-5" {
-			t.Fatalf("www request picked %s", s.name)
-		}
-	}
-	for _, s := range p.sessions[:wwwSessions] {
-		s.cooldownUntil = time.Now().Add(time.Minute)
-	}
-	if s := p.pick(true); s == nil || (s.name != "us-4" && s.name != "us-5") {
-		t.Fatalf("www did not fall back to the remaining sessions: %v", s)
-	}
-}
-
 func TestPickHonorsCooldown(t *testing.T) {
 	p := newTestPool("us-1")
 	s := p.sessions[0]
 	s.cooldownUntil = time.Now().Add(time.Minute)
-	if got := p.pick(false); got != nil {
+	if got := p.pick(); got != nil {
 		t.Fatalf("pick during cooldown = %v, want none", got)
 	}
 	s.cooldownUntil = time.Now().Add(-time.Second)
-	if got := p.pick(false); got != s {
+	if got := p.pick(); got != s {
 		t.Fatalf("pick after cooldown = %v, want the session", got)
 	}
 }
@@ -416,7 +416,7 @@ func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
 		p.done(slow, nil, 10*time.Second, true) // one peak replaces the estimate at once
 		picks := func() (n int) {
 			for range 50 {
-				s := p.pick(false)
+				s := p.pick()
 				p.done(s, nil, 0, false)
 				if s == slow {
 					n++

@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	instagramOrigin        = "https://www.instagram.com"
-	instagramAppID         = "936619743392459"
-	instagramGraphQLOrigin = "https://i.instagram.com"
+	instagramOrigin = "https://www.instagram.com"
+	instagramAppID  = "936619743392459"
 
 	instagramWebLoggedOutDocID = "39974491408862996"
+	// The web client's bitmap for "resources 0 to 199,999 are loaded": sent as
+	// every resource bitmap, it keeps the page's script list out of the answer.
+	haveAllResources = "w00MR0"
 
 	proxyGateEndpoint = "gw.dataimpulse.com:823"
 	proxyCountry      = "us"

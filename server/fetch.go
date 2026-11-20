@@ -435,7 +435,7 @@ func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hu
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
 	}
-	s := pool.pick(strings.HasPrefix(spec.url, instagramOrigin+"/"))
+	s := pool.pick()
 	if s == nil {
 		if len(pool.sessions) == 0 {
 			return 0, "", igErr(503, errorCodeConnection, "Instagram proxy sessions are not configured")
@@ -549,8 +549,12 @@ func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fe
 	lsd := rand.Text()
 	return fetchSpec{
 		operation: operation, method: http.MethodPost, subject: "Instagram", expectJSON: true, interpret: graphQLJSON,
-		url:  instagramGraphQLOrigin + "/api/graphql/",
-		body: url.Values{"variables": {string(encoded)}, "doc_id": {docID}, "lsd": {lsd}}.Encode(),
+		url: instagramOrigin + "/api/graphql/",
+		body: url.Values{
+			"variables": {string(encoded)}, "doc_id": {docID}, "lsd": {lsd},
+			"__a": {"1"}, "__comet_req": {"7"},
+			"__hblp": {haveAllResources}, "__hsdp": {haveAllResources}, "__sjsp": {haveAllResources}, "__csr": {haveAllResources}, "__dyn": {haveAllResources},
+		}.Encode(),
 		headers: map[string]string{
 			"User-Agent":         "Mozilla/5.0",
 			"Accept":             "*/*",
