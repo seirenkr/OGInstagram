@@ -33,8 +33,8 @@ const (
 	// How fast a session's Peak-EWMA latency fades (tower's decay; Linkerd uses 10 s).
 	sessionRTTDecay = 10 * time.Second
 
-	// IPv6 gets this long (at most half the time left) before DC.
-	ipv6AttemptTimeout     = time.Second
+	// IPv6 gets this long (at most half the time left) before DC; a reel takes Instagram up to 1.9 s.
+	ipv6AttemptTimeout     = 2 * time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond
 	dcRecheckTimeout       = 2 * time.Second  // cold DC exits are slow

@@ -402,10 +402,30 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 }
 
 // fetchDC bounds one DC request; an exit still waiting at hungAfter is replaced.
+// An operation its gate has paused fails at once and costs no session.
 func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time.Duration) (int, string, *AppError) {
-	ctx, cancel := context.WithTimeout(ctx, limit)
+	if spec.advisory {
+		ctx, cancel := context.WithTimeout(ctx, limit)
+		defer cancel()
+		return a.fetchOn(ctx, a.pool, spec, hungAfter)
+	}
+	gate := a.dcGate(spec.operation)
+	if !gate.allow() {
+		return 0, "", ephemeralErr(http.StatusServiceUnavailable, errorCodeConnection, "Instagram keeps refusing "+spec.operation+"; paused")
+	}
+	started := time.Now()
+	dcCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	return a.fetchOn(ctx, a.pool, spec, hungAfter)
+	status, out, err := a.fetchOn(dcCtx, a.pool, spec, hungAfter)
+	switch {
+	case err != nil && err.Ephemeral:
+		gate.release()
+	case err != nil && shouldRotate(err.Code):
+		gate.fail(spec.operation)
+	default:
+		gate.ok(spec.operation, started)
+	}
+	return status, out, err
 }
 
 // One request on pool: pick a session, run it, then hold that session
@@ -542,8 +562,11 @@ func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fe
 }
 
 // v6Gate pauses IPv6 for one operation after ipv6Strikes failures in the last
-// ipv6Window: Instagram also limits a whole /64 per endpoint.
+// ipv6Window: Instagram also limits a whole /64 per endpoint. dcGate reuses it
+// with its own strikes and source.
 type v6Gate struct {
+	strikes  int    // 0: ipv6Strikes
+	source   string // log label; "": the IPv6 egress
 	mu       sync.Mutex
 	recent   [ipv6Window]bool // true: failed
 	next     int
@@ -555,6 +578,13 @@ type v6Gate struct {
 
 func (a *App) v6Gate(operation string) *v6Gate {
 	g, _ := a.v6Gates.LoadOrStore(operation, &v6Gate{})
+	return g.(*v6Gate)
+}
+
+// dcGate pauses an operation that ipv6Window fresh exits in a row refused: that
+// is the endpoint's answer, and rotating on would cool the pool for every other.
+func (a *App) dcGate(operation string) *v6Gate {
+	g, _ := a.v6Gates.LoadOrStore("dc "+operation, &v6Gate{strikes: ipv6Window, source: "dc proxy"})
 	return g.(*v6Gate)
 }
 
@@ -605,7 +635,7 @@ func (g *v6Gate) ok(operation string, started time.Time) {
 	}
 	g.mu.Unlock()
 	if resumed {
-		slog.Info("ipv6 egress resumed", "operation", operation)
+		slog.Info(cmp.Or(g.source, "ipv6 egress")+" resumed", "operation", operation)
 	}
 }
 
@@ -616,12 +646,12 @@ func (g *v6Gate) fail(operation string) {
 		return // a straggler from before the pause
 	}
 	g.record(true)
-	if g.until.IsZero() && g.failures < ipv6Strikes {
+	if g.until.IsZero() && g.failures < cmp.Or(g.strikes, ipv6Strikes) {
 		return
 	}
 	g.pause = min(max(g.pause*2, ipv6PauseMin), ipv6PauseMax)
 	g.until, g.probeAt = time.Now().Add(g.pause), time.Time{}
-	slog.Warn("ipv6 egress paused", "operation", operation, "pause_s", int(g.pause.Seconds()))
+	slog.Warn(cmp.Or(g.source, "ipv6 egress")+" paused", "operation", operation, "pause_s", int(g.pause.Seconds()))
 }
 
 type oembedOutcome struct {

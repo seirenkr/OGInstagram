@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -73,6 +74,50 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 		v6Pool.sessions = append(v6Pool.sessions, &Session{name: "v6-" + string(rune('a'+i)), client: v6})
 	}
 	return &App{cfg: Config{EgressPercent: 100}, pool: &SessionPool{sessions: []*Session{{name: "us-1", client: dc}}}, v6: v6Pool}, v6Calls, dcCalls
+}
+
+// What every fresh DC exit refuses is the endpoint's answer: the operation
+// pauses instead of rotating the pool the other operations share.
+func TestDCGatePausesAnOperationEveryExitRefuses(t *testing.T) {
+	var calls atomic.Int32
+	var recovered atomic.Bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		body := `{"data":{"ok":true}}`
+		if !recovered.Load() && strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent") {
+			body = `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`
+		}
+		return mediaTestResponse(r, 200, nil, []byte(body)), nil
+	})}
+	pool := &SessionPool{}
+	// Rotation swaps in a real client, so every refused attempt needs its own session.
+	for i := range ipv6Window + 2 {
+		pool.sessions = append(pool.sessions, &Session{name: "us-" + strconv.Itoa(i), addr: -1, client: client})
+	}
+	a := &App{pool: pool}
+	post := func() *AppError {
+		_, _, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K"))
+		return err
+	}
+	for i := range ipv6Window + 5 {
+		if err := post(); err == nil || (i >= ipv6Window && !err.Ephemeral) {
+			t.Fatalf("request %d: err = %#v; want a refusal, then the pause as an ephemeral error", i, err)
+		}
+	}
+	if calls.Load() != ipv6Window {
+		t.Fatalf("DC calls = %d; want the pause after %d refusals in a row", calls.Load(), ipv6Window)
+	}
+	if _, _, err := a.fetchViaProxy(context.Background(), loggedOutQuerySpec("profile", "Profile", profileRootDocID, nil)); err != nil {
+		t.Fatalf("another operation failed while post was paused: %v", err)
+	}
+	recovered.Store(true)
+	g := a.dcGate("post")
+	g.mu.Lock()
+	g.until = time.Now().Add(-time.Second)
+	g.mu.Unlock()
+	if err := post(); err != nil || !g.until.IsZero() {
+		t.Fatalf("probe after the pause: err = %v, gate = %+v; want the operation back", err, g)
+	}
 }
 
 func TestV6GateResumesAfterPause(t *testing.T) {
