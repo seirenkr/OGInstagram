@@ -183,8 +183,6 @@ func (c countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// webLoggedOutSpec is the query Instagram's logged-out post page runs; it
-// takes the media pk and also answers for stories.
 func webLoggedOutSpec(shortcode string) fetchSpec {
 	var pk string
 	if n := shortcodePK(shortcode); n != nil {
@@ -402,7 +400,6 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 }
 
 // fetchDC bounds one DC request; an exit still waiting at hungAfter is replaced.
-// An operation its gate has paused fails at once and costs no session.
 func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time.Duration) (int, string, *AppError) {
 	if spec.advisory {
 		ctx, cancel := context.WithTimeout(ctx, limit)
@@ -566,8 +563,7 @@ func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fe
 }
 
 // v6Gate pauses IPv6 for one operation after ipv6Strikes failures in the last
-// ipv6Window: Instagram also limits a whole /64 per endpoint. dcGate reuses it
-// with its own strikes and source.
+// ipv6Window: Instagram also limits a whole /64 per endpoint.
 type v6Gate struct {
 	strikes  int    // 0: ipv6Strikes
 	source   string // log label; "": the IPv6 egress
@@ -585,8 +581,7 @@ func (a *App) v6Gate(operation string) *v6Gate {
 	return g.(*v6Gate)
 }
 
-// dcGate pauses an operation that ipv6Window fresh exits in a row refused: that
-// is the endpoint's answer, and rotating on would cool the pool for every other.
+// dcGate pauses an operation that ipv6Window fresh exits in a row refused: the endpoint is refusing, not the exits.
 func (a *App) dcGate(operation string) *v6Gate {
 	g, _ := a.v6Gates.LoadOrStore("dc "+operation, &v6Gate{strikes: ipv6Window, source: "dc proxy"})
 	return g.(*v6Gate)
@@ -624,8 +619,7 @@ func (g *v6Gate) record(failed bool) {
 	g.next = (g.next + 1) % ipv6Window
 }
 
-// ok ends a pause only for a request that started after it (the probe); half
-// the pause carries over, so a source that keeps failing backs off further.
+// ok ends a pause only for the probe; half the pause carries over, so a failing source backs off further.
 func (g *v6Gate) ok(operation string, started time.Time) {
 	g.mu.Lock()
 	resumed := !g.until.IsZero() && !started.Before(g.until)

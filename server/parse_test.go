@@ -50,7 +50,6 @@ func TestParseGraphQLErrors(t *testing.T) {
 		body   string
 		hidden bool
 	}{
-		// Missing or private, then age-gated: withheld, the item's errors aside.
 		{`{"data":{"xig_polaris_media":null}}`, true},
 		{`{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":3}}},"errors":[{"message":"A server error field_exception occured."}]}`, true},
 		{`{"data":null,"errors":[{"message":"Rate limit exceeded","code":1675004}]}`, false},

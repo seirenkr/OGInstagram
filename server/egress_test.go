@@ -76,8 +76,6 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 	return &App{cfg: Config{EgressPercent: 100}, pool: &SessionPool{sessions: []*Session{{name: "us-1", client: dc}}}, v6: v6Pool}, v6Calls, dcCalls
 }
 
-// What every fresh DC exit refuses is the endpoint's answer: the operation
-// pauses instead of rotating the pool the other operations share.
 func TestDCGatePausesAnOperationEveryExitRefuses(t *testing.T) {
 	var calls atomic.Int32
 	var recovered atomic.Bool

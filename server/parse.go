@@ -11,15 +11,12 @@ import (
 // The GraphQL error code Instagram uses for per-client throttling.
 const graphQLRateLimitedCode = 1675004
 
-// The logged-out post query answers with the media and, unless it is gated,
-// a v1-shaped item inside it.
 const (
 	loggedOutMediaPath = "data.xig_polaris_media"
 	loggedOutItemPath  = loggedOutMediaPath + ".if_not_gated_logged_out"
 )
 
-// graphQLHidden: the media is null (missing or private) or comes without its
-// item (gated); neither is proof of absence.
+// graphQLHidden: null media (missing or private) or media without its item (gated); neither proves absence.
 func graphQLHidden(body string) bool {
 	return gjson.Get(body, loggedOutMediaPath).Exists() && !present(gjson.Get(body, loggedOutItemPath))
 }

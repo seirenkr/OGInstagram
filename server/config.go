@@ -17,8 +17,7 @@ const (
 	instagramAppID  = "936619743392459"
 
 	instagramWebLoggedOutDocID = "39974491408862996"
-	// The web client's bitmap for "resources 0 to 199,999 are loaded": sent as
-	// every resource bitmap, it keeps the page's script list out of the answer.
+	// The web client's bitmap for "200,000 resources loaded"; answers then omit the page's script list.
 	haveAllResources = "w00MR0"
 
 	proxyGateEndpoint = "gw.dataimpulse.com:823"
@@ -35,7 +34,7 @@ const (
 	// How fast a session's Peak-EWMA latency fades (tower's decay; Linkerd uses 10 s).
 	sessionRTTDecay = 10 * time.Second
 
-	// IPv6 gets this long (at most half the time left) before DC; a reel takes Instagram up to 1.9 s.
+	// IPv6 gets this long (at most half the time left) before DC.
 	ipv6AttemptTimeout     = 2 * time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond

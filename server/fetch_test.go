@@ -100,8 +100,7 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if lsd := vals.Get("lsd"); lsd == "" || lsd != spec.headers["X-FB-LSD"] {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
 	}
-	// The web client's BitMap.toCompressedString: the first bit, then run lengths
-	// in Elias gamma code, six bits per character.
+	// BitMap.toCompressedString: the first bit, then Elias gamma run lengths, six bits per character.
 	bits := "1" + strings.Repeat("0", len(strconv.FormatInt(200000, 2))-1) + strconv.FormatInt(200000, 2) + "00000"
 	var haveAll string
 	for i := 0; i+6 <= len(bits); i += 6 {

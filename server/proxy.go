@@ -49,14 +49,12 @@ type SessionPool struct {
 	cfg      Config
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
-	// IPv6 egress only (nil means the DC proxy): until when each source
-	// address sits out after a failure.
+	// IPv6 egress only (nil: the DC proxy): until when each source address sits out.
 	addrDown []time.Time
 	dial     func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// nextProxy returns the proxy for a new client. On the IPv6 egress the address
-// that just failed (failed >= 0) sits out, and a random rested one is picked.
+// nextProxy: on the IPv6 egress the address that just failed sits out and a rested one is picked.
 func (p *SessionPool) nextProxy(failed int) (*url.URL, int) {
 	if p.addrDown == nil {
 		return proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), -1
