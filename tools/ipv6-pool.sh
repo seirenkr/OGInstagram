@@ -35,3 +35,16 @@ fi
 while read -r addr; do
   ip -6 addr replace "$addr/128" dev "$dev" nodad preferred_lft 0
 done < "$pool"
+
+# systemd-networkd drops addresses it does not own whenever it restarts (an
+# unattended libc or systemd upgrade does that), so hand it the same list. No
+# reload: the addresses are already up, and networkd reads this when it starts.
+net=$(networkctl status "$dev" 2>/dev/null | sed -n 's/^ *Network File: //p')
+if [ -n "$net" ]; then
+  dropin=/etc/systemd/network/$(basename "$net").d
+  install -d -m 0755 "$dropin"
+  while read -r addr; do
+    printf '[Address]\nAddress=%s/128\nPreferredLifetime=0\nDuplicateAddressDetection=none\n\n' "$addr"
+  done < "$pool" > "$dropin/oginstagram-ipv6-pool.conf.tmp"
+  mv "$dropin/oginstagram-ipv6-pool.conf.tmp" "$dropin/oginstagram-ipv6-pool.conf"
+fi

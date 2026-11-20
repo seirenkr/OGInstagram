@@ -16,12 +16,16 @@ sh tools/ipv6-pool.sh || echo 'ipv6 pool setup failed; Instagram requests use th
 if sed "s#/opt/oginstagram#$(pwd)#" tools/oginstagram-ipv6-pool.service > /etc/systemd/system/oginstagram-ipv6-pool.service; then
   systemctl daemon-reload && systemctl enable --quiet oginstagram-ipv6-pool || true
 fi
+# Starts the egress of the image OG_IMAGE names.
 # grep -c reads to EOF: -q closes the pipe early and compose leaves the run container behind.
-if [ -s /etc/oginstagram/ipv6-pool.txt ] && docker compose run --rm --no-deps -T egress -h 2>&1 | grep -c -- -egress >/dev/null; then
-  docker compose up -d --no-deps egress || echo 'egress did not start; Instagram requests use the DC proxy' >&2
-else
-  docker compose stop egress 2>/dev/null || true
-fi
+start_egress() {
+  if [ -s /etc/oginstagram/ipv6-pool.txt ] && docker compose run --rm --no-deps -T egress -h 2>&1 | grep -c -- -egress >/dev/null; then
+    docker compose up -d --no-deps egress || echo 'egress did not start; Instagram requests use the DC proxy' >&2
+  else
+    docker compose stop egress 2>/dev/null || true
+  fi
+}
+start_egress
 # The app image is loaded with `docker load` (no registry), and cloudflared is
 # pulled only when missing, so a rollback works while Docker Hub is down.
 docker compose pull --policy missing cloudflared
@@ -47,6 +51,9 @@ echo "starting $next"
 if ! docker compose up -d --no-deps --wait --wait-timeout 90 "$next"; then
   docker compose logs --tail 50 "$next" >&2
   docker compose stop "$next"
+  # The live slot keeps serving, so it gets the egress it was deployed with back:
+  # the two only have to agree within one image.
+  [ -z "$previous" ] || (export OG_IMAGE="$previous"; start_egress)
   echo "$next is not healthy${live:+; $live keeps serving}" >&2
   exit 1
 fi
