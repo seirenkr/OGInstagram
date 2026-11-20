@@ -183,7 +183,7 @@ func (a *App) keepAfterFlight(h *postHelper, shortcode string) {
 }
 
 // fetchPost races GraphQL with the embed and external helper as hedges. A
-// 1675030 goes to hiddenPost; otherwise oEmbed is the last resort.
+// withheld post goes to hiddenPost; otherwise oEmbed is the last resort.
 func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl time.Duration, persist bool, err *AppError) {
 	valid := validSourceModel[Post](shortcode)
 	helper := a.newPostHelper(ctx, shortcode)
@@ -207,7 +207,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 				return Post{}, gqlErr
 			}
 			post, perr := parseInstagramPost(body)
-			if perr != nil && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode {
+			if perr != nil && graphQLHidden(body) {
 				hidden.Store(true)
 				perr.Final = true
 			}
@@ -235,7 +235,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	return Post{}, 0, false, gateOrRetry(cardErr, helper)
 }
 
-// hiddenPost handles a 1675030 (gated, hidden or gone). The helper and oEmbed
+// hiddenPost handles a post GraphQL withholds (gated, hidden or gone). The helper and oEmbed
 // start at once; oEmbed's verdict picks at most one follow-up.
 func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelper) (Post, time.Duration, bool, *AppError) {
 	helper.start()

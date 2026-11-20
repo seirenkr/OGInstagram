@@ -17,7 +17,7 @@ const (
 	instagramAppID         = "936619743392459"
 	instagramGraphQLOrigin = "https://i.instagram.com"
 
-	instagramWebLoggedOutDocID = "27128499623469141"
+	instagramWebLoggedOutDocID = "39974491408862996"
 
 	proxyGateEndpoint = "gw.dataimpulse.com:823"
 	proxyCountry      = "us"

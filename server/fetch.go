@@ -183,12 +183,15 @@ func (c countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// webLoggedOutSpec is the query Instagram's logged-out post page runs; it
+// takes the media pk and also answers for stories.
 func webLoggedOutSpec(shortcode string) fetchSpec {
-	spec := loggedOutQuerySpec("post", "PolarisPostRootQuery", instagramWebLoggedOutDocID, map[string]any{
-		"shortcode": shortcode,
-		"__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": false,
-	})
-	spec.url, spec.dcRecheck = instagramGraphQLOrigin+"/graphql/query", mutedMusic
+	var pk string
+	if n := shortcodePK(shortcode); n != nil {
+		pk = n.String()
+	}
+	spec := loggedOutQuerySpec("post", "PolarisLoggedOutDesktopWWWPostRootContentQuery", instagramWebLoggedOutDocID, map[string]any{"media_id": pk})
+	spec.dcRecheck = mutedMusic
 	return spec
 }
 
@@ -493,7 +496,7 @@ func graphQLJSON(status int, raw []byte) *AppError {
 
 // mutedMusic: Instagram mutes licensed music in the VPS's region, not on DC's US exits.
 func mutedMusic(body string) bool {
-	item := gjson.Get(body, "data.xdt_api__v1__media__shortcode__web_info.items.0")
+	item := gjson.Get(body, loggedOutItemPath)
 	if item.Get("clips_metadata.music_info.music_consumption_info.should_mute_audio").Bool() {
 		return true
 	}

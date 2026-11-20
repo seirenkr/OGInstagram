@@ -76,10 +76,10 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if spec.method != http.MethodPost {
 		t.Errorf("method = %q, want POST", spec.method)
 	}
-	if spec.url != "https://i.instagram.com/graphql/query" || !spec.expectJSON {
+	if spec.url != "https://i.instagram.com/api/graphql/" || !spec.expectJSON {
 		t.Errorf("url = %q", spec.url)
 	}
-	if spec.headers["X-FB-Friendly-Name"] != "PolarisPostRootQuery" {
+	if spec.headers["X-FB-Friendly-Name"] != "PolarisLoggedOutDesktopWWWPostRootContentQuery" {
 		t.Errorf("friendly name = %q", spec.headers["X-FB-Friendly-Name"])
 	}
 
@@ -100,8 +100,8 @@ func TestWebLoggedOutSpec(t *testing.T) {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
 	}
 	v := vals.Get("variables")
-	if !strings.Contains(v, `"shortcode":"DaEd82_pQ40"`) {
-		t.Errorf("variables should hold shortcode, got %q", v)
+	if v != `{"media_id":"3928396500541181492"}` {
+		t.Errorf("variables should hold the media pk, got %q", v)
 	}
 }
 

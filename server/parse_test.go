@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const sampleCarousel = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
+const sampleCarousel = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{
   "code":"DaQanvRgP-q","media_type":8,
   "user":{"username":"instagram","full_name":"Instagram","profile_pic_url":"https://cdn/pp.jpg"},
   "caption":{"text":"hello\nworld"},"like_count":226,"comment_count":5,
@@ -13,7 +13,7 @@ const sampleCarousel = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"ite
     {"media_type":1,"original_width":1080,"original_height":1350,"image_versions2":{"candidates":[{"url":"https://cdn/img1.jpg","width":1080,"height":1350}]}},
     {"media_type":2,"original_width":720,"original_height":1280,"image_versions2":{"candidates":[{"url":"https://cdn/vcover.jpg","width":720,"height":1280}]},"video_versions":[{"url":"https://cdn/vid.mp4"}]}
   ]
-}]}}}`
+}}}}`
 
 func TestParseCarousel(t *testing.T) {
 	post, err := parseInstagramPost(sampleCarousel)
@@ -45,21 +45,19 @@ func TestParseCarousel(t *testing.T) {
 	}
 }
 
-func TestParseNotFound(t *testing.T) {
-	_, err := parseInstagramPost(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`)
-	if err == nil || err.Status != 404 {
-		t.Fatalf("want 404, got %v", err)
-	}
-}
-
 func TestParseGraphQLErrors(t *testing.T) {
-	for _, tc := range []struct{ body, code string }{
-		{`{"data":null,"errors":[{"message":"A server error field_exception occured.","code":1675030}]}`, errorCodeGraphQL},
-		{`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[]}}}`, errorCodeMediaNotFound},
-		{`{"data":{"xdt_shortcode_media":null}}`, errorCodeGraphQL},
+	for _, tc := range []struct {
+		body   string
+		hidden bool
+	}{
+		// Missing or private, then age-gated: withheld, the item's errors aside.
+		{`{"data":{"xig_polaris_media":null}}`, true},
+		{`{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":3}}},"errors":[{"message":"A server error field_exception occured."}]}`, true},
+		{`{"data":null,"errors":[{"message":"Rate limit exceeded","code":1675004}]}`, false},
+		{`{"data":{"xdt_shortcode_media":null}}`, false},
 	} {
-		if _, err := parseInstagramPost(tc.body); err == nil || err.Code != tc.code {
-			t.Errorf("%s: got %v, want %s", tc.body, err, tc.code)
+		if _, err := parseInstagramPost(tc.body); err == nil || err.Code != errorCodeGraphQL || graphQLHidden(tc.body) != tc.hidden {
+			t.Errorf("%s: got %v, hidden %v; want a graphql error, hidden %v", tc.body, err, graphQLHidden(tc.body), tc.hidden)
 		}
 	}
 	// A GraphQL field_exception is not proof of absence: it must not be cached as permanent.
@@ -69,8 +67,8 @@ func TestParseGraphQLErrors(t *testing.T) {
 }
 
 func TestParseV1MissingMedia(t *testing.T) {
-	post, err := parseInstagramPost(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"V","media_type":2,"comment_count":3,` +
-		`"user":{"username":"u"},"image_versions2":{"candidates":[{"url":"https://cdn/cover.jpg"}]}}]}}}`)
+	post, err := parseInstagramPost(`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"code":"V","media_type":2,"comment_count":3,` +
+		`"user":{"username":"u"},"image_versions2":{"candidates":[{"url":"https://cdn/cover.jpg"}]}}}}}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +122,7 @@ func TestNormalizeCDNHost(t *testing.T) {
 	}
 }
 
-const sampleLoggedOut = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{
+const sampleLoggedOut = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{
   "pk":"3932567351408976603","code":"DaTSSukB-Lb","taken_at":1782615823,
   "media_type":2,"product_type":"clips","like_count":13215,"comment_count":49,
   "caption":{"text":"this glow >>>\n\n#InTheMoment"},
@@ -132,7 +130,7 @@ const sampleLoggedOut = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"it
   "user":{"pk":"25025320","username":"instagram","full_name":"Instagram","profile_pic_url":"https://cdn/pp.jpg"},
   "image_versions2":{"candidates":[{"url":"https://cdn/cover_big.jpg","width":1206,"height":2144},{"url":"https://cdn/cover_small.jpg","width":640,"height":1138}]},
   "video_versions":[{"type":101,"url":"https://cdn/video.mp4"}]
-}]}}}`
+}}}}`
 
 func TestParseLoggedOut(t *testing.T) {
 	post, err := parseInstagramPost(sampleLoggedOut)

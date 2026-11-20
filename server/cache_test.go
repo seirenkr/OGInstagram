@@ -111,8 +111,8 @@ func TestCacheModelBoundaryNormalizesCDNHosts(t *testing.T) {
 func graphQLPool(calls *atomic.Int32) *SessionPool {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		return mediaTestResponse(r, http.StatusOK, nil, []byte(`{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"DaD8phTyclR",`+
-			`"user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/big.jpg?oe=1","media_type":1}]}}}`)), nil
+		return mediaTestResponse(r, http.StatusOK, nil, []byte(`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"code":"DaD8phTyclR",`+
+			`"user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/big.jpg?oe=1","media_type":1}}}}`)), nil
 	})}
 	return &SessionPool{sessions: []*Session{{name: "us-1", client: client}}}
 }

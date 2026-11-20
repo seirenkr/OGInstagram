@@ -25,9 +25,9 @@ func TestPKShortcodeRoundTrips(t *testing.T) {
 }
 
 func storyBody(productType, pk, username string) string {
-	return `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"pk":"` + pk + `","code":"DerT8tHim4K","product_type":"` + productType +
+	return `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"pk":"` + pk + `","code":"DerT8tHim4K","product_type":"` + productType +
 		`","media_type":1,"taken_at":1790000000,"user":{"username":"` + username + `","full_name":"Name","is_verified":true},` +
-		`"image_versions2":{"candidates":[{"url":"https://scontent.cdninstagram.com/s.jpg","width":1080,"height":1920}]}}]}}}`
+		`"image_versions2":{"candidates":[{"url":"https://scontent.cdninstagram.com/s.jpg","width":1080,"height":1920}]}}}}}`
 }
 
 func TestParseGraphQLStoryChecksTheURL(t *testing.T) {
@@ -163,14 +163,14 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 	}
 
 	// Muted licensed music gets one DC recheck.
-	muted := `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"clips_metadata":{"music_info":{"music_consumption_info":{"should_mute_audio":true}}}}]}}}`
+	muted := `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"music_info":{"music_consumption_info":{"should_mute_audio":true}}}}}}}`
 	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, muted })
 	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, `"ok"`) || dcCalls.Load() != 1 {
 		t.Fatalf("muted: body %q, err %v, DC calls %d; want the DC copy", got, err, dcCalls.Load())
 	}
-	// 1675030 comes back at once; hiddenPost races DC separately.
-	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, `{"data":null,"errors":[{"code":1675030}]}` })
-	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, "1675030") || dcCalls.Load() != 0 {
+	// A withheld post comes back at once; hiddenPost races DC separately.
+	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, `{"data":{"xig_polaris_media":null}}` })
+	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, "xig_polaris_media") || dcCalls.Load() != 0 {
 		t.Fatalf("hidden: body %q, err %v, DC calls %d; want the IPv6 answer as is", got, err, dcCalls.Load())
 	}
 
@@ -206,11 +206,11 @@ func TestEgressRefusesOtherHosts(t *testing.T) {
 	}
 }
 
-func TestStory1675030IsFinalUntilThePathLooksClosed(t *testing.T) {
+func TestWithheldStoryIsFinalUntilThePathLooksClosed(t *testing.T) {
 	var d storySideDoor
 	for i := range 100 {
 		if d.closed(i%12 == 0) { // ~8%: private and deleted stories
-			t.Fatal("the usual share of 1675030 marked the path closed")
+			t.Fatal("the usual share of withheld stories marked the path closed")
 		}
 	}
 	closed := false
@@ -218,7 +218,7 @@ func TestStory1675030IsFinalUntilThePathLooksClosed(t *testing.T) {
 		closed = d.closed(true)
 	}
 	if !closed {
-		t.Fatal("a majority of 1675030 did not mark the path closed")
+		t.Fatal("a majority of withheld stories did not mark the path closed")
 	}
 
 	helpers := new(atomic.Int32)
@@ -229,7 +229,7 @@ func TestStory1675030IsFinalUntilThePathLooksClosed(t *testing.T) {
 		return Story{}, igErr(http.StatusNotFound, errorCodeMediaNotFound, "story not available")
 	}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return mediaTestResponse(r, 200, nil, []byte(`{"data":null,"errors":[{"code":1675030}]}`)), nil
+		return mediaTestResponse(r, 200, nil, []byte(`{"data":{"xig_polaris_media":null}}`)), nil
 	})}
 	a := newApp(Config{}, &SessionPool{sessions: []*Session{{name: "us-1", client: client}}}, offloadSigner{})
 	if _, err := a.getStory(context.Background(), "someone", "4011387627600768522", nil); err == nil || err.Code != errorCodeMediaNotFound || helpers.Load() != 0 {

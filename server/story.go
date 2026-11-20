@@ -43,7 +43,7 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 						return Story{}, perr
 					}
 				}
-				if perr != nil && perr.Code == errorCodeGraphQL && gjson.Get(body, "errors.0.code").Int() == graphQLFieldExceptionCode {
+				if perr != nil && perr.Code == errorCodeGraphQL && graphQLHidden(body) {
 					notFound := igErr(http.StatusNotFound, errorCodeMediaNotFound, "story not available")
 					notFound.Final = true
 					return Story{}, notFound
@@ -68,7 +68,7 @@ func parseGraphQLStory(username, id, body string) (Story, *AppError) {
 	if err != nil {
 		return Story{}, err
 	}
-	item := gjson.Get(body, "data.xdt_api__v1__media__shortcode__web_info.items.0")
+	item := gjson.Get(body, loggedOutItemPath)
 	if item.Get("product_type").String() != "story" || item.Get("pk").String() != id || !strings.EqualFold(post.Username, username) {
 		notFound := igErr(http.StatusNotFound, errorCodeMediaNotFound, "story not available")
 		notFound.Final = true
@@ -167,11 +167,11 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 	return embedDocument(h)
 }
 
-// storySideDoor watches 1675030 among live stories (normally ~8%); far more
+// storySideDoor watches withheld answers among live stories (normally ~8%); far more
 // means the post query no longer serves stories, and the helper takes over.
 type storySideDoor struct {
 	mu       sync.Mutex
-	ring     [100]bool // true: 1675030
+	ring     [100]bool // true: withheld
 	n, i     int
 	hidden   int
 	loggedAt time.Time
@@ -197,7 +197,7 @@ func (d *storySideDoor) closed(hidden bool) bool {
 	closed := d.n >= len(d.ring)/2 && d.hidden*100 > d.n*storySideDoorClosedPercent
 	if closed && time.Since(d.loggedAt) > time.Minute {
 		d.loggedAt = time.Now()
-		slog.Warn("story graphql looks closed; the external helper answers 1675030 stories", "hidden", d.hidden, "of", d.n)
+		slog.Warn("story graphql looks closed; the external helper answers withheld stories", "hidden", d.hidden, "of", d.n)
 	}
 	return closed && hidden
 }

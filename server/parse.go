@@ -8,29 +8,32 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// GraphQL error codes Instagram uses for per-client throttling and for a post
-// it will not show.
+// The GraphQL error code Instagram uses for per-client throttling.
+const graphQLRateLimitedCode = 1675004
+
+// The logged-out post query answers with the media and, unless it is gated,
+// a v1-shaped item inside it.
 const (
-	graphQLRateLimitedCode    = 1675004
-	graphQLFieldExceptionCode = 1675030
+	loggedOutMediaPath = "data.xig_polaris_media"
+	loggedOutItemPath  = loggedOutMediaPath + ".if_not_gated_logged_out"
 )
 
-func parseInstagramPost(body string) (Post, *AppError) {
-	root := gjson.Parse(body)
-	data := root.Get("data")
+// graphQLHidden: the media is null (missing or private) or comes without its
+// item (gated); neither is proof of absence.
+func graphQLHidden(body string) bool {
+	return gjson.Get(body, loggedOutMediaPath).Exists() && !present(gjson.Get(body, loggedOutItemPath))
+}
 
-	if it := data.Get("xdt_api__v1__media__shortcode__web_info.items.0"); present(it) {
+func parseInstagramPost(body string) (Post, *AppError) {
+	if it := gjson.Get(body, loggedOutItemPath); present(it) {
 		return parseV1(it)
 	}
-	// Errors arrive with data:null. field_exception (1675030) comes back for
-	// gated, hidden and missing posts alike, so it is not proof of absence.
-	if first := root.Get("errors.0"); first.Exists() {
-		code, msg := first.Get("code").Int(), first.Get("message").String()
-		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", fmt.Errorf("graphql %d: %s", code, msg))
+	if graphQLHidden(body) {
+		gating := gjson.Get(body, loggedOutMediaPath+".gating_ruling.gating_type")
+		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", fmt.Errorf("graphql withheld the media: gating_type %s", cmp.Or(gating.Raw, "none")))
 	}
-	// Only an explicitly empty items list proves absence; any other shape is schema drift.
-	if items := data.Get("xdt_api__v1__media__shortcode__web_info.items"); items.IsArray() && len(items.Array()) == 0 {
-		return Post{}, igErr(404, errorCodeMediaNotFound, "Sorry, this page isn't available. The link you followed may be broken, or the page may have been removed.")
+	if first := gjson.Get(body, "errors.0"); first.Exists() {
+		return Post{}, causedErr(502, errorCodeGraphQL, "Instagram could not load this post", fmt.Errorf("graphql %d: %s", first.Get("code").Int(), first.Get("message").String()))
 	}
 	return Post{}, igErr(502, errorCodeGraphQL, "Instagram response did not include media")
 }

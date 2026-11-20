@@ -44,7 +44,7 @@ func (f *fakeIG) pool() *SessionPool {
 			source, answer = "ruling", f.ruling
 		case r.URL.Path == "/api/v1/oembed/":
 			source, answer = "oembed", f.oembed
-		case r.URL.Path == "/graphql/query":
+		case strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent"):
 			time.Sleep(f.gqlDelay)
 			source, answer = "gql", igAnswer{200, f.gql}
 		case r.URL.Path == "/api/graphql/":
@@ -67,8 +67,8 @@ func (f *fakeIG) pool() *SessionPool {
 }
 
 const (
-	gqlHidden     = `{"data":null,"errors":[{"message":"field_exception","code":1675030}]}`
-	gqlFull       = `{"data":{"xdt_api__v1__media__shortcode__web_info":{"items":[{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}]}}}`
+	gqlHidden     = `{"data":{"xig_polaris_media":null}}`
+	gqlFull       = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}}}}`
 	gateTitle12   = "People under 20 can't see this content"
 	oembedGate3   = `{"status":"fail","message":"geoblock_required","gating_type_thrift":3,"title":"Gated","description":"d"}`
 	oembedGate12  = `{"status":"fail","message":"geoblock_required","gating_type_thrift":12,"title":"` + gateTitle12 + `","description":"d"}`
@@ -99,7 +99,7 @@ func helperPost(key string) Post {
 	return Post{Shortcode: key, Username: "instagram", Attachments: []Attachment{{Kind: "image", URL: helperPostURL}}}
 }
 
-// On 1675030 only the helper and oEmbed start at once; an account age gate
+// On a withheld post only the helper and oEmbed start at once; an account age gate
 // needs no follow-up.
 func TestFieldExceptionStartsHelperAndOembedAtOnce(t *testing.T) {
 	helpers := setHelper(t, func(_ context.Context, key string) (Post, *AppError) {
@@ -549,7 +549,7 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 				}
 				var v6GQL atomic.Int32
 				v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-					if r.URL.Path == "/graphql/query" {
+					if strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent") {
 						v6GQL.Add(1)
 						return mediaTestResponse(r, 200, nil, []byte(gqlHidden)), nil
 					}
