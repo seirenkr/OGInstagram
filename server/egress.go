@@ -1,13 +1,14 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
-	"hash/fnv"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,9 +56,11 @@ func egressHandler(pool []net.IP) http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		h := fnv.New32a()
-		h.Write([]byte(r.Header.Get("Proxy-Authorization")))
-		source := pool[h.Sum32()%uint32(len(pool))]
+		source, ok := egressSource(pool, r.Header.Get("Proxy-Authorization"))
+		if !ok {
+			http.Error(w, "unknown source", http.StatusProxyAuthRequired)
+			return
+		}
 		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: source}, Timeout: 5 * time.Second}
 		upstream, err := d.DialContext(r.Context(), "tcp6", r.Host)
 		if err != nil {
@@ -78,6 +81,18 @@ func egressHandler(pool []net.IP) http.Handler {
 		go pipe(upstream, buffered.Reader, client)
 		pipe(client, upstream, upstream)
 	})
+}
+
+// egressSource reads the address index a session asks for: Basic "a<index>:".
+func egressSource(pool []net.IP, auth string) (net.IP, bool) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	user, _, _ := strings.Cut(string(raw), ":")
+	digits, isIndex := strings.CutPrefix(user, "a")
+	i, convErr := strconv.Atoi(digits)
+	if err != nil || !isIndex || convErr != nil || i < 0 {
+		return nil, false
+	}
+	return pool[i%len(pool)], true
 }
 
 // pipe copies until either side ends, then closes both connections.

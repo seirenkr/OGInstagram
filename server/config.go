@@ -37,8 +37,11 @@ const (
 	ipv6AttemptTimeout     = time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond
-	dcRecheckTimeout       = 2 * time.Second // cold DC exits are slow
-	ipv6Strikes            = 3               // failures among the last ipv6Window attempts
+	dcRecheckTimeout       = 2 * time.Second  // cold DC exits are slow
+	ipv6Strikes            = 3                // failures among the last ipv6Window attempts
+	ipv6Retries            = 2                // other addresses tried after a throttled one
+	egressPoolSize         = 64               // tools/ipv6-pool.sh assigns as many
+	egressAddrCooldown     = 30 * time.Minute // Instagram keeps its verdict on an address that long
 	ipv6Window             = 10
 	ipv6PauseMin           = 2 * time.Minute
 	ipv6PauseMax           = time.Hour

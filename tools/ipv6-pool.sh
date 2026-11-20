@@ -13,18 +13,23 @@ if [ -z "$dev" ]; then
 fi
 pool=/etc/oginstagram/ipv6-pool.txt
 install -d -m 0755 /etc/oginstagram
-if [ ! -s "$pool" ]; then
+want=64 # egressPoolSize in server/config.go
+have=$(grep -c . "$pool" 2>/dev/null || true)
+if [ "${have:-0}" -lt "$want" ]; then
   addr=$(ip -6 addr show dev "$dev" scope global -deprecated | awk '$1 == "inet6" { print $2; exit }')
   if [ -z "$addr" ]; then
     echo "no global IPv6 address on $dev yet; the egress stays off" >&2
     exit 0
   fi
-  python3 -I - "$addr" 16 > "$pool.tmp" <<'PY'
+  # Existing addresses keep their indexes; new ones are appended.
+  { cat "$pool" 2>/dev/null || true
+    python3 -I - "$addr" $((want - ${have:-0})) <<'PY'
 import ipaddress, secrets, sys
 net = ipaddress.IPv6Interface(sys.argv[1].split('/')[0] + '/64').network
 for _ in range(int(sys.argv[2])):
     print(net[secrets.randbits(64)])
 PY
+  } > "$pool.tmp"
   mv "$pool.tmp" "$pool"
 fi
 while read -r addr; do

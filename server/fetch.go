@@ -364,17 +364,22 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 			if deadline, ok := ctx.Deadline(); ok {
 				budget = min(budget, time.Until(deadline)/2)
 			}
+			started := time.Now()
 			v6ctx, cancel := context.WithTimeout(ctx, budget)
 			v6spec := spec
 			v6spec.operation += "_v6" // count free IPv6 apart from paid DC
 			status, out, err := a.fetchOn(v6ctx, v6, v6spec, budget)
+			// A throttled address is refused at once, and the next one often is not.
+			for retry := 0; retry < ipv6Retries && err != nil && err.Code == errorCodeRateLimited && v6ctx.Err() == nil; retry++ {
+				status, out, err = a.fetchOn(v6ctx, v6, v6spec, budget)
+			}
 			cancel()
 			switch {
 			case ctx.Err() != nil:
 				gate.release()
 				return status, out, err
 			case err == nil:
-				gate.ok(spec.operation)
+				gate.ok(spec.operation, started)
 				if spec.dcRecheck == nil || !spec.dcRecheck(out) {
 					return status, out, nil
 				}
@@ -383,7 +388,7 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 				}
 				return status, out, nil
 			case !err.Ephemeral && !shouldRotate(err.Code) && status < 500:
-				gate.ok(spec.operation)
+				gate.ok(spec.operation, started)
 				return status, out, err
 			default:
 				gate.fail(spec.operation)
@@ -582,13 +587,17 @@ func (g *v6Gate) record(failed bool) {
 	g.next = (g.next + 1) % ipv6Window
 }
 
-func (g *v6Gate) ok(operation string) {
+// ok ends a pause only for a request that started after it (the probe); half
+// the pause carries over, so a source that keeps failing backs off further.
+func (g *v6Gate) ok(operation string, started time.Time) {
 	g.mu.Lock()
-	resumed := !g.until.IsZero()
-	if resumed {
-		// Reset field by field: assigning a zero v6Gate would also clear the held mutex.
-		g.recent, g.next, g.failures, g.until, g.pause, g.probeAt = [ipv6Window]bool{}, 0, 0, time.Time{}, 0, time.Time{}
-	} else {
+	resumed := !g.until.IsZero() && !started.Before(g.until)
+	switch {
+	case resumed:
+		// Field by field: assigning a zero v6Gate would also clear the held mutex.
+		g.recent, g.next, g.failures, g.until, g.probeAt = [ipv6Window]bool{}, 0, 0, time.Time{}, time.Time{}
+		g.pause /= 2
+	case g.until.IsZero():
 		g.record(false)
 	}
 	g.mu.Unlock()

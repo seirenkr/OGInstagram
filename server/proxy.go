@@ -16,6 +16,7 @@ import (
 
 type Session struct {
 	name string
+	addr int // IPv6 egress only: the pool index of the source address
 
 	mu     sync.Mutex
 	client *http.Client
@@ -48,30 +49,50 @@ type SessionPool struct {
 	cfg      Config
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
-	// Set for the IPv6 egress pool; nil means the DC proxy.
-	proxyURL func() *url.URL
+	// IPv6 egress only (nil means the DC proxy): until when each source
+	// address sits out after a failure.
+	addrDown []time.Time
 	dial     func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func (p *SessionPool) nextProxyURL() *url.URL {
-	if p.proxyURL != nil {
-		return p.proxyURL()
+// nextProxy returns the proxy for a new client. On the IPv6 egress the address
+// that just failed (failed >= 0) sits out, and a random rested one is picked.
+func (p *SessionPool) nextProxy(failed int) (*url.URL, int) {
+	if p.addrDown == nil {
+		return proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), -1
 	}
-	return proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID())
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if failed >= 0 {
+		p.addrDown[failed] = now.Add(egressAddrCooldown)
+	}
+	var rested []int
+	for i, until := range p.addrDown {
+		if !until.After(now) {
+			rested = append(rested, i)
+		}
+	}
+	addr := rand.IntN(len(p.addrDown))
+	if len(rested) > 0 {
+		addr = rested[rand.IntN(len(rested))]
+	}
+	return &url.URL{Scheme: "http", User: url.User("a" + strconv.Itoa(addr)), Host: "egress"}, addr
 }
 
-// newEgressPool connects through the IPv6 egress; each session id maps to one source address.
+// newEgressPool connects through the IPv6 egress; each session asks for its source address by index.
 func newEgressPool(socket, prefix string) *SessionPool {
 	pool := &SessionPool{
 		tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2),
-		proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User(newSessionID()), Host: "egress"} },
+		addrDown: make([]time.Time, egressPoolSize),
 		dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
 	for i := range proxySessionCount {
-		pool.sessions = append(pool.sessions, &Session{name: prefix + strconv.Itoa(i+1), client: buildSessionClient(pool.nextProxyURL(), pool)})
+		proxy, addr := pool.nextProxy(-1)
+		pool.sessions = append(pool.sessions, &Session{name: prefix + strconv.Itoa(i+1), addr: addr, client: buildSessionClient(proxy, pool)})
 	}
 	return pool
 }
@@ -81,7 +102,8 @@ func newSessionPool(cfg Config) *SessionPool {
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
 		for i := range proxySessionCount {
 			// A stable slot label: rotation replaces the exit IP behind it.
-			pool.sessions = append(pool.sessions, &Session{name: "us-" + strconv.Itoa(i+1), client: buildSessionClient(pool.nextProxyURL(), pool)})
+			proxy, _ := pool.nextProxy(-1)
+			pool.sessions = append(pool.sessions, &Session{name: "us-" + strconv.Itoa(i+1), addr: -1, client: buildSessionClient(proxy, pool)})
 		}
 	}
 
@@ -204,13 +226,20 @@ func (s *Session) getClient() *http.Client {
 // fail moves s off client to a new exit IP and cools it down. A late failure
 // from an already retired client leaves its replacement alone and reports false.
 func (p *SessionPool) fail(s *Session, client *http.Client) bool {
-	next := buildSessionClient(p.nextProxyURL(), p)
+	s.mu.Lock()
+	current, failed := s.client == client, s.addr
+	s.mu.Unlock()
+	if !current {
+		return false
+	}
+	proxy, addr := p.nextProxy(failed)
+	next := buildSessionClient(proxy, p)
 	s.mu.Lock()
 	if s.client != client {
 		s.mu.Unlock()
 		return false
 	}
-	s.client = next
+	s.client, s.addr = next, addr
 	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
 	if until := time.Now().Add(rotateCooldown); until.After(s.cooldownUntil) {
 		s.cooldownUntil = until

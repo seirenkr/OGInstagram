@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,8 +67,9 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 		dcCalls.Add(1)
 		return reply(200, `{"data":{"ok":true}}`), nil
 	})}
-	v6Pool := &SessionPool{proxyURL: func() *url.URL { return &url.URL{Scheme: "http", User: url.User("x"), Host: "egress"} }}
-	for i := range ipv6Strikes + 1 {
+	v6Pool := &SessionPool{addrDown: make([]time.Time, egressPoolSize)}
+	// Rotation swaps in a real client, so every throttled attempt needs its own session.
+	for i := range ipv6Strikes*(ipv6Retries+1) + 1 {
 		v6Pool.sessions = append(v6Pool.sessions, &Session{name: "v6-" + string(rune('a'+i)), client: v6})
 	}
 	return &App{cfg: Config{EgressPercent: 100}, pool: &SessionPool{sessions: []*Session{{name: "us-1", client: dc}}}, v6: v6Pool}, v6Calls, dcCalls
@@ -82,13 +83,56 @@ func TestV6GateResumesAfterPause(t *testing.T) {
 	if g.allow() {
 		t.Fatal("gate open right after the pause began")
 	}
+	g.ok("post", time.Now().Add(-time.Minute)) // a straggler from before the pause
+	if g.until.IsZero() {
+		t.Fatal("a straggler's success ended the pause")
+	}
 	g.until = time.Now().Add(-time.Second)
 	if !g.allow() {
 		t.Fatal("no probe after the pause ended")
 	}
-	g.ok("post") // used to clear the held mutex and crash on Unlock
-	if !g.allow() || !g.until.IsZero() || g.failures != 0 {
-		t.Fatalf("gate not reset after a successful probe: %+v", g)
+	g.ok("post", time.Now()) // used to clear the held mutex and crash on Unlock
+	if !g.allow() || !g.until.IsZero() || g.failures != 0 || g.pause != ipv6PauseMin/2 {
+		t.Fatalf("gate not reset after a successful probe, or the pause not halved: %+v", g)
+	}
+}
+
+func TestThrottledIPv6TriesAnotherAddress(t *testing.T) {
+	var n atomic.Int32
+	a, v6Calls, dcCalls := fallbackApp(func(*http.Request) (int, string) {
+		if n.Add(1) <= ipv6Retries {
+			return 200, `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`
+		}
+		return 200, `{"data":{"v6":true}}`
+	})
+	if _, body, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(body, `"v6"`) || v6Calls.Load() != ipv6Retries+1 || dcCalls.Load() != 0 {
+		t.Fatalf("body %q, err %v, IPv6 calls %d, DC calls %d; want the third address to answer", body, err, v6Calls.Load(), dcCalls.Load())
+	}
+}
+
+func TestFailedEgressAddressSitsOut(t *testing.T) {
+	p := &SessionPool{addrDown: make([]time.Time, 3)}
+	p.nextProxy(0)
+	for range 20 {
+		if u, addr := p.nextProxy(1); addr != 2 || u.User.Username() != "a2" {
+			t.Fatalf("picked %d (%s) with 0 and 1 sitting out", addr, u.User.Username())
+		}
+	}
+	if _, addr := p.nextProxy(2); addr < 0 || addr > 2 {
+		t.Fatalf("all addresses sitting out picked %d", addr)
+	}
+}
+
+func TestEgressSourceReadsTheIndex(t *testing.T) {
+	pool := []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), net.ParseIP("2001:db8::3")}
+	basic := func(user string) string { return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":")) }
+	if ip, ok := egressSource(pool, basic("a4")); !ok || !ip.Equal(pool[1]) {
+		t.Fatalf("a4 = %v, %v; want %v", ip, ok, pool[1])
+	}
+	for _, auth := range []string{basic("x"), basic("a-1"), basic("a"), "Basic !!", ""} {
+		if _, ok := egressSource(pool, auth); ok {
+			t.Fatalf("%q accepted", auth)
+		}
 	}
 }
 
@@ -102,9 +146,10 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 			t.Fatalf("request %d: %q, %v; want the DC answer after an IPv6 throttle", i, body, err)
 		}
 	}
-	// Three throttles reached IPv6 and paused it; the fourth went straight to DC.
-	if v6Calls.Load() != ipv6Strikes || dcCalls.Load() != ipv6Strikes+1 {
-		t.Fatalf("IPv6 calls = %d, DC calls = %d; want %d and %d", v6Calls.Load(), dcCalls.Load(), ipv6Strikes, ipv6Strikes+1)
+	// Each of three requests tried three addresses before DC and counted one
+	// strike; that paused IPv6 and the fourth went straight to DC.
+	if want := ipv6Strikes * (ipv6Retries + 1); v6Calls.Load() != int32(want) || dcCalls.Load() != ipv6Strikes+1 {
+		t.Fatalf("IPv6 calls = %d, DC calls = %d; want %d and %d", v6Calls.Load(), dcCalls.Load(), want, ipv6Strikes+1)
 	}
 	if a.v6Gate("post").allow() {
 		t.Fatal("IPv6 still allowed after repeated throttles")
