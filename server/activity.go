@@ -16,18 +16,12 @@ const (
 	asMediaType = "application/activity+json"
 )
 
-// Each card URL also serves its ActivityStreams object (SWICG ActivityPub
-// Discovery, "Content negotiation"), so the canonical card URL is the object id.
-// www. serves the same cards as its parent host.
 func apOrigin(baseURL string) string { return strings.Replace(baseURL, "://www.", "://", 1) }
 
 func actorID(baseURL, username string) string {
 	return apOrigin(baseURL) + "/" + url.PathEscape(strings.ToLower(username))
 }
 
-// postRefs names the post card a request renders: every index form becomes
-// /{p|reel}/{code}/{n} with the index clamped to the post, and other query noise
-// is dropped. The host stays, so g. gallery Notes keep their own ids.
 func postRefs(baseURL string, post Post, postType string, mediaIndex int, specified bool) (id, actor string) {
 	id = apOrigin(baseURL) + "/" + normalizePostType(postType) + "/" + url.PathEscape(post.Shortcode)
 	if specified {
@@ -41,11 +35,6 @@ func storyRefs(baseURL string, story Story) (id, actor string) {
 		actorID(baseURL, story.Username)
 }
 
-// wantsActivity reports whether Accept ranks an AS2 type (activity+json, or
-// ld+json with or without the AS profile) at least as high as HTML. Wildcards
-// and a missing Accept get the card, so browsers and preview bots never see JSON.
-// ponytail: splits on every comma, so a quoted parameter containing one is lost;
-// the AS profile URL has none.
 func wantsActivity(r *http.Request) bool {
 	as2, htmlQ, htmlRank := 0.0, -1.0, 0
 	for _, field := range r.Header.Values("Accept") {
@@ -58,7 +47,6 @@ func wantsActivity(r *http.Request) bool {
 			if err != nil {
 				continue
 			}
-			// The most specific range that covers HTML sets its quality.
 			rank := 0
 			switch mediaType {
 			case asMediaType, "application/ld+json":
@@ -82,8 +70,6 @@ func linkValue(href, rel, mediaType string) string {
 	return "<" + href + `>; rel="` + rel + `"; type="` + mediaType + `"`
 }
 
-// apLinks is the Link header advertising a card's alternate (idType) and author
-// (SWICG "Publishing HTML"); an actor's own card passes no author.
 func apLinks(id, idType, actor string) string {
 	header := linkValue(id, "alternate", idType)
 	if actor != "" {
@@ -92,7 +78,6 @@ func apLinks(id, idType, actor string) string {
 	return header
 }
 
-// apLinkTags are the <head> twins of apLinks: one alternate and one author link.
 func apLinkTags(id, actor string) []string {
 	tags := []string{`<link rel="alternate" type="` + asMediaType + `" href="` + html.EscapeString(id) + `">`}
 	if actor != "" {
@@ -101,12 +86,10 @@ func apLinkTags(id, actor string) []string {
 	return tags
 }
 
-// The HTML card shares the object's URL; Vary because the card route negotiates.
 func activityResp(body []byte, id, actor string) resp {
 	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": asMediaType, "Vary": "Accept", "Link": apLinks(id, "text/html", actor)}, body: body}
 }
 
-// Federated clients get a fixed verdict, never upstream statuses or helper messages.
 func activityErrorResp(err *AppError) resp {
 	status, detail := http.StatusNotFound, "not found"
 	switch {
@@ -214,10 +197,7 @@ func profileDigestContent(p Profile, gallery bool) string {
 	return content
 }
 
-// The collections exist because ActivityPub requires inbox and outbox; this
-// server never delivers or accepts activities, so they stay empty. Without a
-// publicKey GoToSocial rejects the actor and so every Note attributed to it,
-// whatever its fetch mode; Mastodon and Misskey resolve both.
+// Without a publicKey GoToSocial rejects the actor (and Notes attributed to it); Mastodon and Misskey resolve both.
 func (a *App) profileActor(baseURL string, p Profile, gallery bool) []byte {
 	id := actorID(baseURL, p.Username)
 	person := map[string]any{

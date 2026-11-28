@@ -38,7 +38,6 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 				}
 				story, perr := parseGraphQLStory(username, id, body)
 				if live := time.Since(time.UnixMilli(int64(pk>>23)+igEpochMs)) < 24*time.Hour; live {
-					// Final unless the path looks closed: the helper serves deleted stories from cache.
 					if a.storyDoor.closed(perr != nil && perr.Code == errorCodeGraphQL) {
 						return Story{}, perr
 					}
@@ -62,7 +61,6 @@ func (a *App) getStory(ctx context.Context, username, id string, meta *fetchMeta
 	})
 }
 
-// parseGraphQLStory checks owner, id and kind: the post query ignores the URL's username.
 func parseGraphQLStory(username, id, body string) (Story, *AppError) {
 	post, err := parseInstagramPost(body)
 	if err != nil {
@@ -167,11 +165,10 @@ func (a *App) buildStoryEmbedHTML(baseURL, origin string, story Story, mediaHref
 	return embedDocument(h)
 }
 
-// storySideDoor watches withheld answers among live stories (normally ~8%); far more
-// means the post query no longer serves stories, and the helper takes over.
+// Live stories normally see ~8% withheld; far more means the post query stopped serving stories.
 type storySideDoor struct {
 	mu       sync.Mutex
-	ring     [100]bool // true: withheld
+	ring     [100]bool
 	n, i     int
 	hidden   int
 	loggedAt time.Time

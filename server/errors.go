@@ -57,9 +57,7 @@ type AppError struct {
 	Cause         error `json:"-"`
 
 	Ephemeral bool
-	// Final ends a staged race at once: later sources cannot change the verdict
-	// in time to matter for this response.
-	Final bool
+	Final     bool
 
 	CardCode, CardTitle, CardDesc string
 }
@@ -94,6 +92,8 @@ func errorCard(kind, errorCode string) (title, desc string) {
 		return "Account unavailable", "This account isn't available - it may not exist, be deactivated, or the username is incorrect."
 	case "story":
 		return "Story unavailable", "This story isn't available - stories expire after 24 hours, and it may also be from a private account or the link may be incorrect."
+	case "link":
+		return "Link unavailable", "This link isn't available - it may be deleted, unsupported, or incorrect."
 	}
 	switch errorCode {
 	case errorCodeGeoBlocked:
@@ -111,7 +111,6 @@ func contextAppError(ctx context.Context) *AppError {
 	return ephemeralErr(499, "", "cancelled")
 }
 func preferredError(current, candidate *AppError) *AppError {
-	// A skipped source must not hide a real upstream failure from the short error cache.
 	if current == nil || (isTransient(current.Code) && candidate != nil &&
 		(!isTransient(candidate.Code) || (current.Ephemeral && !candidate.Ephemeral))) {
 		return candidate

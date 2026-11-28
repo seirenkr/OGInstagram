@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"compress/gzip"
 	"context"
@@ -25,9 +26,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// One outbound request. interpret turns the upstream status and body into an
-// AppError (nil accepts it); it runs inside fetchRequest so the deferred log
-// still sees the final error.
 type fetchSpec struct {
 	operation  string
 	method     string
@@ -37,14 +35,11 @@ type fetchSpec struct {
 	expectJSON bool
 	headers    map[string]string
 	interpret  func(status int, raw []byte) *AppError
-	// An advisory request's failures say nothing about the exit IP: they never
-	// rotate its session, and only its successes feed the RTT.
-	advisory bool
-	maxBytes int // > 0: keep only the first maxBytes; 0: refuse bodies over maxResponseBytes
-	// dcRecheck asks for a successful IPv6 answer to be refetched through DC.
-	dcRecheck func(body string) bool
-	// page: follow redirects, except to the login wall.
-	page bool
+	advisory   bool
+	maxBytes   int
+	dcRecheck  func(body string) bool
+	page       bool
+	redirect   bool
 }
 
 func statusOnly(status int, _ []byte) *AppError {
@@ -73,11 +68,15 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	if req.Header.Get("Accept-Encoding") == "" {
 		req.Header.Set("Accept-Encoding", "br, gzip")
 	}
-	if spec.expectJSON || spec.page {
-		// API redirects lead to login/challenge HTML, not the requested media.
-		// Keep the shared client's policy intact for other request types.
+	if spec.expectJSON || spec.page || spec.redirect {
 		noRedirect := *client
 		noRedirect.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if spec.redirect {
+				if len(via) < 3 && isShareRedirectHop(via[len(via)-1].URL, req.URL) {
+					return nil
+				}
+				return http.ErrUseLastResponse
+			}
 			if !spec.page || loginWall(req.URL) {
 				return http.ErrUseLastResponse
 			}
@@ -96,12 +95,26 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 		return 0, "", requestError(err, spec.subject+" request failed")
 	}
 	defer resp.Body.Close()
-	wire := countingReader{resp.Body, outboundCounter(spec.operation)}
 	status = resp.StatusCode
+	if spec.redirect {
+		location := ""
+		if status >= 300 && status < 400 {
+			if rawLoc := strings.TrimSpace(resp.Header.Get("Location")); rawLoc != "" {
+				if resolved, err := resp.Request.URL.Parse(rawLoc); err == nil {
+					location = resolved.String()
+				}
+			}
+		}
+		if err := spec.interpret(status, []byte(location)); err != nil {
+			return status, "", err
+		}
+		return status, location, nil
+	}
+	wire := countingReader{resp.Body, outboundCounter(spec.operation)}
 	contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0]))
 	isPage := spec.expectJSON && (contentType == "text/html" || contentType == "application/xhtml+xml")
 	pageError := func() (int, string, *AppError) {
-		// Cancel before closing: HTTP/2 can stop the stream without draining it.
+		// Cancel before closing so HTTP/2 resets the stream without draining it.
 		cancel()
 		if status >= 400 {
 			if err := spec.interpret(status, nil); err != nil {
@@ -119,7 +132,7 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	}
 	readLimit := int64(cmp.Or(spec.maxBytes, maxResponseBytes))
 	if isPage {
-		// Some APIs label small JSON errors text/html; a few KB tells them from a real page.
+		// Some APIs label small JSON errors or oEmbed's "No Media Match" 404 as text/html.
 		readLimit = pageProbeBytes
 	}
 	var body io.Reader = wire
@@ -144,7 +157,8 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	if ctx.Err() != nil {
 		return status, "", contextAppError(ctx)
 	}
-	if isPage && (readErr != nil || len(raw) > pageProbeBytes || !gjson.ValidBytes(raw)) {
+	plainOembedMiss := status == http.StatusNotFound && bytes.Equal(bytes.TrimSpace(raw), []byte("No Media Match"))
+	if isPage && (readErr != nil || len(raw) > pageProbeBytes || (!gjson.ValidBytes(raw) && !plainOembedMiss)) {
 		return pageError()
 	}
 	if readErr != nil {
@@ -162,9 +176,7 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	return status, string(raw), nil
 }
 
-// Compressed body bytes per operation since the last "outbound bytes" line:
-// proxy spend is billed on the wire, and sampled success lines cannot be summed.
-var outboundBytes sync.Map // operation -> *atomic.Int64
+var outboundBytes sync.Map
 var outboundBytesLoggedAt atomic.Int64
 
 func outboundCounter(operation string) *atomic.Int64 {
@@ -194,13 +206,11 @@ func webLoggedOutSpec(shortcode string) fetchSpec {
 }
 
 type stagedSource[T any] struct {
-	name  string // log label
+	name  string
 	after time.Duration
 	fetch func(context.Context) (T, *AppError)
 }
 
-// Sources race on a schedule; first valid result wins. A failure pulls the
-// next source in early. Must be ordered by `after`, first at 0.
 func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, *AppError) {
 	type result struct {
 		name  string
@@ -246,8 +256,6 @@ func stagedFetch[T any](parent context.Context, sources ...stagedSource[T]) (T, 
 	start()
 	arm()
 
-	// One line per fetch that hedged or failed: the hedge rate and parse
-	// failures (format drift) are otherwise invisible. Clean first-source wins log nothing.
 	var failures []string
 	report := func(winner string, extra ...any) {
 		if winner == "" || next > 1 || len(failures) > 0 {
@@ -330,16 +338,17 @@ func logOutbound(ctx context.Context, operation, session, method, rawURL string,
 	logger(ctx).WarnContext(ctx, "outbound request failed", attrs...)
 }
 
-func loginWall(u *url.URL) bool {
-	if !isInstagramURL(u.String()) {
-		return false
-	}
-	for _, path := range []string{"/accounts/login", "/challenge", "/checkpoint"} {
-		if u.Path == path || strings.HasPrefix(u.Path, path+"/") {
+func isLoginWallPath(path string) bool {
+	for _, prefix := range []string{"/accounts/login", "/challenge", "/checkpoint"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+func loginWall(u *url.URL) bool {
+	return isInstagramURL(u.String()) && isLoginWallPath(u.Path)
 }
 
 func isInstagramURL(rawURL string) bool {
@@ -347,19 +356,16 @@ func isInstagramURL(rawURL string) bool {
 	return err == nil && u.Scheme == "https" && (u.Hostname() == "www.instagram.com" || u.Hostname() == "i.instagram.com")
 }
 
-// fetchViaProxy tries the IPv6 egress first and falls back to the DC proxy when
-// the source is to blame; answers about the content return as is.
 func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *AppError) {
 	v6 := a.v6
-	if spec.page {
-		v6 = a.v6Pages // a page's login wall must not rotate API sessions
+	if spec.page || spec.redirect {
+		v6 = a.v6Pages
 	}
 	if v6 != nil && isInstagramURL(spec.url) && mathrand.IntN(100) < a.cfg.EgressPercent {
 		gate := a.v6Gate(spec.operation)
 		if gate.allow() {
-			// Leave DC at least half of the time left.
 			budget := ipv6AttemptTimeout
-			if spec.page {
+			if spec.page || spec.redirect {
 				budget = ipv6PageAttemptTimeout
 			}
 			if deadline, ok := ctx.Deadline(); ok {
@@ -368,9 +374,8 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 			started := time.Now()
 			v6ctx, cancel := context.WithTimeout(ctx, budget)
 			v6spec := spec
-			v6spec.operation += "_v6" // count free IPv6 apart from paid DC
+			v6spec.operation += "_v6"
 			status, out, err := a.fetchOn(v6ctx, v6, v6spec, budget)
-			// A throttled address is refused at once, and the next one often is not.
 			for retry := 0; retry < ipv6Retries && err != nil && err.Code == errorCodeRateLimited && v6ctx.Err() == nil; retry++ {
 				status, out, err = a.fetchOn(v6ctx, v6, v6spec, budget)
 			}
@@ -399,7 +404,6 @@ func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *
 	return a.fetchDC(ctx, spec, dcAttemptTimeout, dcAttemptTimeout)
 }
 
-// fetchDC bounds one DC request; an exit still waiting at hungAfter is replaced.
 func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time.Duration) (int, string, *AppError) {
 	if spec.advisory {
 		ctx, cancel := context.WithTimeout(ctx, limit)
@@ -425,9 +429,6 @@ func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time
 	return status, out, err
 }
 
-// One request on pool: pick a session, run it, then hold that session
-// accountable. Ephemeral errors (deadlines, cooldowns) are ours, so only a
-// non-ephemeral, rotatable code marks the session bad.
 func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hungAfter time.Duration) (status int, out string, ferr *AppError) {
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
@@ -444,9 +445,6 @@ func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hu
 	client := s.getClient()
 	defer func() {
 		elapsed := time.Since(started)
-		// Instagram answers in well under a second. Running into a deadline of
-		// hungAfter or more means the exit IP hung (outlier ejection, as in Envoy):
-		// replace it. A shorter caller deadline says nothing about the exit IP.
 		hung := !spec.advisory && ferr != nil && ferr.Status == http.StatusGatewayTimeout && elapsed >= hungAfter
 		rotated := hung || (!spec.advisory && ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
 		pool.done(s, client, elapsed, ferr == nil || hung)
@@ -495,8 +493,6 @@ func instagramJSON(status int, raw []byte) *AppError {
 	return nil
 }
 
-// GraphQL signals throttling in a 200 body, and its other HTTP errors come from
-// the endpoint (retired doc_id, rejected lsd), not from the post or the exit IP.
 func graphQLJSON(status int, raw []byte) *AppError {
 	if err := instagramJSON(status, raw); err != nil {
 		if status >= 400 && status != 401 && status != 403 && status != 429 {
@@ -511,10 +507,13 @@ func graphQLJSON(status int, raw []byte) *AppError {
 	return nil
 }
 
-// mutedMusic: Instagram mutes licensed music in the VPS's region, not on DC's US exits.
+// Instagram mutes licensed audio in the VPS's region, not on DC's US exits.
 func mutedMusic(body string) bool {
 	item := gjson.Get(body, loggedOutItemPath)
-	if item.Get("clips_metadata.music_info.music_consumption_info.should_mute_audio").Bool() {
+	if item.Get("clips_metadata.music_info.music_consumption_info.should_mute_audio").Bool() ||
+		item.Get("clips_metadata.original_sound_info.should_mute_audio").Bool() ||
+		item.Get("clips_metadata.original_sound_info.consumption_info.should_mute_audio_reason").String() != "" ||
+		present(item.Get("clips_metadata.original_sound_info.consumption_info.should_mute_audio_reason_type")) {
 		return true
 	}
 	muted := false
@@ -540,7 +539,7 @@ func pageSpec(operation, rawURL string) fetchSpec {
 	}
 }
 
-// loggedOutQuerySpec posts a logged-out web app query; the trailing slash matters.
+// Trailing slash on /api/graphql/ is required.
 func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fetchSpec {
 	encoded, _ := json.Marshal(variables)
 	lsd := rand.Text()
@@ -562,13 +561,11 @@ func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fe
 	}
 }
 
-// v6Gate pauses IPv6 for one operation after ipv6Strikes failures in the last
-// ipv6Window: Instagram also limits a whole /64 per endpoint.
 type v6Gate struct {
-	strikes  int    // 0: ipv6Strikes
-	source   string // log label; "": the IPv6 egress
+	strikes  int
+	source   string
 	mu       sync.Mutex
-	recent   [ipv6Window]bool // true: failed
+	recent   [ipv6Window]bool
 	next     int
 	failures int
 	until    time.Time
@@ -581,7 +578,6 @@ func (a *App) v6Gate(operation string) *v6Gate {
 	return g.(*v6Gate)
 }
 
-// dcGate pauses an operation that ipv6Window fresh exits in a row refused: the endpoint is refusing, not the exits.
 func (a *App) dcGate(operation string) *v6Gate {
 	g, _ := a.v6Gates.LoadOrStore("dc "+operation, &v6Gate{strikes: ipv6Window, source: "dc proxy"})
 	return g.(*v6Gate)
@@ -601,7 +597,6 @@ func (g *v6Gate) allow() bool {
 	return true
 }
 
-// release frees a probe that ended without an answer.
 func (g *v6Gate) release() {
 	g.mu.Lock()
 	g.probeAt = time.Time{}
@@ -619,13 +614,11 @@ func (g *v6Gate) record(failed bool) {
 	g.next = (g.next + 1) % ipv6Window
 }
 
-// ok ends a pause only for the probe; half the pause carries over, so a failing source backs off further.
 func (g *v6Gate) ok(operation string, started time.Time) {
 	g.mu.Lock()
 	resumed := !g.until.IsZero() && !started.Before(g.until)
 	switch {
 	case resumed:
-		// Field by field: assigning a zero v6Gate would also clear the held mutex.
 		g.recent, g.next, g.failures, g.until, g.probeAt = [ipv6Window]bool{}, 0, 0, time.Time{}, time.Time{}
 		g.pause /= 2
 	case g.until.IsZero():
@@ -641,7 +634,7 @@ func (g *v6Gate) fail(operation string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if time.Now().Before(g.until) {
-		return // a straggler from before the pause
+		return
 	}
 	g.record(true)
 	if g.until.IsZero() && g.failures < cmp.Or(g.strikes, ipv6Strikes) {
@@ -668,8 +661,6 @@ func oembedSpec(shortcode string) fetchSpec {
 			"Accept":      "*/*",
 			"X-IG-App-ID": instagramAppID,
 		},
-		// oEmbed's JSON failure body carries Instagram's own reason for
-		// oembedVerdict; HTML pages, throttling and server errors are classified here.
 		interpret: func(status int, raw []byte) *AppError {
 			if raw == nil || status == http.StatusTooManyRequests || status >= 500 {
 				return instagramJSON(status, raw)
@@ -683,6 +674,24 @@ func oembedSpec(shortcode string) fetchSpec {
 func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
 	status, body, err := a.fetchOn(ctx, a.pool, oembedSpec(shortcode), proxyHungAfter)
 	return oembedOutcome{status: status, body: body, ok: err == nil}
+}
+
+func oembedNotFound(o oembedOutcome) bool {
+	return o.ok && o.status == http.StatusNotFound &&
+		(strings.TrimSpace(o.body) == "No Media Match" || gjson.Get(o.body, "status").String() == "fail")
+}
+
+// Only gating type 2 is regional; 3/10/11/12 are age/audience restrictions.
+func gatingError(gatingType int, title, desc string, base AppError) *AppError {
+	base.Code, base.Status = errorCodeRestricted, http.StatusForbidden
+	if gatingType == 2 {
+		base.Code, base.Status = errorCodeGeoBlocked, http.StatusUnavailableForLegalReasons
+	}
+	base.Ephemeral, base.Final = false, false
+	if title != "" {
+		base.CardCode, base.CardTitle, base.CardDesc = base.Code, title, desc
+	}
+	return &base
 }
 
 func oembedVerdict(o oembedOutcome, shortcode string, baseErr AppError) (Post, *AppError) {
@@ -700,14 +709,7 @@ func oembedVerdict(o oembedOutcome, shortcode string, baseErr AppError) (Post, *
 	}
 	msg := root.Get("message").String()
 	if msg == "geoblock_required" {
-		// Every gate kind gets this message; only gating type 2 is regional. Either
-		// way it is Instagram's verdict on the post, so it caches like one.
-		baseErr.Code, baseErr.Status = errorCodeRestricted, http.StatusForbidden
-		if root.Get("gating_type_thrift").Int() == 2 {
-			baseErr.Code, baseErr.Status = errorCodeGeoBlocked, http.StatusUnavailableForLegalReasons
-		}
-		msg = baseErr.Code
-		baseErr.Ephemeral, baseErr.Final = false, false
+		return Post{}, gatingError(int(root.Get("gating_type_thrift").Int()), root.Get("title").String(), root.Get("description").String(), baseErr)
 	}
 	if title := root.Get("title").String(); msg != "" && title != "" {
 		baseErr.CardCode, baseErr.CardTitle, baseErr.CardDesc = msg, title, root.Get("description").String()
@@ -730,7 +732,7 @@ func parseOembedPost(shortcode, body string) (Post, bool) {
 	}
 	return Post{
 		Shortcode: shortcode,
-		Partial:   true, // a thumbnail only
+		Partial:   true,
 		Username:  username,
 		FullName:  html.UnescapeString(firstGroup(oembedSharedByRE, root.Get("html").String())),
 		Caption:   root.Get("title").String(),

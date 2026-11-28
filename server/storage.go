@@ -33,9 +33,7 @@ const (
 var errCorruptSQLite = errors.New("corrupt SQLite database")
 
 type localStore struct {
-	state *sql.DB
-	// Metrics accumulate per process and are upserted under this random id, so
-	// blue and green slots sharing the volume never overwrite each other's rows.
+	state    *sql.DB
 	instance string
 	mu       sync.Mutex
 	bucket   int64
@@ -61,8 +59,6 @@ func openLocalStore(dataDir string) (*localStore, error) {
 	var err error
 	s.state, err = openSQLite(statePath)
 	if errors.Is(err, errCorruptSQLite) {
-		// Models and metrics are expendable: keep the damaged file for inspection
-		// and start empty instead of refusing to serve.
 		aside := fmt.Sprintf("%s.corrupt-%d", statePath, time.Now().Unix())
 		for _, suffix := range []string{"", "-wal", "-shm"} {
 			if err := os.Rename(statePath+suffix, aside+suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -84,8 +80,6 @@ func openLocalStore(dataDir string) (*localStore, error) {
 	return s, nil
 }
 
-// Model TTLs are capped at 24 h, so expiry bounds the table; the DROPs clear
-// the capacity bookkeeping older releases created.
 func (s *localStore) initSchema(ctx context.Context) error {
 	_, err := s.state.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS models (
@@ -113,8 +107,7 @@ func openSQLite(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Create with private permissions before SQLite opens its WAL and shared
-	// memory files, which inherit the database's permissions.
+	// Create 0600 before SQLite opens WAL/SHM, which inherit the DB file mode.
 	file, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
@@ -123,7 +116,7 @@ func openSQLite(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	params := url.Values{}
-	// max_page_count caps the file at 3 GiB (4 KiB pages).
+	// max_page_count(786432) = 3 GiB at 4 KiB pages.
 	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(NORMAL)", "busy_timeout(1000)", "cache_size(-2048)", "journal_size_limit(8388608)", "max_page_count(786432)"} {
 		params.Add("_pragma", pragma)
 	}
@@ -133,8 +126,6 @@ func openSQLite(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One connection bounds SQLite page cache and serializes local writers.
-	// BEGIN IMMEDIATE also serializes independent processes using the same volume.
 	db.SetMaxOpenConns(1)
 	var integrity string
 	err = db.QueryRow("PRAGMA quick_check").Scan(&integrity)
@@ -172,8 +163,6 @@ func (s *localStore) putModel(ctx context.Context, kind, key string, value []byt
 	if !expires.After(now) {
 		return nil
 	}
-	// A bounded sweep keeps a backlog left by hours without writes from
-	// overrunning the put deadline.
 	if _, err := s.state.ExecContext(ctx, "DELETE FROM models WHERE rowid IN (SELECT rowid FROM models WHERE expires_at <= ? ORDER BY expires_at LIMIT ?)", now.UnixMilli(), modelSweepBatch); err != nil {
 		return err
 	}
@@ -226,8 +215,6 @@ func (s *localStore) RecordMetric(ctx context.Context, category string, duration
 	return err
 }
 
-// flushMetrics upserts this process's running totals and forgets closed buckets
-// once they are stored. The caller holds s.mu.
 func (s *localStore) flushMetrics(ctx context.Context, now time.Time) error {
 	s.bucket = now.Unix() / metricBucketSeconds * metricBucketSeconds
 	if len(s.pending) == 0 {

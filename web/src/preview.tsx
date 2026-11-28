@@ -91,7 +91,6 @@ function loadTurnstile(): Promise<void> {
   return turnstileReady;
 }
 
-// Callers pass an already-canonicalized service host (see app.tsx).
 export function HighlightedHost({ host }: { host: string }) {
   if (!host.toLowerCase().startsWith("og")) return host;
   return <><strong className="text-kumo-brand">{host.slice(0, 2)}</strong>{host.slice(2)}</>;
@@ -187,7 +186,6 @@ const EMOJI_CLASS = "inline-block h-[1.1em] w-[1.1em] align-[-0.18em]";
 function CustomEmoji({ name }: { name: string }) {
   switch (name.toLowerCase()) {
     case "verified":
-      // docs/discord-emojis/verified.svg: this icon over a white disc.
       return <span className={`relative ${EMOJI_CLASS}`} role="img" aria-label={`:${name}:`}>
         <span className="absolute inset-1/4 rounded-full bg-white" />
         <SealCheck className="relative h-full w-full" weight="fill" color="#0095f6" aria-hidden="true" />
@@ -249,7 +247,6 @@ function GalleryTile({ item, single = false, className = "" }: TileProps) {
   const [failed, setFailed] = useState(false);
   const [video, setVideo] = useState(false);
   const poster = offloadPoster(item.url, location.origin);
-  // Only offload links can be video; their Content-Type says which.
   useEffect(() => {
     if (!poster) return;
     const controller = new AbortController();
@@ -305,7 +302,6 @@ function EmbedChildView({ child, lang }: { child: EmbedChild; lang: string }) {
   }
 }
 
-// The accent bar sits inside the gray border, which clips it to the corners.
 function ComponentEmbedView({ embed, lang }: { embed: ComponentEmbed; lang: string }) {
   return <article className="hero-item relative mt-3 flex max-w-[30rem] flex-col gap-2 overflow-hidden rounded-lg border border-kumo-hairline bg-kumo-base py-3 pr-3 pl-4 text-[0.8rem] leading-[1.45] text-kumo-default max-sm:text-xs">
     {embed.accent ? <span className="absolute inset-y-0 left-0 w-1" style={{ backgroundColor: embed.accent }} aria-hidden="true" /> : null}
@@ -313,7 +309,6 @@ function ComponentEmbedView({ embed, lang }: { embed: ComponentEmbed; lang: stri
   </article>;
 }
 
-// The demo post, in the layout the bot sends to Discord.
 function sampleEmbed(): ComponentEmbed | undefined {
   const asset = (file: string) => ({ url: `${location.origin}/preview/v1/${file}` });
   return parseComponentEmbed(JSON.stringify({ component: { type: 17, accent_color: 0xff0069, components: [
@@ -448,7 +443,6 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
     };
   }, [baseHost, previewActive, reduceMotion, samplePost]);
 
-  // The disabled input dropped focus to <body> while verifying.
   useEffect(() => {
     if (wasVerifying.current && !verifying && document.activeElement === document.body) input.current?.focus();
     wasVerifying.current = verifying;
@@ -470,7 +464,6 @@ function Preview({ brand, host, lang, copy, turnstileSiteKey, reduceMotion }: Pr
     previewAbort.current = controller;
     setLoading(true);
     setError(null);
-    // A token retry fills in the message already on screen.
     const id = token === undefined ? ++lastPostId.current : lastPostId.current;
     if (token === undefined) {
       setInputValue("");

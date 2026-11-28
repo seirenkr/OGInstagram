@@ -8,13 +8,22 @@ const storyIdPattern = /^[0-9]{1,32}$/;
 
 const maxPostMediaItems = 50;
 
-// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
+const reservedInstagramPaths = new Set([
+  "about", "accounts", "ads", "api", "audio",
+  "challenge", "channels", "checkpoint", "create",
+  "direct", "directory", "download", "emails",
+  "explore", "graphql", "help", "legal", "login",
+  "notifications", "p", "popular", "privacy",
+  "profiles", "qr", "reel", "reels", "session",
+  "settings", "share", "signup", "static",
+  "stories", "support", "terms", "threads", "tv",
+  "users", "web", "your_activity",
+]);
+
 function isStoriesPath(segments: string[]): boolean {
   return segments.length === 3 && segments[0] === "stories" && segments[1] !== "highlights" && usernamePattern.test(segments[1]) && storyIdPattern.test(segments[2]);
 }
 
-// Accepts /{p|reel|reels}/{shortcode}[/{index}] with an optional leading /{username}.
-// /share/{p|reel}/X carries a share token, not a shortcode.
 function parseEmbedSegments(segments: string[]): EmbedRoute | null {
   for (const offset of [0, 1]) {
     const length = segments.length - offset;
@@ -24,12 +33,27 @@ function parseEmbedSegments(segments: string[]): EmbedRoute | null {
       && isPostRouteType(segments[offset])
       && shortcodePattern.test(segments[offset + 1])
     ) {
+      if (offset === 0 && (segments[0] === "reel" || segments[0] === "reels") && segments[1] === "audio") {
+        return null;
+      }
       if (length === 2) return { pathIndex: null };
       const pathIndex = parseCanonicalDecimal(segments[offset + 2]);
       return pathIndex === null ? null : { pathIndex };
     }
   }
   return null;
+}
+
+function parseShareSegments(segments: string[]): EmbedRoute | null {
+  if (segments[0] !== "share" || segments.length < 2) return null;
+  const offset = segments[1] === "p" || segments[1] === "reel" ? 2 : 1;
+  const length = segments.length - offset;
+  if ((length !== 1 && length !== 2) || !shortcodePattern.test(segments[offset])) {
+    return null;
+  }
+  if (length === 1) return { pathIndex: null };
+  const pathIndex = parseCanonicalDecimal(segments[offset + 1]);
+  return pathIndex === null ? null : { pathIndex };
 }
 
 function isPostRouteType(value: string): boolean {
@@ -58,7 +82,6 @@ function boundedMediaIndex(value: number): number {
   return Math.min(maxPostMediaItems - 1, Math.max(0, value));
 }
 
-// Like Go's splitPath(url.Path): decode the whole path, then split.
 function splitPath(path: string): string[] {
   let decoded: string;
   try {
@@ -71,9 +94,6 @@ function splitPath(path: string): string[] {
 }
 
 export function validEmbedPath(path: string): boolean {
-  // A leading "//" is a network-path reference. If it reaches new URL(path,
-  // origin), the first segment becomes an attacker-controlled hostname rather
-  // than an application path.
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("#") || path.includes("\\") || /[\u0000-\u001F\u007F]/.test(path)) {
     return false;
   }
@@ -85,11 +105,9 @@ export function validEmbedPath(path: string): boolean {
     return false;
   }
   if (url.origin !== origin) return false;
-  // The server splits the path as sent; url.pathname would resolve dot segments.
   const segments = splitPath(path.split("?")[0]);
-  // The gateway routes these to offload handlers before embeds.
   if (segments[0] === "offload") return false;
-  const embed = parseEmbedSegments(segments);
+  const embed = parseEmbedSegments(segments) ?? parseShareSegments(segments);
   const query = Array.from(url.searchParams);
   const imgIndex = query.length === 1 && query[0][0] === "img_index"
     ? parseCanonicalDecimal(query[0][1])
@@ -100,7 +118,7 @@ export function validEmbedPath(path: string): boolean {
   }
   return query.length === 0 && (
     isStoriesPath(segments)
-    || (segments.length === 1 && usernamePattern.test(segments[0]))
+    || (segments.length === 1 && usernamePattern.test(segments[0]) && !reservedInstagramPaths.has(segments[0].toLowerCase()))
   );
 }
 
@@ -118,13 +136,12 @@ export function instagramEmbedPath(raw: string): string | null {
   if (hostname !== "instagram.com" && !hostname.endsWith(".instagram.com")) return null;
   const segments = splitPath(url.pathname);
   const path = `/${segments.join("/")}`;
-  const embed = parseEmbedSegments(segments);
+  const embed = parseEmbedSegments(segments) ?? parseShareSegments(segments);
   const selected = embed?.pathIndex === null ? mediaSelection(url.searchParams, null) : null;
   const canonical = selected === null ? path : `${path}?img_index=${selected + 1}`;
   return validEmbedPath(canonical) ? canonical : null;
 }
 
-// Collapse the public service variants to the host displayed in the UI.
 export function canonicalServiceHost(host: string): string {
   return host.replace(/^(?:(?:www|g|d)\.)+/i, "");
 }

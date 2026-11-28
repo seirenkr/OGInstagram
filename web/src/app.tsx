@@ -23,7 +23,6 @@ import { Tabs } from "@cloudflare/kumo/components/tabs";
 
 const StatusCharts = React.lazy(() => import("./status.tsx"));
 
-// Locale strings plus the fields tools/build-home.mjs merges in.
 type AppData = typeof en & {
   brand: string; version: string; host: string; lang: string; turnstileSiteKey: string;
 };

@@ -16,14 +16,11 @@ import (
 
 type Session struct {
 	name string
-	addr int // IPv6 egress only: the pool index of the source address
+	addr int
 
 	mu     sync.Mutex
 	client *http.Client
 
-	// Peak-EWMA round trip of the current exit IP (as in tower and Finagle): a
-	// slower sample replaces it, faster ones pull it down, and it decays toward 0
-	// while idle so a once-slow session gets retried. Zero rttAt = unmeasured.
 	rttNs   float64
 	rttAt   time.Time
 	pending int
@@ -31,13 +28,8 @@ type Session struct {
 	cooldownUntil time.Time
 }
 
-// costLocked is the expected wait for one more request: rtt × (pending+1).
-// A hung exit IP piles up pending requests, so its cost climbs at once
-// instead of only after the first timeout comes back.
 func (s *Session) costLocked(now time.Time) float64 {
 	if s.rttAt.IsZero() {
-		// Unmeasured (Finagle's rule): free to try once, but never pile onto its
-		// first request, which may be hanging on a dead exit IP.
 		return float64(time.Hour) * float64(s.pending)
 	}
 	rtt := s.rttNs * math.Exp(-float64(now.Sub(s.rttAt))/float64(sessionRTTDecay))
@@ -49,12 +41,10 @@ type SessionPool struct {
 	cfg      Config
 	mu       sync.Mutex
 	tlsCache tls.ClientSessionCache
-	// IPv6 egress only (nil: the DC proxy): until when each source address sits out.
 	addrDown []time.Time
 	dial     func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-// nextProxy: on the IPv6 egress the address that just failed sits out and a rested one is picked.
 func (p *SessionPool) nextProxy(failed int) (*url.URL, int) {
 	if p.addrDown == nil {
 		return proxyURL(p.cfg.ProxyUser, p.cfg.ProxyPass, newSessionID()), -1
@@ -78,7 +68,6 @@ func (p *SessionPool) nextProxy(failed int) (*url.URL, int) {
 	return &url.URL{Scheme: "http", User: url.User("a" + strconv.Itoa(addr)), Host: "egress"}, addr
 }
 
-// newEgressPool connects through the IPv6 egress; each session asks for its source address by index.
 func newEgressPool(socket, prefix string) *SessionPool {
 	pool := &SessionPool{
 		tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2),
@@ -99,7 +88,6 @@ func newSessionPool(cfg Config) *SessionPool {
 	pool := &SessionPool{cfg: cfg, tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2)}
 	if cfg.ProxyUser != "" && cfg.ProxyPass != "" {
 		for i := range proxySessionCount {
-			// A stable slot label: rotation replaces the exit IP behind it.
 			proxy, _ := pool.nextProxy(-1)
 			pool.sessions = append(pool.sessions, &Session{name: "us-" + strconv.Itoa(i+1), addr: -1, client: buildSessionClient(proxy, pool)})
 		}
@@ -124,10 +112,8 @@ func buildSessionClient(proxy *url.URL, pool *SessionPool) *http.Client {
 		DisableCompression:  true,
 		TLSHandshakeTimeout: 3 * time.Second,
 		TLSClientConfig:     &tls.Config{ClientSessionCache: pool.tlsCache},
-		// Close a silent tunnel instead of letting requests hang on it.
 		HTTP2: &http.HTTP2Config{
 			MaxDecoderHeaderTableSize: 64 << 10,
-			// Bound bytes already in flight when an unexpected HTML response is rejected.
 			MaxReceiveBufferPerStream: 32 << 10,
 			SendPingTimeout:           30 * time.Second,
 			PingTimeout:               2 * time.Second,
@@ -157,9 +143,6 @@ func (p *SessionPool) pick() *Session {
 	case 1:
 		picked = ready[0]
 	default:
-		// Power of two choices (tower, Finagle, Envoy least-request): compare two
-		// random sessions instead of always taking the single best, which spreads
-		// load across exit IPs and avoids a herd on one.
 		i := rand.IntN(len(ready))
 		j := rand.IntN(len(ready) - 1)
 		if j >= i {
@@ -181,9 +164,6 @@ func (p *SessionPool) pick() *Session {
 	return picked
 }
 
-// done ends a request picked from s that ran on client. With observe, rtt feeds
-// the Peak-EWMA estimate; tower's update rule, weighted by the time since the
-// last sample. A retired client's rtt says nothing about the current exit IP.
 func (p *SessionPool) done(s *Session, client *http.Client, rtt time.Duration, observe bool) {
 	now := time.Now()
 	s.mu.Lock()
@@ -213,8 +193,6 @@ func (s *Session) getClient() *http.Client {
 	return c
 }
 
-// fail moves s off client to a new exit IP and cools it down. A late failure
-// from an already retired client leaves its replacement alone and reports false.
 func (p *SessionPool) fail(s *Session, client *http.Client) bool {
 	s.mu.Lock()
 	current, failed := s.client == client, s.addr
@@ -230,7 +208,7 @@ func (p *SessionPool) fail(s *Session, client *http.Client) bool {
 		return false
 	}
 	s.client, s.addr = next, addr
-	s.rttNs, s.rttAt = 0, time.Time{} // a new exit IP starts unmeasured
+	s.rttNs, s.rttAt = 0, time.Time{}
 	if until := time.Now().Add(rotateCooldown); until.After(s.cooldownUntil) {
 		s.cooldownUntil = until
 	}

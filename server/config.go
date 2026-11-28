@@ -16,8 +16,8 @@ const (
 	instagramOrigin = "https://www.instagram.com"
 	instagramAppID  = "936619743392459"
 
-	instagramWebLoggedOutDocID = "39974491408862996"
-	// The web client's bitmap for "200,000 resources loaded"; answers then omit the page's script list.
+	instagramWebLoggedOutDocID = "28891146940585796"
+	// Elias gamma bitmap for 200,000 loaded resources so GraphQL omits extensions.sr_payload.
 	haveAllResources = "w00MR0"
 
 	proxyGateEndpoint = "gw.dataimpulse.com:823"
@@ -26,67 +26,58 @@ const (
 
 	transientErrorCacheSeconds = 60
 	permanentErrorCacheSeconds = 3600
-	// Cards link only to signed offload URLs, which outlive this by days.
-	cardEdgeTTL = 3600
+	cardEdgeTTL                = 3600
 
 	requestTimeout = 5 * time.Second
 
-	// How fast a session's Peak-EWMA latency fades (tower's decay; Linkerd uses 10 s).
 	sessionRTTDecay = 10 * time.Second
 
-	// IPv6 gets this long (at most half the time left) before DC.
 	ipv6AttemptTimeout     = 2 * time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond
-	dcRecheckTimeout       = 2 * time.Second  // cold DC exits are slow
-	ipv6Strikes            = 3                // failures among the last ipv6Window attempts
-	ipv6Retries            = 2                // other addresses tried after a throttled one
-	egressPoolSize         = 64               // tools/ipv6-pool.sh assigns as many
-	egressAddrCooldown     = 30 * time.Minute // Instagram keeps its verdict on an address that long
+	dcRecheckTimeout       = 2 * time.Second
+	ipv6Strikes            = 3
+	ipv6Retries            = 2
+	egressPoolSize         = 64               // matches tools/ipv6-pool.sh
+	egressAddrCooldown     = 30 * time.Minute // Instagram keeps per-IPv6 throttle verdicts ~30m
 	ipv6Window             = 10
 	ipv6PauseMin           = 2 * time.Minute
 	ipv6PauseMax           = time.Hour
-	// A DC exit that runs this long into a deadline is treated as hung.
-	proxyHungAfter = 3 * time.Second
+	proxyHungAfter         = 3 * time.Second
 
 	postHedgeDelay           = 800 * time.Millisecond
 	externalHelperHedgeDelay = 2 * time.Second
 	storyHelperHedgeDelay    = 2 * time.Second
-	// A profile card waits this long (from the start) for thumbnails.
-	profilePostsWait = 1500 * time.Millisecond
-	// A late external helper answer still fills the cache.
-	helperDetachedTimeout = 25 * time.Second
-	ogPageTimeout         = 2500 * time.Millisecond
-	ogPageBytes           = 32 << 10
-	partialPostTTL        = 10 * time.Minute // a partial post or gate notice stands in this long
-	helperBackgroundSlots = 8
-	// The content-ruling check is a small JSON GET; past this it is no signal.
-	rulingTimeout = 2 * time.Second
-	// Past this a profile picture copy gives way to the CDN redirect.
-	avatarTimeout = 2500 * time.Millisecond
+	profilePostsWait         = 1500 * time.Millisecond
+	helperDetachedTimeout    = 25 * time.Second
+	ogPageTimeout            = 2500 * time.Millisecond
+	ogPageBytes              = 32 << 10
+	partialPostTTL           = 10 * time.Minute
+	helperBackgroundSlots    = 8
+	rulingTimeout            = 2 * time.Second
+	avatarTimeout            = 2500 * time.Millisecond
 
 	rotateCooldown        = 3 * time.Second
 	helperCaptchaCooldown = time.Minute
 
-	// Unverified bots get this many requests per IP per hour instead of a
-	// managed challenge; Cloudflare marks them with botClassHeader: limited.
-	botHourlyLimit = 50
-	botClassHeader = "X-OG-Bot-Class"
-	// Keep origin work bounded on a single small instance.
+	// Cloudflare Free rate-limiting only counts over 10s; a Transform Rule sets botClassHeader.
+	botHourlyLimit       = 50
+	botClassHeader       = "X-OG-Bot-Class"
 	maxConcurrentFetches = 48
 
 	localPostCacheBytes    = 64 << 20
 	localProfileCacheBytes = 4 << 20
 	localStoryCacheBytes   = 4 << 20
+	localShareCacheBytes   = 4 << 20
 	localOGPostCacheBytes  = 4 << 20
 
 	maxResponseBytes = 1 << 20
-	maxAvatarBytes   = 512 << 10 // profile pictures are 5-30 KiB
+	maxAvatarBytes   = 512 << 10
 
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 10 * time.Second
-	idleTimeout       = 120 * time.Second // > nginx upstream keepalive_timeout (60s default), so nginx closes idle conns first
+	idleTimeout       = 120 * time.Second // > nginx keepalive_timeout (60s), so nginx closes idle conns first
 	shutdownTimeout   = 30 * time.Second
 	maxHeaderBytes    = 32 << 10
 
@@ -97,8 +88,6 @@ const (
 
 	defaultAvatarPath = "/default-avatar.jpg"
 
-	// Public IDs of the emojis registered in the project's Discord server
-	// (docs/discord-emojis/README.md).
 	defaultDiscordBrandEmojiID    = "1556597080229810266"
 	defaultDiscordVerifiedEmojiID = "1556598045670514798"
 
@@ -108,7 +97,6 @@ const (
 
 func env(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 
-// egressPercent is the share of Instagram requests that try IPv6 first (default 100).
 func egressPercent(raw string) int {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 0 || n > 100 {
@@ -132,7 +120,6 @@ func configFromEnv() Config {
 				p = netip.PrefixFrom(addr, addr.BitLen())
 			}
 		}
-		// Keep invalid entries so validation rejects a misspelled trust boundary.
 		proxies = append(proxies, p)
 	}
 	return Config{

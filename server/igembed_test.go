@@ -149,8 +149,6 @@ func TestParseEmbedPostVideoPlayCount(t *testing.T) {
 	}
 }
 
-// The ruling borrows a GraphQL session: a refusal is neither "missing" nor a
-// reason to rotate that session.
 func TestMediaMissingTrustsOnlyRulingNotFound(t *testing.T) {
 	for _, tc := range []struct {
 		status  int

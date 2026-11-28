@@ -16,9 +16,6 @@ import (
 
 const rulingAsbdID = "359341"
 
-// mediaMissing asks Instagram's content-ruling endpoint (~200 B) whether a post
-// exists for logged-out viewers. Only a definite "Media cannot be found" counts
-// as missing.
 func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
 	pk := shortcodePK(shortcode)
 	if pk == nil {
@@ -36,7 +33,6 @@ func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
 		headers: map[string]string{
 			"User-Agent": "Mozilla/5.0", "X-IG-App-ID": instagramAppID, "X-ASBD-ID": rulingAsbdID, "X-IG-WWW-Claim": "0",
 		},
-		// "Media cannot be found" arrives as 404 with a JSON body.
 		interpret: func(status int, raw []byte) *AppError {
 			if status == http.StatusNotFound {
 				return nil
@@ -72,12 +68,10 @@ func (a *App) fetchPostEmbed(ctx context.Context, shortcode string) (Post, *AppE
 	return post, perr
 }
 
-// fetchPostOG reads the Open Graph tags Instagram serves crawlers on the post
-// page. Unlike every logged-out API they survive post-level gates.
+// Crawler OG tags survive post-level gates.
 func (a *App) fetchPostOG(ctx context.Context, shortcode string) (Post, *AppError) {
 	ctx, cancel := context.WithTimeout(ctx, ogPageTimeout)
 	defer cancel()
-	// The tags sit in the head. A tagless page from IPv6 is retried through DC.
 	spec := pageSpec("og_page", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/")
 	spec.maxBytes = ogPageBytes
 	spec.dcRecheck = func(page string) bool { return !strings.Contains(page, `property="og:url"`) }
@@ -98,11 +92,6 @@ var (
 	ogCountsRE = regexp.MustCompile(`^(?:([0-9][0-9.,]{0,12}[KMB]?) likes?(?:, | - ))?(?:([0-9][0-9.,]{0,12}[KMB]?) comments? - )?`)
 )
 
-// parseOGPost builds a partial post from the crawler tags: og:url names the
-// author, og:description holds Instagram's rounded counts ("14K" stays text)
-// and the caption, og:image a cover of unknown size (s640x640 only bounds it).
-// Every value is untrusted page text; the titles open with the free-text
-// display name, so the handle comes from og:url alone.
 func parseOGPost(shortcode, page string) (Post, *AppError) {
 	tags := map[string]string{}
 	for _, m := range ogMetaRE.FindAllStringSubmatch(page, -1) {
@@ -139,7 +128,6 @@ func parseOGPost(shortcode, page string) (Post, *AppError) {
 	if i := strings.LastIndex(tags["twitter:title"], " (@"+username+")"); i >= 0 {
 		fullName = tags["twitter:title"][:i]
 	}
-	// Either copy of the caption may be the cut one.
 	caption := ogQuoted(tags["og:description"], `: "`)
 	if title := ogQuoted(tags["og:title"], ` on Instagram: "`); len(title) > len(caption) {
 		caption = title
@@ -164,7 +152,6 @@ func parseOGPost(shortcode, page string) (Post, *AppError) {
 	}, nil
 }
 
-// ogQuoted is the text between the first marker and the last double quote.
 func ogQuoted(s, marker string) string {
 	_, rest, ok := strings.Cut(s, marker)
 	if i := strings.LastIndexByte(rest, '"'); ok && i >= 0 {
@@ -259,8 +246,6 @@ func parseCount(s string) int {
 	return n
 }
 
-// Find the literal first; digits and whitespace are matched as ASCII only.
-// The caption comes earlier in the page and may itself contain "N comments".
 func simpleCommentCount(page string) int {
 	_, page, ok := strings.Cut(page, `<div class="CaptionComments"`)
 	if !ok {
@@ -352,9 +337,16 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		ProfilePic:  owner.Get("profile_pic_url").String(),
 		IsVerified:  owner.Get("is_verified").Type == gjson.True,
 		Caption:     sm.Get("edge_media_to_caption.edges.0.node.text").String(),
-		StatsLine:   statsLine(v1StatsPrefix(sm), countOf(sm, "edge_liked_by.count"), countOf(sm, "edge_media_to_comment.count")),
+		StatsLine:   statsLine(graphStatsPrefix(sm), countOf(sm, "edge_liked_by.count"), countOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
 	}, nil
+}
+
+func graphStatsPrefix(sm gjson.Result) string {
+	if play := cmp.Or(uintOf(sm, "video_play_count"), uintOf(sm, "video_view_count")); play > 0 {
+		return "▶️ " + fmtCount(play) + "  "
+	}
+	return ""
 }
 
 func graphAttachment(n gjson.Result) (Attachment, *AppError) {

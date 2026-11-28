@@ -44,12 +44,10 @@ type cache[V any] struct {
 	storeKind   string
 	workTimeout time.Duration
 
-	mu        sync.Mutex
-	entries   map[string]*cacheEntry[V]
-	order     []string
-	usedBytes int64
-	// Negative answers keep their own FIFO so they neither evict values nor
-	// lose their TTL to value churn.
+	mu         sync.Mutex
+	entries    map[string]*cacheEntry[V]
+	order      []string
+	usedBytes  int64
 	errEntries map[string]*cacheEntry[V]
 	errOrder   []string
 
@@ -81,7 +79,6 @@ func (c *cache[V]) get(ctx context.Context, key string, meta *fetchMeta, fetch f
 	c.flightMu.Lock()
 	call, exists := c.flight[key]
 	if !exists {
-		// A flight that ended since the check above stored its entry first.
 		if e, ok := c.localGet(key); ok {
 			c.flightMu.Unlock()
 			return e.value, e.err
@@ -94,7 +91,6 @@ func (c *cache[V]) get(ctx context.Context, key string, meta *fetchMeta, fetch f
 
 	select {
 	case <-ctx.Done():
-		// A deadline while waiting on the origin is an origin outcome, not a hit.
 		if meta != nil && ctx.Err() == context.DeadlineExceeded {
 			meta.fetched = true
 		}
@@ -108,9 +104,6 @@ func (c *cache[V]) get(ctx context.Context, key string, meta *fetchMeta, fetch f
 	}
 }
 
-// Detached from its caller so one abandoned request cannot kill work other
-// waiters share. Bounded by cacheSharedWorkTimeout, longer than requestTimeout,
-// so a slow success still warms the cache for the next request.
 func (c *cache[V]) runFlight(
 	requestCtx context.Context,
 	key string,
@@ -181,17 +174,12 @@ func (c *cache[V]) runFlight(
 	c.storeLocal(key, entry)
 	release()
 	if c.store != nil && err == nil && persist {
-		// The fetch may have spent most of the shared deadline; the disk write gets its own.
-		// Waiters are already released: putAfterFlight only follows a flight
-		// that ended in an error, and errors are never persisted.
 		putCtx, cancelPut := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer cancelPut()
 		c.persistentPut(putCtx, key, entry)
 	}
 }
 
-// put stores a value fetched outside get, replacing any cached entry,
-// including a cached error.
 func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Duration) {
 	value, ok := cloneAndValidateCacheValue(key, value)
 	if !ok || ttl <= 0 {
@@ -204,8 +192,6 @@ func (c *cache[V]) put(ctx context.Context, key string, value V, ttl time.Durati
 	c.storeLocal(key, entry)
 }
 
-// putAfterFlight lets a running lookup of key store its verdict first, so that
-// verdict cannot replace value.
 func (c *cache[V]) putAfterFlight(ctx context.Context, key string, value V, ttl time.Duration) {
 	c.flightMu.Lock()
 	call := c.flight[key]
@@ -331,8 +317,6 @@ func (c *cache[V]) storeLocal(key string, entry *cacheEntry[V]) {
 	}
 }
 
-// validSourceModel rejects a parsed model the cache would refuse, so an invalid
-// result loses the staged race instead of blocking the fallback sources.
 func validSourceModel[V any](key string) func(V, *AppError) (V, *AppError) {
 	return func(v V, err *AppError) (V, *AppError) {
 		if err == nil {
@@ -345,9 +329,6 @@ func validSourceModel[V any](key string) func(V, *AppError) (V, *AppError) {
 	}
 }
 
-// ponytail: a cold fetch round-trips the model through JSON 4-6 times. jsonClone
-// must stay to break aliasing into upstream bodies; if CPU profiles ever show it,
-// validate a shallow copy in validSourceModel instead.
 func cloneAndValidateCacheValue[V any](key string, value V) (V, bool) {
 	value = jsonClone(value)
 	switch typed := any(value).(type) {
@@ -367,6 +348,8 @@ func cloneAndValidateCacheValue[V any](key string, value V) (V, bool) {
 		typed.ProfilePic = normalizeCDNHost(typed.ProfilePic)
 		typed.Media = normalizeCachedAttachment(typed.Media)
 		return any(typed).(V), validCachedStory(key, typed)
+	case shareTarget:
+		return any(typed).(V), validCachedShareTarget(typed)
 	default:
 		return value, true
 	}
@@ -424,6 +407,14 @@ func validCachedStory(key string, story Story) bool {
 	return found && validUsername(story.Username) && strings.EqualFold(story.Username, username) &&
 		validStoryID(story.ID) && story.ID == id && validOptionalCachedURL(story.ProfilePic) &&
 		validCachedAttachment(story.Media)
+}
+
+func validCachedShareTarget(target shareTarget) bool {
+	if !strings.HasPrefix(string(target), "/") || strings.HasPrefix(string(target), "//") {
+		return false
+	}
+	got, err := parseShareTarget(instagramOrigin + string(target))
+	return err == nil && got == target
 }
 
 func validCachedAttachment(attachment Attachment) bool {

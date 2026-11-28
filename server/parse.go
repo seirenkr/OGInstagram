@@ -8,7 +8,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// The GraphQL error code Instagram uses for per-client throttling.
 const graphQLRateLimitedCode = 1675004
 
 const (
@@ -16,9 +15,23 @@ const (
 	loggedOutItemPath  = loggedOutMediaPath + ".if_not_gated_logged_out"
 )
 
-// graphQLHidden: null media (missing or private) or media without its item (gated); neither proves absence.
+type graphQLGating struct {
+	gatingType int
+	title      string
+	desc       string
+}
+
 func graphQLHidden(body string) bool {
 	return gjson.Get(body, loggedOutMediaPath).Exists() && !present(gjson.Get(body, loggedOutItemPath))
+}
+
+func parseGraphQLGating(body string) graphQLGating {
+	r := gjson.Get(body, loggedOutMediaPath+".gating_ruling")
+	return graphQLGating{
+		gatingType: int(r.Get("gating_type").Int()),
+		title:      r.Get("title").String(),
+		desc:       r.Get("description").String(),
+	}
 }
 
 func parseInstagramPost(body string) (Post, *AppError) {
@@ -40,14 +53,11 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 	if !user.Exists() {
 		return Post{}, igErr(502, errorCodeUpstream, "missing user")
 	}
-	username := user.Get("username").String()
-	fullName := user.Get("full_name").String()
 
 	media := item.Get("carousel_media").Array()
 	if len(media) == 0 {
 		media = []gjson.Result{item}
 	}
-	// Dropping an unusable child would shift every later img_index, so let the next source try.
 	var attachments []Attachment
 	for _, child := range media {
 		att, ok := parseV1Attachment(child)
@@ -57,40 +67,34 @@ func parseV1(item gjson.Result) (Post, *AppError) {
 		attachments = append(attachments, att)
 	}
 
+	likes := countOf(item, "like_count")
+	if item.Get("like_and_view_counts_disabled").Bool() {
+		likes = -1
+	}
+
 	return Post{
-		Shortcode:   cmp.Or(item.Get("code").String(), item.Get("shortcode").String()),
-		Username:    username,
-		FullName:    fullName,
+		Shortcode:   item.Get("code").String(),
+		Username:    user.Get("username").String(),
+		FullName:    user.Get("full_name").String(),
 		ProfilePic:  user.Get("profile_pic_url").String(),
 		IsVerified:  user.Get("is_verified").Type == gjson.True,
-		Caption:     cmp.Or(item.Get("caption.text").String(), item.Get("caption_text").String()),
-		StatsLine:   statsLine(v1StatsPrefix(item), countOf(item, "like_count"), countOf(item, "comment_count")),
+		Caption:     item.Get("caption.text").String(),
+		StatsLine:   statsLine("", likes, countOf(item, "comment_count")),
 		Attachments: attachments,
-		CreatedAt:   unixTime(cmp.Or(item.Get("taken_at").Int(), item.Get("taken_at_timestamp").Int())),
+		CreatedAt:   unixTime(item.Get("taken_at").Int()),
 	}, nil
 }
 
 func parseV1Attachment(item gjson.Result) (Attachment, bool) {
-	thumbnail := bestV1ImageURL(item)
+	thumbnail := cmp.Or(bestCandidateURL(item.Get("image_versions2.candidates")), item.Get("display_uri").String())
 	if thumbnail == "" {
 		return Attachment{}, false
 	}
 	w, h := mediaSize(item)
-	if video := bestVideoURL(item); video != "" && uintOf(item, "media_type") == 2 {
+	if video := bestCandidateURL(item.Get("video_versions")); video != "" && uintOf(item, "media_type") == 2 {
 		return Attachment{Kind: "video", URL: video, Thumbnail: thumbnail, Width: w, Height: h}, true
 	}
 	return Attachment{Kind: "image", URL: thumbnail, Thumbnail: thumbnail, Width: w, Height: h}, true
-}
-
-func bestV1ImageURL(item gjson.Result) string {
-	return cmp.Or(bestCandidateURL(item.Get("image_versions2.candidates")),
-		item.Get("thumbnail_url").String(), item.Get("display_url").String(),
-		item.Get("thumbnail_src").String(), item.Get("display_src").String())
-}
-
-func bestVideoURL(node gjson.Result) string {
-	return cmp.Or(node.Get("video_url").String(),
-		bestCandidateURL(node.Get("video_versions")), bestCandidateURL(node.Get("video_resources")))
 }
 
 func bestCandidateURL(value gjson.Result) string {
@@ -103,18 +107,12 @@ func candidateURL(c gjson.Result) string {
 
 func mediaSize(v gjson.Result) (int, int) {
 	c := bestImageCandidate(v)
-	return cmp.Or(uintOf(v, "dimensions.width"), uintOf(v, "original_width"), uintOf(v, "width"), candidateWidth(c)),
-		cmp.Or(uintOf(v, "dimensions.height"), uintOf(v, "original_height"), uintOf(v, "height"), candidateHeight(c))
+	return cmp.Or(uintOf(v, "original_width"), uintOf(v, "width"), candidateWidth(c)),
+		cmp.Or(uintOf(v, "original_height"), uintOf(v, "height"), candidateHeight(c))
 }
 
 func bestImageCandidate(value gjson.Result) gjson.Result {
-	if c := bestCandidate(value.Get("image_versions2.candidates")); c.Exists() {
-		return c
-	}
-	if c := bestCandidate(value.Get("display_resources")); c.Exists() {
-		return c
-	}
-	return bestCandidate(value.Get("thumbnail_resources"))
+	return bestCandidate(value.Get("image_versions2.candidates"))
 }
 
 func bestCandidate(value gjson.Result) gjson.Result {
@@ -139,14 +137,6 @@ func candidateWidth(value gjson.Result) int {
 
 func candidateHeight(value gjson.Result) int {
 	return cmp.Or(uintOf(value, "height"), uintOf(value, "config_height"))
-}
-
-func v1StatsPrefix(item gjson.Result) string {
-	if play := cmp.Or(uintOf(item, "play_count"), uintOf(item, "video_play_count"), uintOf(item, "view_count"),
-		uintOf(item, "video_view_count"), uintOf(item, "ig_play_count"), uintOf(item, "fb_play_count")); play > 0 {
-		return "▶️ " + fmtCount(play) + "  "
-	}
-	return ""
 }
 
 func present(r gjson.Result) bool { return r.Exists() && r.Type != gjson.Null }

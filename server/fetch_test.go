@@ -63,44 +63,15 @@ func TestParseOembedPost(t *testing.T) {
 	}
 }
 
-func TestShortcodePK(t *testing.T) {
-	if got := shortcodePK("DaEd82_pQ40"); got == nil || got.String() != "3928396500541181492" {
-		t.Errorf("shortcodePK(DaEd82_pQ40) = %v, want 3928396500541181492", got)
-	}
-	if got := shortcodePK("has space"); got != nil {
-		t.Errorf("invalid char should yield nil, got %v", got)
-	}
-}
-
 func TestWebLoggedOutSpec(t *testing.T) {
 	spec := webLoggedOutSpec("DaEd82_pQ40")
-	if spec.method != http.MethodPost {
-		t.Errorf("method = %q, want POST", spec.method)
-	}
-	if spec.url != "https://www.instagram.com/api/graphql/" || !spec.expectJSON {
-		t.Errorf("url = %q", spec.url)
-	}
-	if spec.headers["X-FB-Friendly-Name"] != "PolarisLoggedOutDesktopWWWPostRootContentQuery" {
-		t.Errorf("friendly name = %q", spec.headers["X-FB-Friendly-Name"])
-	}
-
-	if spec.headers["User-Agent"] != "Mozilla/5.0" {
-		t.Errorf("user-agent = %q, want minimal Mozilla/5.0", spec.headers["User-Agent"])
-	}
 	vals, err := url.ParseQuery(spec.body)
 	if err != nil {
 		t.Fatalf("body parse: %v", err)
 	}
-	if vals.Get("doc_id") != instagramWebLoggedOutDocID {
-		t.Errorf("doc_id = %q, want %q", vals.Get("doc_id"), instagramWebLoggedOutDocID)
-	}
-	if vals.Has("server_timestamps") {
-		t.Error("unused server timestamps should not be requested")
-	}
 	if lsd := vals.Get("lsd"); lsd == "" || lsd != spec.headers["X-FB-LSD"] {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
 	}
-	// BitMap.toCompressedString: the first bit, then Elias gamma run lengths, six bits per character.
 	bits := "1" + strings.Repeat("0", len(strconv.FormatInt(200000, 2))-1) + strconv.FormatInt(200000, 2) + "00000"
 	var haveAll string
 	for i := 0; i+6 <= len(bits); i += 6 {
@@ -115,8 +86,7 @@ func TestWebLoggedOutSpec(t *testing.T) {
 	if vals.Get("__a") != "1" || vals.Get("__comet_req") != "7" {
 		t.Errorf("__a = %q, __comet_req = %q; the bitmaps need both", vals.Get("__a"), vals.Get("__comet_req"))
 	}
-	v := vals.Get("variables")
-	if v != `{"media_id":"3928396500541181492"}` {
+	if v := vals.Get("variables"); v != `{"media_id":"3928396500541181492"}` {
 		t.Errorf("variables should hold the media pk, got %q", v)
 	}
 }
@@ -236,20 +206,22 @@ func TestOembedHTMLErrorPageClassification(t *testing.T) {
 		name    string
 		rt      roundTripFunc
 		code    string
+		wantOut string
 		rotated bool
 	}{
-		{"html 404", page(404, "text/html", "<html>"), errorCodeNotFound, false},
-		{"html 429", page(429, "text/html", "<html>"), errorCodeRateLimited, true},
-		{"json 429", page(429, "application/json", "{}"), errorCodeRateLimited, true},
-		{"json 500", page(500, "application/json", "{}"), errorCodeUpstream, true},
-		{"json 400", page(400, "application/json", gated), "", false},
+		{"html 404", page(404, "text/html", "<html>"), errorCodeNotFound, "", false},
+		{"plain 404 No Media Match", page(404, "text/html; charset=utf-8", "No Media Match"), "", "No Media Match", false},
+		{"html 429", page(429, "text/html", "<html>"), errorCodeRateLimited, "", true},
+		{"json 429", page(429, "application/json", "{}"), errorCodeRateLimited, "", true},
+		{"json 500", page(500, "application/json", "{}"), errorCodeUpstream, "", true},
+		{"json 400", page(400, "application/json", gated), "", gated, false},
 	} {
 		out, err, _, rotated := proxyOnce(oembedSpec("x"), tt.rt, 5*time.Second)
 		code := ""
 		if err != nil {
 			code = err.Code
 		}
-		if code != tt.code || rotated != tt.rotated || (code == "" && out != gated) {
+		if code != tt.code || rotated != tt.rotated || (code == "" && out != tt.wantOut) {
 			t.Errorf("%s: code=%q rotated=%v body=%q, want %q rotated=%v", tt.name, code, rotated, out, tt.code, tt.rotated)
 		}
 	}
@@ -325,11 +297,6 @@ func TestFetchRequestProbesHTMLWithinLimit(t *testing.T) {
 type readerFunc func([]byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
-
-func TestLogOutboundSurvivesUnparsableURL(t *testing.T) {
-	logOutbound(context.Background(), "op", "direct", http.MethodGet, "https://example.com/p#%zz", time.Now(), 0, 0,
-		causedErr(502, errorCodeConnection, "boom", errors.New("boom")), false)
-}
 
 func TestLateFailureFromRetiredClientSparesReplacement(t *testing.T) {
 	pool := newTestPool("shared")

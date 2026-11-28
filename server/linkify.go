@@ -10,13 +10,11 @@ import (
 	"unicode/utf8"
 )
 
-// CJK punctuation ends a URL: captions run the next sentence on with no space.
 const urlChars = `[^\s\p{Z}\p{Cc}\p{Cf}<>。、，！？「」『』【】（）]`
 
 var (
 	schemeLinkRE = regexp.MustCompile(`(?i)\bhttps?://` + urlChars + `+|\bmailto:` + urlChars + `+`)
 
-	// A mention may not end in a dot; a hashtag needs a letter or digit.
 	mentionRE = regexp.MustCompile(`@[A-Za-z0-9._]*[A-Za-z0-9_]`)
 	hashtagRE = regexp.MustCompile(`#[\p{L}\p{M}\p{N}_]*[\p{L}\p{N}][\p{L}\p{M}\p{N}_]*`)
 )

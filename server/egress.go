@@ -13,11 +13,8 @@ import (
 	"time"
 )
 
-// Hosts the IPv6 egress will tunnel to; it must never become an open proxy.
 var egressHosts = map[string]bool{"i.instagram.com:443": true, "www.instagram.com:443": true}
 
-// runEgress serves HTTP CONNECT to Instagram on a unix socket, dialing from the
-// host's IPv6 pool; the proxy username picks the source address.
 func runEgress(socket, poolFile string) error {
 	pool, err := readEgressPool(poolFile)
 	if err != nil {
@@ -83,7 +80,6 @@ func egressHandler(pool []net.IP) http.Handler {
 	})
 }
 
-// egressSource reads the address index a session asks for: Basic "a<index>:".
 func egressSource(pool []net.IP, auth string) (net.IP, bool) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	user, _, _ := strings.Cut(string(raw), ":")
@@ -95,7 +91,6 @@ func egressSource(pool []net.IP, auth string) (net.IP, bool) {
 	return pool[i%len(pool)], true
 }
 
-// pipe copies until either side ends, then closes both connections.
 func pipe(dst io.WriteCloser, src io.Reader, other io.Closer) {
 	_, _ = io.Copy(dst, src)
 	dst.Close()

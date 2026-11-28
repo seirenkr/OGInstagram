@@ -17,18 +17,17 @@ import (
 )
 
 type igAnswer struct {
-	status int
-	body   string
+	status      int
+	body        string
+	contentType string
 }
 
-// fakeIG answers the post and profile sources by path and counts the calls. A
-// zero answer means the source must not be asked.
 type fakeIG struct {
 	t                              *testing.T
 	gql                            string
 	gqlDelay                       time.Duration
 	ruling, oembed, og, embed, api igAnswer
-	calls                          sync.Map // source -> *atomic.Int32
+	calls                          sync.Map
 }
 
 func (f *fakeIG) count(source string) int32 {
@@ -46,7 +45,7 @@ func (f *fakeIG) pool() *SessionPool {
 			source, answer = "oembed", f.oembed
 		case strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent"):
 			time.Sleep(f.gqlDelay)
-			source, answer = "gql", igAnswer{200, f.gql}
+			source, answer = "gql", igAnswer{status: 200, body: f.gql}
 		case r.URL.Path == "/api/graphql/":
 			source, answer = "api", f.api
 		case strings.Contains(r.URL.Path, "/embed/"):
@@ -60,15 +59,18 @@ func (f *fakeIG) pool() *SessionPool {
 			f.t.Errorf("unexpected %s request %s", source, r.URL)
 			answer.status = http.StatusInternalServerError
 		}
-		return mediaTestResponse(r, answer.status, nil, []byte(answer.body)), nil
+		var headers http.Header
+		if answer.contentType != "" {
+			headers = http.Header{"Content-Type": {answer.contentType}}
+		}
+		return mediaTestResponse(r, answer.status, headers, []byte(answer.body)), nil
 	})}
-	// Several sessions, so a rotated one does not hide the next request.
 	return &SessionPool{sessions: []*Session{{name: "us-1", client: client}, {name: "us-2", client: client}, {name: "us-3", client: client}}}
 }
 
 const (
 	gqlHidden     = `{"data":{"xig_polaris_media":null}}`
-	gqlFull       = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"code":"ABC123","user":{"username":"instagram"},"display_url":"https://scontent.cdninstagram.com/image.jpg","media_type":1}}}}`
+	gqlFull       = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"code":"ABC123","user":{"username":"instagram"},"image_versions2":{"candidates":[{"url":"https://scontent.cdninstagram.com/image.jpg"}]},"media_type":1}}}}`
 	gateTitle12   = "People under 20 can't see this content"
 	oembedGate3   = `{"status":"fail","message":"geoblock_required","gating_type_thrift":3,"title":"Gated","description":"d"}`
 	oembedGate12  = `{"status":"fail","message":"geoblock_required","gating_type_thrift":12,"title":"` + gateTitle12 + `","description":"d"}`
@@ -80,8 +82,8 @@ const (
 )
 
 var (
-	rulingGone = igAnswer{http.StatusNotFound, notFoundBody}
-	oembedGone = igAnswer{http.StatusNotFound, notFoundBody}
+	rulingGone = igAnswer{status: http.StatusNotFound, body: notFoundBody, contentType: "application/json"}
+	oembedGone = igAnswer{status: http.StatusNotFound, body: "No Media Match", contentType: "text/html; charset=utf-8"}
 )
 
 func setHelper(t *testing.T, fn func(context.Context, string) (Post, *AppError)) *atomic.Int32 {
@@ -107,7 +109,7 @@ func TestFieldExceptionStartsHelperAndOembedAtOnce(t *testing.T) {
 		return helperPost(key), nil
 	})
 	synctest.Test(t, func(t *testing.T) {
-		f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{200, rulingOK}, oembed: igAnswer{400, oembedGate12}}
+		f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{status: 200, body: rulingOK}, oembed: igAnswer{status: 400, body: oembedGate12}}
 		a := newApp(Config{}, f.pool(), offloadSigner{})
 		started := time.Now()
 		post, err := a.getPost(context.Background(), "ABC123", nil)
@@ -144,18 +146,94 @@ func TestGoneNeedsRulingAndOembedToAgree(t *testing.T) {
 			}
 		})
 	})
+	t.Run("gone while helper paused or disabled", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			helper func(context.Context, string) (Post, *AppError)
+		}{
+			{"helper paused", func(context.Context, string) (Post, *AppError) {
+				return Post{}, ephemeralErr(http.StatusBadGateway, errorCodeCaptchaRequired, "external helper paused: captcha")
+			}},
+			{"helper disabled", nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if tc.helper != nil {
+					setHelper(t, tc.helper)
+				} else {
+					prev := externalHelperPostImpl
+					externalHelperPostImpl = nil
+					t.Cleanup(func() { externalHelperPostImpl = prev })
+				}
+				synctest.Test(t, func(t *testing.T) {
+					f := &fakeIG{t: t, gql: gqlHidden, ruling: rulingGone, oembed: oembedGone}
+					a := newApp(Config{}, f.pool(), offloadSigner{})
+					if _, err := a.getPost(context.Background(), "ABC123", nil); err == nil || err.Code != errorCodeMediaNotFound || err.Status != http.StatusNotFound {
+						t.Fatalf("getPost err = %#v; want 404 media_not_found", err)
+					}
+					if f.count("ruling") != 1 || f.count("oembed") != 1 {
+						t.Fatalf("ruling=%d oEmbed=%d; want 1 each", f.count("ruling"), f.count("oembed"))
+					}
+				})
+			})
+		}
+	})
 	t.Run("ruling gone, oEmbed age gate", func(t *testing.T) {
 		setHelper(t, func(context.Context, string) (Post, *AppError) {
 			return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
 		})
 		synctest.Test(t, func(t *testing.T) {
-			f := &fakeIG{t: t, gql: gqlHidden, ruling: rulingGone, oembed: igAnswer{400, oembedGate12}}
+			f := &fakeIG{t: t, gql: gqlHidden, ruling: rulingGone, oembed: igAnswer{status: 400, body: oembedGate12}}
 			a := newApp(Config{}, f.pool(), offloadSigner{})
 			if _, err := a.getPost(context.Background(), "ABC123", nil); err == nil || err.Code != errorCodeRestricted || err.CardTitle != gateTitle12 {
 				t.Fatalf("getPost err = %#v; the ruling's 404 must not hide an age gate", err)
 			}
 		})
 	})
+}
+
+func TestGraphQLGatingRulingSkipsOembed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gatingType int
+		dcRetry    bool
+		wantCode   string
+	}{
+		{"age gate 3", 3, false, errorCodeRestricted},
+		{"geo gate 2", 2, true, errorCodeGeoBlocked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setHelper(t, func(context.Context, string) (Post, *AppError) {
+				return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
+			})
+			synctest.Test(t, func(t *testing.T) {
+				gqlGated := `{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":` +
+					string(rune('0'+tc.gatingType)) + `,"title":"Gate Title","description":"Gate Desc"}}}}`
+				f := &fakeIG{t: t, gql: gqlFull, og: igAnswer{status: 200, body: ogTestPage("ABC123")}}
+				v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent") {
+						return mediaTestResponse(r, 200, nil, []byte(gqlGated)), nil
+					}
+					return f.pool().sessions[0].client.Transport.RoundTrip(r)
+				})}
+				v6Pool := func() *SessionPool {
+					return &SessionPool{addrDown: make([]time.Time, egressPoolSize), sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
+				}
+				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
+				a.v6, a.v6Pages = v6Pool(), v6Pool()
+				post, err := a.getPost(context.Background(), "ABC123", nil)
+				if tc.dcRetry {
+					if err != nil || post.Partial || f.count("gql") != 1 {
+						t.Fatalf("geo gate = %+v, %v, dcGQL=%d; want DC GraphQL full post", post, err, f.count("gql"))
+					}
+				} else if err != nil || !post.Partial || f.count("og") != 1 || f.count("gql") != 0 {
+					t.Fatalf("age gate = %+v, %v, og=%d dcGQL=%d; want OG partial without DC retry", post, err, f.count("og"), f.count("gql"))
+				}
+				if f.count("oembed") != 0 {
+					t.Fatalf("oEmbed called %d times despite GraphQL gating_ruling", f.count("oembed"))
+				}
+			})
+		})
+	}
 }
 
 func TestGateVerdictTTLDependsOnHelper(t *testing.T) {
@@ -171,7 +249,7 @@ func TestGateVerdictTTLDependsOnHelper(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setHelper(t, func(context.Context, string) (Post, *AppError) { return Post{}, tc.helperErr })
 			synctest.Test(t, func(t *testing.T) {
-				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{200, rulingOK}, oembed: igAnswer{400, oembedGate12}}
+				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{status: 200, body: rulingOK}, oembed: igAnswer{status: 400, body: oembedGate12}}
 				a := newApp(Config{}, f.pool(), offloadSigner{})
 				_, err := a.getPost(context.Background(), "ABC123", nil)
 				if err == nil || err.Code != tc.code || err.CardCode != errorCodeRestricted || err.CardTitle != gateTitle12 {
@@ -205,7 +283,7 @@ func TestPostLevelGateGetsOGCard(t *testing.T) {
 				return Post{}, tc.err
 			})
 			synctest.Test(t, func(t *testing.T) {
-				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{200, rulingOK}, oembed: igAnswer{400, oembedGate3}, og: igAnswer{200, ogTestPage("ABC123")}}
+				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{status: 200, body: rulingOK}, oembed: igAnswer{status: 400, body: oembedGate3}, og: igAnswer{status: 200, body: ogTestPage("ABC123")}}
 				store := newTestStore(t)
 				a := newApp(Config{Store: store}, f.pool(), offloadSigner{})
 				for n := range 2 {
@@ -236,7 +314,7 @@ func TestPublicOembedCardWhenHelperFails(t *testing.T) {
 		return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
 	})
 	synctest.Test(t, func(t *testing.T) {
-		f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{200, rulingOK}, oembed: igAnswer{200, oembedPublic}}
+		f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{status: 200, body: rulingOK}, oembed: igAnswer{status: 200, body: oembedPublic}}
 		a := newApp(Config{}, f.pool(), offloadSigner{})
 		post, err := a.getPost(context.Background(), "ABC123", nil)
 		if err != nil || post.Username != "instagram" || len(post.Attachments) != 1 || post.Attachments[0].URL != "https://scontent.cdninstagram.com/image.jpg" {
@@ -261,9 +339,9 @@ func TestRenderDeadlineServesPartialOrGate(t *testing.T) {
 					Attachments: []Attachment{{Kind: "video", URL: "https://scontent.cdninstagram.com/v.mp4", Thumbnail: "https://scontent.cdninstagram.com/t.jpg"}}}, nil
 			})
 			synctest.Test(t, func(t *testing.T) {
-				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{200, rulingOK}, oembed: igAnswer{400, tc.oembed}}
+				f := &fakeIG{t: t, gql: gqlHidden, ruling: igAnswer{status: 200, body: rulingOK}, oembed: igAnswer{status: 400, body: tc.oembed}}
 				if tc.og != "" {
-					f.og = igAnswer{200, tc.og}
+					f.og = igAnswer{status: 200, body: tc.og}
 				}
 				a := newApp(Config{}, f.pool(), mustOffloadSigner(testOffloadSigningKeys))
 				cover := normalizeCDNHost(ogTestCover)
@@ -313,7 +391,7 @@ func TestHelperCancelledWhenGraphQLWins(t *testing.T) {
 		return Post{}, contextAppError(ctx)
 	})
 	synctest.Test(t, func(t *testing.T) {
-		f := &fakeIG{t: t, gql: gqlFull, gqlDelay: graphQLDelay, embed: igAnswer{http.StatusInternalServerError, ""}}
+		f := &fakeIG{t: t, gql: gqlFull, gqlDelay: graphQLDelay, embed: igAnswer{status: http.StatusInternalServerError}}
 		a := newApp(Config{}, f.pool(), offloadSigner{})
 		if _, err := a.getPost(context.Background(), "ABC123", nil); err != nil {
 			t.Fatal(err)
@@ -334,7 +412,7 @@ func TestFailedSourcesFallBackThenCache(t *testing.T) {
 		return Post{}, igErr(http.StatusBadGateway, errorCodeUpstream, "external helper post unparseable")
 	})
 	synctest.Test(t, func(t *testing.T) {
-		f := &fakeIG{t: t, gql: `{"data":{}}`, embed: igAnswer{200, "<html>not an embed</html>"}, oembed: igAnswer{200, `{"status":"fail"}`}}
+		f := &fakeIG{t: t, gql: `{"data":{}}`, embed: igAnswer{status: 200, body: "<html>not an embed</html>"}, oembed: igAnswer{status: 200, body: `{"status":"fail"}`}}
 		a := newApp(Config{}, f.pool(), offloadSigner{})
 		for range 2 {
 			if _, err := a.getPost(context.Background(), "ABC123", nil); err == nil || isTransient(err.Code) == false {
@@ -522,10 +600,77 @@ func TestProfileUsesRootContentAndPosts(t *testing.T) {
 			})
 		})
 	}
+	t.Run("cancels posts fetch on 404 and private profile", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, root string
+			wantErr    bool
+		}{
+			{"missing", `{"data":{"xig_user_by_username":null}}`, true},
+			{"private", `{"data":{"xig_user_by_username":{"username":"instagram","is_private":true,"follower_count":5}}}`, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					postsCanceled := make(chan struct{})
+					client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						if r.Header.Get("X-FB-Friendly-Name") == "PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery" {
+							<-r.Context().Done()
+							close(postsCanceled)
+							return nil, r.Context().Err()
+						}
+						return mediaTestResponse(r, 200, nil, []byte(tc.root)), nil
+					})}
+					a := newApp(Config{}, &SessionPool{sessions: []*Session{{name: "us-1", client: client}}}, offloadSigner{})
+					_, err := a.getProfile(context.Background(), "instagram", nil)
+					if (err != nil) != tc.wantErr {
+						t.Fatalf("getProfile err = %v, wantErr=%v", err, tc.wantErr)
+					}
+					synctest.Wait()
+					select {
+					case <-postsCanceled:
+					default:
+						t.Fatal("profile_posts request was not canceled")
+					}
+				})
+			})
+		}
+	})
 }
 
-// oEmbed's verdict picks the follow-up: GraphQL once more through DC for a
-// regional gate or a public post, nothing for an account age gate.
+func TestCachePolicyUsesSuccessfulSource(t *testing.T) {
+	profileEmbed := wrapEmbed(`{"context":{"username":"instagram","profile_pic_url":"https://scontent.cdninstagram.com/avatar.jpg"}}`)
+	for _, tc := range []struct {
+		name    string
+		f       *fakeIG
+		persist bool
+	}{
+		{"post_graphql", &fakeIG{gql: gqlFull}, true},
+		{"post_oembed", &fakeIG{gql: `{"data":{}}`, embed: igAnswer{status: 200, body: "invalid embed"}, oembed: igAnswer{status: 200, body: oembedPublic}}, false},
+		{"profile_embed", &fakeIG{api: igAnswer{status: 200, body: `{"data":{}}`}, embed: igAnswer{status: 200, body: profileEmbed}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setHelper(t, func(context.Context, string) (Post, *AppError) {
+				return Post{}, igErr(http.StatusBadGateway, errorCodeUpstream, helperNoPost)
+			})
+			synctest.Test(t, func(t *testing.T) {
+				tc.f.t = t
+				store := newTestStore(t)
+				a := newApp(Config{Store: store}, tc.f.pool(), offloadSigner{})
+				var err *AppError
+				if tc.name == "profile_embed" {
+					_, err = a.getProfile(context.Background(), "instagram", nil)
+				} else {
+					_, err = a.getPost(context.Background(), "ABC123", nil)
+				}
+				synctest.Wait()
+				var writes int
+				if qerr := store.state.QueryRow("SELECT COUNT(*) FROM models").Scan(&writes); err != nil || qerr != nil || (writes == 1) != tc.persist {
+					t.Fatalf("get = %v; model writes = %d, %v; want persisted %t", err, writes, qerr, tc.persist)
+				}
+			})
+		})
+	}
+}
+
 func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 	for _, tc := range []struct {
 		name, oembed string
@@ -543,9 +688,9 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 			})
 			synctest.Test(t, func(t *testing.T) {
 				// IPv6 hides the post; the DC proxy's GraphQL shows it.
-				f := &fakeIG{t: t, gql: gqlFull, oembed: igAnswer{tc.status, tc.oembed}}
+				f := &fakeIG{t: t, gql: gqlFull, oembed: igAnswer{status: tc.status, body: tc.oembed}}
 				if tc.og {
-					f.og = igAnswer{200, ogTestPage("ABC123")}
+					f.og = igAnswer{status: 200, body: ogTestPage("ABC123")}
 				}
 				var v6GQL atomic.Int32
 				v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

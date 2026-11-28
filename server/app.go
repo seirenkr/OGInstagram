@@ -20,19 +20,17 @@ type App struct {
 	posts    *cache[Post]
 	profiles *cache[Profile]
 	stories  *cache[Story]
-	// Partial posts a flight found while its full sources still run, for
-	// requests whose deadline passes first.
-	ogPosts *cache[Post]
+	shares   *cache[shareTarget]
+	ogPosts  *cache[Post]
 
 	fetchSlots chan struct{}
 
-	// IPv6 egress pools for APIs and pages; nil without an egress.
 	v6, v6Pages *SessionPool
-	v6Gates     sync.Map      // operation -> *v6Gate
-	helperSlots chan struct{} // helper calls outliving their flights
+	v6Gates     sync.Map
+	helperSlots chan struct{}
 	storyDoor   storySideDoor
 
-	gateNotices sync.Map // shortcode -> *AppError
+	gateNotices sync.Map
 }
 
 func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
@@ -45,6 +43,7 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 		posts:         newPersistentCache[Post](cfg.Store, "post", fetchSlots, localPostCacheBytes),
 		profiles:      newPersistentCache[Profile](cfg.Store, "profile", fetchSlots, localProfileCacheBytes),
 		stories:       newPersistentCache[Story](cfg.Store, "story", fetchSlots, localStoryCacheBytes),
+		shares:        newPersistentCache[shareTarget](cfg.Store, "share", fetchSlots, localShareCacheBytes),
 		ogPosts:       newPersistentCache[Post](nil, "og_post", fetchSlots, localOGPostCacheBytes),
 	}
 	a.helperSlots = make(chan struct{}, helperBackgroundSlots)
@@ -60,14 +59,12 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 type fetchMeta struct{ fetched bool }
 
 func (a *App) getPost(ctx context.Context, shortcode string, meta *fetchMeta) (Post, *AppError) {
-	// A code that cannot decode to a media id costs paid lookups for a sure miss.
-	if pk := shortcodePK(shortcode); !validShortcode(shortcode) || pk == nil || !pk.IsInt64() {
+	if !validPostShortcode(shortcode) {
 		return Post{}, igErr(404, errorCodeNotFound, "invalid shortcode")
 	}
 	post, err := a.posts.get(ctx, shortcode, meta, func(fetchCtx context.Context) (Post, time.Duration, bool, *AppError) {
 		return a.fetchPost(fetchCtx, shortcode)
 	})
-	// The flight outlives this request; a partial card or gate notice beats "temporarily unavailable".
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
 		if e, ok := a.ogPosts.localGet(shortcode); ok {
 			logger(ctx).InfoContext(ctx, "partial post served at deadline")
@@ -89,12 +86,10 @@ func postCacheTTL(post Post) time.Duration {
 	return cacheTTLFromURLs(urls...)
 }
 
-// helperAsked: the external helper reached Instagram and found no post.
 func helperAsked(err *AppError) bool {
 	return err != nil && !err.Ephemeral && err.Code != errorCodeConnection && err.Code != errorCodeRateLimited
 }
 
-// postHelper is a flight's single external helper call; it may outlive the flight.
 type postHelper struct {
 	once   sync.Once
 	begun  atomic.Bool
@@ -147,7 +142,6 @@ func (h *postHelper) wait(ctx context.Context) (Post, *AppError) {
 	}
 }
 
-// asked: the helper finished and reached Instagram.
 func (h *postHelper) asked() bool {
 	select {
 	case <-h.done:
@@ -157,7 +151,6 @@ func (h *postHelper) asked() bool {
 	}
 }
 
-// keepAfterFlight lets a running helper finish and store its post, if a helper slot is free.
 func (a *App) keepAfterFlight(h *postHelper, shortcode string) {
 	if !h.begun.Load() {
 		h.cancel()
@@ -182,15 +175,12 @@ func (a *App) keepAfterFlight(h *postHelper, shortcode string) {
 	}()
 }
 
-// fetchPost races GraphQL with the embed and external helper as hedges. A
-// withheld post goes to hiddenPost; otherwise oEmbed is the last resort.
 func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl time.Duration, persist bool, err *AppError) {
 	valid := validSourceModel[Post](shortcode)
 	helper := a.newPostHelper(ctx, shortcode)
-	var hidden atomic.Bool
+	var hidden atomic.Pointer[graphQLGating]
 	defer func() {
-		// Only a gated post is worth the helper's late answer.
-		if hidden.Load() && (err != nil || post.Partial) {
+		if hidden.Load() != nil && (err != nil || post.Partial) {
 			a.keepAfterFlight(helper, shortcode)
 		} else {
 			helper.cancel()
@@ -208,7 +198,8 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 			}
 			post, perr := parseInstagramPost(body)
 			if perr != nil && graphQLHidden(body) {
-				hidden.Store(true)
+				g := parseGraphQLGating(body)
+				hidden.Store(&g)
 				perr.Final = true
 			}
 			return valid(post, perr)
@@ -224,8 +215,8 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	if err == nil {
 		return post, postCacheTTL(post), true, nil
 	}
-	if hidden.Load() {
-		return a.hiddenPost(ctx, shortcode, helper)
+	if g := hidden.Load(); g != nil {
+		return a.hiddenPost(ctx, shortcode, helper, *g)
 	}
 	outcome := a.fetchOembed(ctx, shortcode)
 	card, cardErr := oembedVerdict(outcome, shortcode, *err)
@@ -235,21 +226,18 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	return Post{}, 0, false, gateOrRetry(cardErr, helper)
 }
 
-// hiddenPost handles a post GraphQL withholds (gated, hidden or gone). The helper and oEmbed
-// start at once; oEmbed's verdict picks at most one follow-up.
-func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelper) (Post, time.Duration, bool, *AppError) {
+func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelper, gating graphQLGating) (Post, time.Duration, bool, *AppError) {
 	helper.start()
 	oembedC := make(chan oembedOutcome, 1)
-	go func() { oembedC <- a.fetchOembed(ctx, shortcode) }()
 	ogC, dcC, missingC := make(chan Post, 1), make(chan Post, 1), make(chan bool, 1)
-	pending := 1 // oEmbed and its follow-ups
+	pending := 0
 	follow := func(f func()) {
 		pending++
 		go f()
 	}
 	retryDC := func() {
 		if a.v6 == nil {
-			return // GraphQL already went through DC
+			return
 		}
 		follow(func() {
 			var post Post
@@ -270,11 +258,29 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			ogC <- og
 		})
 	}
+	followGate := func(gatingType int) {
+		switch gatingType {
+		case 3, 10, 11:
+			fetchOG()
+		case 2:
+			fetchOG()
+			retryDC()
+		}
+	}
 
 	base := *igErr(http.StatusBadGateway, errorCodeGraphQL, "Instagram could not load this post")
-	var partial Post // og page or oEmbed thumbnail
+	var partial Post
 	var gate *AppError
 	oembedStatus := 0
+	oembedGone := false
+	if gating.gatingType != 0 && gating.title != "" {
+		gate = gatingError(gating.gatingType, gating.title, gating.desc, base)
+		a.publishGate(shortcode, gate)
+		followGate(gating.gatingType)
+	} else {
+		follow(func() { oembedC <- a.fetchOembed(ctx, shortcode) })
+	}
+
 	answer := func(helperErr *AppError) (Post, time.Duration, bool, *AppError) {
 		switch {
 		case partial.Shortcode != "":
@@ -285,7 +291,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			return partial, ttl, false, nil
 		case gate != nil:
 			return Post{}, 0, false, gateOrRetry(gate, helper)
-		case oembedStatus == http.StatusNotFound && helperErr != nil && helperErr.Status == http.StatusNotFound:
+		case oembedGone && helperErr != nil && helperErr.Status == http.StatusNotFound:
 			return Post{}, 0, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
 		}
 		return Post{}, 0, false, &base
@@ -314,14 +320,9 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 			case cardErr.CardTitle != "":
 				gate = cardErr
 				a.publishGate(shortcode, cardErr)
-				switch gjson.Get(o.body, "gating_type_thrift").Int() {
-				case 3:
-					fetchOG()
-				case 2:
-					fetchOG()
-					retryDC()
-				}
-			case o.ok && o.status == http.StatusNotFound:
+				followGate(int(gjson.Get(o.body, "gating_type_thrift").Int()))
+			case oembedNotFound(o):
+				oembedGone = true
 				follow(func() {
 					missingC <- a.mediaMissing(ctx, shortcode)
 				})
@@ -340,7 +341,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 		case missing := <-missingC:
 			pending--
 			if missing {
-				helper.cancel() // only stale copies left
+				helper.cancel()
 				return Post{}, 0, false, igErr(http.StatusNotFound, errorCodeMediaNotFound, "This post isn't available.")
 			}
 		case <-ctx.Done():
@@ -349,7 +350,6 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 	}
 }
 
-// gateOrRetry keeps a gate notice short-lived until the helper, which can fetch gated posts, has tried.
 func gateOrRetry(err *AppError, helper *postHelper) *AppError {
 	if externalHelperPostImpl != nil && !helper.asked() && (err.Code == errorCodeRestricted || err.Code == errorCodeGeoBlocked) {
 		retry := *err
@@ -359,7 +359,6 @@ func gateOrRetry(err *AppError, helper *postHelper) *AppError {
 	return err
 }
 
-// publishGate keeps a gate notice for requests that hit their deadline first.
 func (a *App) publishGate(shortcode string, err *AppError) {
 	notice := *err
 	a.gateNotices.Store(shortcode, &notice)

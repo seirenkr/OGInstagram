@@ -21,7 +21,6 @@ func profileURL(username string) string {
 	return instagramOrigin + "/" + url.PathEscape(username) + "/"
 }
 
-// unknownCount: no source gave the post count; the card omits it.
 const unknownCount = -1
 
 func profileStatsLine(p Profile) string {
@@ -61,14 +60,11 @@ var usernameRE = regexp.MustCompile(`^[A-Za-z0-9._]{1,30}$`)
 
 func validUsername(s string) bool { return usernameRE.MatchString(s) }
 
-// Logged-out web app queries; neither returns the post count.
 const (
 	profileRootDocID  = "27981003384861049"
 	profilePostsDocID = "27553725110923321"
 )
 
-// fetchProfile asks RootContent and PostsTab at once; the embed stands in only
-// when RootContent is unreachable.
 func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool, *AppError) {
 	started := time.Now()
 	valid := validSourceModel[Profile](username)
@@ -84,6 +80,8 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 		}()
 		return c
 	}
+	postsCtx, cancelPosts := context.WithCancel(ctx)
+	defer cancelPosts()
 	rootC := run(func() (Profile, *AppError) {
 		_, body, err := a.fetchViaProxy(ctx, loggedOutQuerySpec("profile", "PolarisLoggedOutDesktopWWWProfileRootContentQuery", profileRootDocID, map[string]any{"username": username}))
 		if err != nil {
@@ -92,7 +90,7 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 		return parseProfileRoot(body)
 	})
 	postsC := run(func() (Profile, *AppError) {
-		_, body, err := a.fetchViaProxy(ctx, loggedOutQuerySpec("profile_posts", "PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery", profilePostsDocID, map[string]any{"first": profileGalleryMax, "username": username}))
+		_, body, err := a.fetchViaProxy(postsCtx, loggedOutQuerySpec("profile_posts", "PolarisLoggedOutDesktopWWWProfilePostsTabContentQuery", profilePostsDocID, map[string]any{"first": profileGalleryMax, "username": username}))
 		if err != nil {
 			return Profile{}, err
 		}
@@ -101,6 +99,7 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 
 	root := <-rootC
 	if root.err != nil {
+		cancelPosts()
 		if root.err.Final {
 			return Profile{}, false, root.err
 		}
@@ -111,15 +110,17 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 		return embed, false, nil
 	}
 	p := root.profile
-	wait := time.NewTimer(max(profilePostsWait-time.Since(started), 0))
-	defer wait.Stop()
-	select {
-	case posts := <-postsC:
-		if posts.err == nil {
-			p.RecentMedia = posts.profile.RecentMedia
+	if !p.IsPrivate {
+		wait := time.NewTimer(max(profilePostsWait-time.Since(started), 0))
+		defer wait.Stop()
+		select {
+		case posts := <-postsC:
+			if posts.err == nil {
+				p.RecentMedia = posts.profile.RecentMedia
+			}
+		case <-wait.C:
+		case <-ctx.Done():
 		}
-	case <-wait.C:
-	case <-ctx.Done():
 	}
 	p, err := valid(p, nil)
 	return p, true, err
@@ -128,7 +129,6 @@ func (a *App) fetchProfile(ctx context.Context, username string) (Profile, bool,
 func parseProfileRoot(body string) (Profile, *AppError) {
 	u := gjson.Get(body, "data.xig_user_by_username")
 	if !present(u) {
-		// null: no such, renamed or age-restricted account; a missing key is drift.
 		if u.Exists() {
 			notFound := igErr(http.StatusNotFound, errorCodeNotFound, "user not found")
 			notFound.Final = true
@@ -152,7 +152,6 @@ func parseProfileRoot(body string) (Profile, *AppError) {
 	return p, nil
 }
 
-// parseProfilePosts reads PostsTab's thumbnails (no sizes).
 func parseProfilePosts(body string) Profile {
 	var p Profile
 	gjson.Get(body, "data.xig_user_by_username.polaris_ordered_timeline_connection.edges").ForEach(func(_, e gjson.Result) bool {

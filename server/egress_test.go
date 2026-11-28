@@ -205,11 +205,14 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 		t.Fatal("a straggler's failure extended the pause")
 	}
 
-	// Muted licensed music gets one DC recheck.
-	muted := `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"music_info":{"music_consumption_info":{"should_mute_audio":true}}}}}}}`
-	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, muted })
-	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, `"ok"`) || dcCalls.Load() != 1 {
-		t.Fatalf("muted: body %q, err %v, DC calls %d; want the DC copy", got, err, dcCalls.Load())
+	for _, muted := range []string{
+		`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"music_info":{"music_consumption_info":{"should_mute_audio":true}}}}}}}`,
+		`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"original_sound_info":{"should_mute_audio":true}}}}}}`,
+	} {
+		a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, muted })
+		if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, `"ok"`) || dcCalls.Load() != 1 {
+			t.Fatalf("muted: body %q, err %v, DC calls %d; want the DC copy", got, err, dcCalls.Load())
+		}
 	}
 	// A withheld post comes back at once; hiddenPost races DC separately.
 	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, `{"data":{"xig_polaris_media":null}}` })

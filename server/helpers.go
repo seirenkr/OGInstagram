@@ -18,7 +18,11 @@ func shortcodePK(shortcode string) *big.Int {
 	return new(big.Int).SetBytes(raw)
 }
 
-// pkShortcode is the inverse of shortcodePK.
+func validPostShortcode(shortcode string) bool {
+	pk := shortcodePK(shortcode)
+	return validShortcode(shortcode) && pk != nil && pk.IsInt64()
+}
+
 func pkShortcode(pk uint64) string {
 	const digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 	var out [11]byte
@@ -97,7 +101,6 @@ func fmtCount(value int) string {
 	return s
 }
 
-// A count of -1 is unknown (hidden or absent upstream) and is left out rather than shown as 0.
 func statsLine(prefix string, likes, comments int) string {
 	line := prefix
 	if likes >= 0 {

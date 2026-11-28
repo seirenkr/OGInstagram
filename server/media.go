@@ -12,7 +12,6 @@ import (
 	"time"
 )
 
-// trustedMediaURL accepts only HTTPS Instagram CDN URLs as redirect targets.
 func trustedMediaURL(u *url.URL) bool {
 	if u == nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Opaque != "" {
 		return false
@@ -34,9 +33,7 @@ func (a *App) offloadResp(req *http.Request, target string, avatar bool) resp {
 
 var avatarTypes = []string{"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"}
 
-// Instagram serves profile pictures with Cross-Origin-Resource-Policy:
-// same-origin, so pages here can only show them from this origin. Bots fetch
-// server-side, so when the copy fails they still get the redirect.
+// Instagram sends Cross-Origin-Resource-Policy: same-origin on avatars, so pages load them via this origin.
 func avatarResp(ctx context.Context, target string) resp {
 	u, err := url.Parse(target)
 	if err != nil || !trustedMediaURL(u) {
@@ -44,7 +41,6 @@ func avatarResp(ctx context.Context, target string) resp {
 	}
 	contentType, body, ferr := fetchAvatar(ctx, target)
 	if ferr != nil {
-		// Briefly, so a failing CDN doesn't send every repeat hit to the origin.
 		r := redirectResp(target, 302)
 		r.originStatus, r.errorType = ferr.Status, ferr.Code
 		r.headers["Cloudflare-CDN-Cache-Control"] = "max-age=60"
@@ -53,7 +49,6 @@ func avatarResp(ctx context.Context, target string) resp {
 	return resp{status: http.StatusOK, headers: map[string]string{"Content-Type": contentType}, body: body, mediaURL: target}
 }
 
-// The CDN is public, so this goes direct, never through the paid proxy pool.
 func fetchAvatar(ctx context.Context, rawURL string) (contentType string, body []byte, ferr *AppError) {
 	ctx, cancel := context.WithTimeout(ctx, avatarTimeout)
 	defer cancel()

@@ -21,14 +21,14 @@ var homeLocales = map[string]bool{
 
 var homeQualityPattern = regexp.MustCompile(`^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)$`)
 
-// Must match the Pretendard stylesheets in web/index.html; their fonts load from the same roots.
+// Must match the Pretendard stylesheets in web/index.html.
 const pretendardSources = "https://cdn.jsdelivr.net/npm/pretendard@1.3.9/ https://cdn.jsdelivr.net/gh/orioncactus/pretendard@5c41199ea0024a9e0b2cb31735265056e5472d76/"
 
-// The tag follows the @twemoji/parser version in package.json.
+// Matches @twemoji/parser in package.json.
 const twemojiSource = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@17.0.1/assets/svg/"
 
 func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
-	base, _ := url.Parse(g.cfg.BaseURL) // validated at startup
+	base, _ := url.Parse(g.cfg.BaseURL)
 	if !g.cfg.Development && !strings.EqualFold(r.Host, base.Host) {
 		target := url.URL{Scheme: base.Scheme, Host: base.Host, Path: "/"}
 		if language := r.URL.Query().Get("hl"); language != "" {
@@ -52,8 +52,6 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 	if forced != "" {
 		canonical += "?hl=" + forced
 	}
-	// Host, key and version occur inside JSON strings. Use JSON escaping here
-	// rather than accepting configuration as executable markup.
 	page := strings.NewReplacer(
 		"__OG_CANONICAL__", html.EscapeString(canonical),
 		"__OG_BASE__", html.EscapeString(origin),
@@ -63,7 +61,6 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 		"__OG_VERSION__", homeJSONString(g.cfg.Version),
 	).Replace(g.home[locale])
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Every page carries a fresh nonce and can depend on the language cookie.
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("Vary", "Accept-Language, Cookie")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'nonce-"+nonce+"' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' "+pretendardSources+"; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net "+twemojiSource+"; media-src 'self' https://*.cdninstagram.com https://*.fbcdn.net; font-src 'self' "+pretendardSources+"; connect-src 'self' https://challenges.cloudflare.com https://*.cdninstagram.com https://*.fbcdn.net; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
@@ -71,7 +68,7 @@ func (g *Gateway) serveHome(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{Name: "hl", Value: forced, Path: "/", MaxAge: 31536000, SameSite: http.SameSiteLaxMode, Secure: base.Scheme == "https"})
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
-	_, _ = io.WriteString(w, page) // net/http drops the body for HEAD
+	_, _ = io.WriteString(w, page)
 }
 
 func homeJSONString(value string) string {
@@ -123,18 +120,13 @@ func publishedAsset(file string) (allowed, immutable bool) {
 	return immutable || file == "default-avatar.jpg" || file == "favicon-192.png" || file == "favicon-64.png", immutable
 }
 
-// reservedAssetPath reports whether serveAsset answers path (with the file or a
-// 404) before the router sees it.
 func reservedAssetPath(path string) bool {
 	file := strings.TrimPrefix(path, "/")
 	allowed, _ := publishedAsset(file)
-	// Root files crawlers probe would otherwise parse as Instagram usernames.
-	return file != ".well-known/webfinger" && (allowed || file == "assets" || file == "preview" || file == "twemoji" || file == "home" || strings.HasPrefix(file, "home/") || strings.HasPrefix(file, ".") ||
+	return file != ".well-known/webfinger" && (allowed || file == "assets" || file == "preview" || file == "home" || strings.HasPrefix(file, "home/") || strings.HasPrefix(file, ".") ||
 		file == "robots.txt" || file == "favicon.ico" || file == "sitemap.xml")
 }
 
-// serveAsset serves only published build artifacts. Templates and build control
-// files remain private, and directories never produce a listing or an index.
 func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request) bool {
 	if !reservedAssetPath(r.URL.Path) {
 		return false
@@ -154,7 +146,6 @@ func (g *Gateway) serveAsset(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 		return true
 	}
-	// ponytail: one OpenRoot per request; open it once in loadHomeTemplates if asset serving shows in profiles.
 	root, err := os.OpenRoot(g.cfg.AssetsDir)
 	if err != nil {
 		http.NotFound(w, r)

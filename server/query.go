@@ -25,7 +25,6 @@ func mediaSelection(values url.Values, pathIndex int) (index int, specified bool
 		base int
 	}{{"img_index", 1}, {"index", 0}, {"order", 0}} {
 		if values.Has(q.key) {
-			// Present but empty or non-canonical selects 0.
 			n, _ := parseCanonicalDecimal(values.Get(q.key))
 			return boundedMediaIndex(n - q.base), true
 		}

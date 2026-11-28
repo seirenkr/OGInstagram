@@ -11,8 +11,7 @@ env.BASE_URL = "http://localhost:8080";
 env.DATA_DIR = resolve(root, ".local-data");
 env.ASSETS_DIR = resolve(root, "web/dist");
 env.TRUSTED_PROXIES = "";
-env.TURNSTILE_SITE_KEY ||= "1x00000000000000000000BB"; // Cloudflare's always-pass test sitekey
-// Local runs would otherwise spend the shared proxy account.
+env.TURNSTILE_SITE_KEY ||= "1x00000000000000000000BB"; // Cloudflare always-pass test sitekey
 if (env.DEV_PROXY !== "1" && (env.PROXY_USERNAME || env.PROXY_PASSWORD)) {
   delete env.PROXY_USERNAME;
   delete env.PROXY_PASSWORD;

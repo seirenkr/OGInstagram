@@ -15,7 +15,6 @@ const escapeHTML = (s) => s.replaceAll("&", "&amp;").replaceAll('"', "&quot;").r
 
 const strings = new Map(locales.map((l) => [l, JSON.parse(readFileSync(join(localeDir, `${l}.json`), "utf8"))]));
 
-// Throws on an empty leaf while building a sorted key signature of the tree.
 const keyShape = (locale, node, path = "") => Object.entries(node).map(([key, value]) => {
   const at = path ? `${path}.${key}` : key;
   if (value && typeof value === "object") return `${key}{${keyShape(locale, value, at)}}`;

@@ -68,7 +68,6 @@ func parseOffloadSigner(raw string) (offloadSigner, error) {
 	return offloadSigner{active: config.Active, keys: keys}, nil
 }
 
-// offloadMAC is shared by signing and authorize, so both hash the same input.
 func offloadMAC(key []byte, keyID, path string, expires int64) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte("oginstagram-offload-capability\n" +
@@ -87,12 +86,7 @@ func (s offloadSigner) signature(path string, expires int64) string {
 	return base64.RawURLEncoding.EncodeToString(offloadMAC(key, s.active, path, expires))
 }
 
-// ponytail: the 78-byte capability query costs about 29% of Discord's 3000-byte
-// component budget; at the next format change, truncate the MAC to 16 bytes and
-// fold v into kid.
 func (s offloadSigner) url(baseURL, path string, thumbnail bool) string {
-	// Hourly expiries give every render in the same hour one URL, and so one
-	// edge cache entry.
 	expires := time.Now().Add(offloadCapabilityTTL).Truncate(time.Hour).Unix()
 	query := "v=" + offloadSignatureVersion + "&kid=" + s.active +
 		"&exp=" + strconv.FormatInt(expires, 10) + "&sig=" + s.signature(path, expires)
@@ -111,8 +105,6 @@ func (s offloadSigner) authorize(u *url.URL, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	// Only the exact query url emits: any extra, reordered or re-encoded
-	// parameter would be a fresh edge cache key for the same capability.
 	v, kid, exp, sig := values.Get("v"), values.Get("kid"), values.Get("exp"), values.Get("sig")
 	canonical := "v=" + v + "&kid=" + kid + "&exp=" + exp + "&sig=" + sig
 	if u.RawQuery != canonical && u.RawQuery != "thumbnail=1&"+canonical {

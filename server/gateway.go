@@ -22,15 +22,13 @@ import (
 
 const (
 	maxGatewayInFlight = 256
-	// Far above one hour of genuine limited-bot IPs; a flood of fresh addresses
-	// is refused instead of growing the map without bound.
-	maxBotLimiterKeys = 100_000
+	maxBotLimiterKeys  = 100_000
 )
 
 type Gateway struct {
 	cfg    Config
 	app    *App
-	home   map[string]string // locale → home page template
+	home   map[string]string
 	slots  chan struct{}
 	client *http.Client
 
@@ -43,20 +41,12 @@ type Gateway struct {
 	bots botLimiter
 }
 
-// botLimiter caps requests that Cloudflare classed as unverified bots (a Request
-// Header Transform Rule sets botClassHeader on every request, so clients cannot
-// forge it) to botHourlyLimit per visitor IP. The Free plan's rate limiting only
-// counts over 10 s, so the hourly count lives here.
-// ponytail: fixed clock-hour window per instance (up to 2x at the boundary,
-// resets on deploy); move to a sliding window in SQLite if that ever matters.
 type botLimiter struct {
 	mu     sync.Mutex
 	hour   int64
 	counts map[string]int
 }
 
-// allow counts one request from ip, or reports how long until the next window.
-// An IPv6 client usually holds a whole /64, so that is one visitor.
 func (l *botLimiter) allow(ip string, now time.Time) (bool, time.Duration) {
 	if a, err := netip.ParseAddr(ip); err == nil && a.Is6() && !a.Is4In6() {
 		ip = netip.PrefixFrom(a, 64).Masked().String()
@@ -88,7 +78,6 @@ func newGateway(cfg Config, app *App, home map[string]string) *Gateway {
 	return g
 }
 
-// One writer keeps the bucket-rollover SQLite flush off every response's critical path.
 func (g *Gateway) writeMetrics() {
 	for m := range g.metrics {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -149,8 +138,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.problem(w, r, 421, "unrecognized host")
 		return
 	}
-	// Cloudflare's preview WAF rule matches the public URI path. Reject encoded
-	// aliases rather than dispatching a decoded path that escaped that rule.
+	// Cloudflare's preview WAF matches the raw URI path; reject encoded aliases.
 	if (r.URL.Path == "/api/embed" || r.URL.Path == "/api/status") && r.URL.EscapedPath() != r.URL.Path {
 		g.problem(w, r, 404, "not found")
 		return
@@ -193,8 +181,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.problem(w, r, 404, "not found")
 		return
 	}
-	// Cloudflare Redirect Rules send most browser navigations to Instagram before
-	// the WAF. This catches the rest (e.g. /p/X/2/, challenge-passed visitors).
 	if route.humanRedirect != "" && r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document" {
 		http.Redirect(w, r, route.humanRedirect, http.StatusTemporaryRedirect)
 		return
@@ -207,8 +193,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if route.offload && !g.app.offloadSigner.authorize(r.URL, time.Now()) {
-		// A link that fails verification under a known key never becomes valid; let
-		// the edge keep the 404. An unknown kid may be a key an operator restores.
 		ttl := "60"
 		if g.app.offloadSigner.keys[r.URL.Query().Get("kid")] != nil {
 			ttl = "86400"
@@ -219,22 +203,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	started := time.Now()
 	result := g.render(r, route)
-	// An error fallback (originStatus set) points at Instagram, at an avatar
-	// not yet copied or at a partial post's cover, and keeps only the short
-	// edge TTL its handler set, if any.
 	if route.offload && (result.status == http.StatusFound || result.status == http.StatusOK) && result.originStatus == 0 {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(offloadEdgeTTL(r.URL, cmp.Or(result.headers["Location"], result.mediaURL), time.Now()))
 	}
-	// must-revalidate: past the CDN URL's expiry Cloudflare must not serve the
-	// stale redirect when the origin errors.
 	if route.direct && result.status == http.StatusFound && result.originStatus == 0 {
 		if ttl := directEdgeTTL(result.headers["Location"], time.Now()); ttl > 0 {
 			result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(ttl) + ", must-revalidate"
 		}
 	}
-	// A card never depends on the User-Agent, so one copy serves every bot. The
-	// edge keys on the URL alone, so the AS2 object a card URL also serves must
-	// never be stored. Error and partial cards are 200s too, hence originStatus.
 	if route.card && r.Method == http.MethodGet && result.status == http.StatusOK && result.originStatus == 0 &&
 		strings.HasPrefix(result.headers["Content-Type"], "text/html") {
 		result.headers["Cloudflare-CDN-Cache-Control"] = "max-age=" + strconv.Itoa(cardEdgeTTL)
@@ -245,8 +221,6 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.writeResult(w, r, result)
 }
 
-// offloadEdgeTTL lets Cloudflare answer repeat hits on a signed link until the
-// CDN URL it redirects to or copies nears expiry, and never past the link's own expiry.
 func offloadEdgeTTL(link *url.URL, location string, now time.Time) int {
 	ttl := cacheTTLFromURLs(location)
 	if exp, err := strconv.ParseInt(link.Query().Get("exp"), 10, 64); err == nil {
@@ -255,8 +229,6 @@ func offloadEdgeTTL(link *url.URL, location string, now time.Time) int {
 	return max(int(ttl/time.Second), 0)
 }
 
-// directEdgeTTL caches a d. host redirect only while the CDN URL it points at
-// carries its own expiry; the default avatar and unexpiring URLs stay uncached.
 func directEdgeTTL(location string, now time.Time) int {
 	u, err := url.Parse(location)
 	if err != nil || !trustedMediaURL(u) {
@@ -283,7 +255,6 @@ func (g *Gateway) problem(w http.ResponseWriter, r *http.Request, status int, de
 }
 
 func (g *Gateway) problemCause(w http.ResponseWriter, r *http.Request, status int, detail string, cause error) {
-	// nginx already logs every overload rejection; one Warn each would flood.
 	if (status == http.StatusForbidden || status == http.StatusMisdirectedRequest || status >= 500) && detail != "overloaded" {
 		l := logger(r.Context())
 		if cause != nil {
@@ -299,8 +270,6 @@ func (g *Gateway) writeResult(w http.ResponseWriter, r *http.Request, result res
 	for k, v := range result.headers {
 		w.Header().Set(k, v)
 	}
-	// Only Cloudflare may keep a dynamic response: where ServeHTTP set
-	// Cloudflare-CDN-Cache-Control and a cache rule opts the path in.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(result.status)
 	if r.Method != http.MethodHead {
@@ -308,16 +277,13 @@ func (g *Gateway) writeResult(w http.ResponseWriter, r *http.Request, result res
 	}
 }
 
-// handle gets render's request (same URL, plus the render timeout). Its
-// arguments were validated by resolveGatewayRoute; handlers never re-match paths.
 type gatewayRoute struct {
 	handle        func(*App, *http.Request) resp
 	humanRedirect string
 	category      string
 	offload       bool
 	direct        bool
-	// card: a 200 keyed only by the URL; profiles stay out because a dotted
-	// username looks like a file extension Cloudflare caches for everyone.
+	// Profiles stay out: a dotted username looks like a file extension Cloudflare caches by default.
 	card bool
 }
 
@@ -335,9 +301,7 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		route.handle, route.offload = handle, true
 		return route, ok
 	}
-	// /stories/highlights/{id} is a highlight reel, not a story of the user "highlights".
-	if len(segments) == 3 && segments[0] == "stories" && segments[1] != "highlights" && validUsername(segments[1]) && validStoryID(segments[2]) {
-		username, id := segments[1], segments[2]
+	if username, id, ok := parseStorySegments(segments); ok {
 		route.category, route.direct, route.card = "stories", direct, !direct
 		if direct {
 			route.handle = func(a *App, r *http.Request) resp { return a.handleStoryOffload(r, username, id, false) }
@@ -360,15 +324,23 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		}
 		return route, true
 	}
-	// Actor collections sit under the actor id, /{username}. Posts match first, so
-	// a collection never shadows a card; the names it loses (/p/inbox is a post)
-	// are Instagram's own routes, never accounts.
+	if share := parseShareSegments(segments); share != nil {
+		route.category, route.direct, route.card = "posts", direct, !direct
+		index, specified := mediaSelection(r.URL.Query(), share.PathIndex)
+		if !direct {
+			route.humanRedirect = instagramShareURL(share.Kind, share.Token, index, specified)
+		}
+		route.handle = func(a *App, r *http.Request) resp {
+			return a.handleShare(r, *share, index, specified, direct)
+		}
+		return route, true
+	}
 	if len(segments) == 2 && validUsername(segments[0]) && slices.Contains([]string{"inbox", "outbox", "followers", "following"}, segments[1]) {
 		username, name := segments[0], segments[1]
 		route.handle = func(a *App, r *http.Request) resp { return a.handleActivityCollection(r, username, name) }
 		return route, true
 	}
-	if len(segments) == 1 && validUsername(segments[0]) {
+	if len(segments) == 1 && isProfileUsername(segments[0]) {
 		username := segments[0]
 		route.category = "profile"
 		route.humanRedirect = profileURL(username)
@@ -378,8 +350,6 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 	return route, false
 }
 
-// offloadRoute validates an offload path and returns its canonical form, with
-// usernames lowercased, and the handler for it.
 func offloadRoute(u *url.URL) (string, func(*App, *http.Request) resp, bool) {
 	s := splitPath(u.Path)
 	if len(s) < 2 || s[0] != "offload" || u.EscapedPath() != "/"+strings.Join(s, "/") {
@@ -429,8 +399,6 @@ func (g *Gateway) render(r *http.Request, route gatewayRoute) resp {
 	return route.handle(g.app, r.WithContext(ctx))
 }
 
-// previewTarget turns the client-supplied path into the internal GET the
-// preview renders. The gateway router decides which shapes are embeddable.
 func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, bool) {
 	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "#\\") || strings.IndexFunc(path, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 		return nil, gatewayRoute{}, false
@@ -442,7 +410,7 @@ func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, b
 	internal := r.Clone(r.Context())
 	internal.Method = http.MethodGet
 	internal.URL = u
-	internal.Header.Del("Accept") // The preview always renders the card.
+	internal.Header.Del("Accept")
 	route, ok := resolveGatewayRoute(internal)
 	if !ok || route.category == "" || reservedAssetPath(u.Path) || !previewQuery(u.RawQuery, route.category == "posts") {
 		return nil, gatewayRoute{}, false
@@ -450,7 +418,6 @@ func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, b
 	return internal, route, true
 }
 
-// Only posts take a query, and only a single canonical img_index.
 func previewQuery(raw string, post bool) bool {
 	if raw == "" {
 		return true
@@ -467,10 +434,8 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 	if !allowMethod(w, r, "POST") {
 		return
 	}
-	// Siteverify can take ten seconds before the four-second render begins.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(20 * time.Second))
-	// Safari before 16.4 sends no Sec-Fetch-Site; the exact Origin and the JSON
-	// content type still keep cross-origin requests out.
+	// Safari <16.4 omits Sec-Fetch-Site.
 	if site := r.Header.Get("Sec-Fetch-Site"); r.Header.Get("Origin") != origin || site != "" && site != "same-origin" {
 		g.problem(w, r, 403, "forbidden")
 		return
@@ -504,8 +469,7 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 		g.problem(w, r, 400, "invalid Instagram path")
 		return
 	}
-	// nginx rate-limits previews per cf_clearance; a request without exactly one
-	// clearance has not passed the edge challenge.
+	// nginx rate-limits previews per cf_clearance.
 	if !hasClearance(r) && !(g.cfg.Development && peerAddress(r).IsLoopback()) {
 		g.problem(w, r, 403, "forbidden")
 		return
@@ -527,7 +491,6 @@ func (g *Gateway) serveEmbed(w http.ResponseWriter, r *http.Request, origin stri
 		if status == 499 {
 			status = 504
 		}
-		// A gated post gets the page's "unavailable" copy (404/451), not a generic error.
 		if result.errorType == errorCodeRestricted {
 			status = http.StatusUnavailableForLegalReasons
 		}
@@ -578,17 +541,16 @@ func (g *Gateway) verifyTurnstile(r *http.Request, origin, token string) bool {
 }
 
 func (g *Gateway) recordMetric(route gatewayRoute, result resp, duration time.Duration) {
-	// Only origin outcomes: cache hits say nothing about upstream health.
-	if route.category == "" || result.cacheHit {
+	category := cmp.Or(result.category, route.category)
+	if category == "" || result.cacheHit {
 		return
 	}
 	status := result.status
 	if result.originStatus > 0 {
 		status = result.originStatus
 	}
-	// Metrics are best-effort: a full backlog drops the sample, never the response.
 	select {
-	case g.metrics <- metricEvent{category: route.category, errorType: result.errorType, duration: duration, status: status}:
+	case g.metrics <- metricEvent{category: category, errorType: result.errorType, duration: duration, status: status}:
 	default:
 	}
 }
@@ -597,7 +559,6 @@ func (g *Gateway) serveStatus(w http.ResponseWriter, r *http.Request) {
 	if !allowMethod(w, r, "GET", "HEAD") {
 		return
 	}
-	// Holding the lock during the scan merges concurrent misses into one query.
 	g.statusMu.Lock()
 	if time.Since(g.statusAt) >= time.Minute {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)

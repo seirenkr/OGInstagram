@@ -11,13 +11,17 @@ test("embed accepts only supported Instagram paths", () => {
   for (const { raw, value } of decimalCases) assert.equal(parseCanonicalDecimal(raw), value, raw);
 });
 
-test("live preview preserves Instagram img_index", () => {
+test("live preview preserves Instagram img_index and /share paths", () => {
   const path = instagramEmbedPath(
     "https://www.instagram.com/p/Ab_12/?img_index=2&utm_source=ig_web_copy_link"
   );
   assert.equal(path, "/p/Ab_12?img_index=2");
   assert.equal(validEmbedPath(path ?? ""), true);
   assert.equal(instagramEmbedPath("https://instagram.com/%09/evil.test/p/Ab_12"), null);
+  assert.equal(instagramEmbedPath("https://www.instagram.com/share/BAblI6LDIl/?igsh=abc"), "/share/BAblI6LDIl");
+  assert.equal(instagramEmbedPath("https://www.instagram.com/share/p/Ab_12/?img_index=2&igsh=abc"), "/share/p/Ab_12?img_index=2");
+  assert.equal(instagramEmbedPath("https://www.instagram.com/share/BAblI6LDIl/2?img_index=3"), "/share/BAblI6LDIl/2");
+  assert.equal(instagramEmbedPath("https://www.instagram.com/share/p/"), null);
 });
 
 test("browser media selection follows the shared canonical cases", () => {

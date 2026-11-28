@@ -15,36 +15,6 @@ const sampleCarousel = `{"data":{"xig_polaris_media":{"if_not_gated_logged_out":
   ]
 }}}}`
 
-func TestParseCarousel(t *testing.T) {
-	post, err := parseInstagramPost(sampleCarousel)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if post.Username != "instagram" || post.FullName != "Instagram" {
-		t.Fatalf("owner mismatch: %q / %q", post.Username, post.FullName)
-	}
-	if post.Caption != "hello\nworld" {
-		t.Fatalf("caption mismatch: %q", post.Caption)
-	}
-	if len(post.Attachments) != 2 {
-		t.Fatalf("want 2 attachments, got %d", len(post.Attachments))
-	}
-	img := post.Attachments[0]
-	if img.Kind != "image" || img.URL != "https://cdn/img1.jpg" {
-		t.Fatalf("image attachment wrong: %+v", img)
-	}
-	if img.Width != 1080 || img.Height != 1350 {
-		t.Fatalf("image dims wrong: %dx%d", img.Width, img.Height)
-	}
-	vid := post.Attachments[1]
-	if vid.Kind != "video" || vid.URL != "https://cdn/vid.mp4" || vid.Thumbnail != "https://cdn/vcover.jpg" {
-		t.Fatalf("video attachment wrong: %+v", vid)
-	}
-	if post.StatsLine != "❤️ 226  \U0001f4ac 5" {
-		t.Fatalf("stats line wrong: %q", post.StatsLine)
-	}
-}
-
 func TestParseGraphQLErrors(t *testing.T) {
 	for _, tc := range []struct {
 		body   string
@@ -59,7 +29,6 @@ func TestParseGraphQLErrors(t *testing.T) {
 			t.Errorf("%s: got %v, hidden %v; want a graphql error, hidden %v", tc.body, err, graphQLHidden(tc.body), tc.hidden)
 		}
 	}
-	// A GraphQL field_exception is not proof of absence: it must not be cached as permanent.
 	if !isTransient(errorCodeGraphQL) {
 		t.Fatal("graphql_error must stay transient")
 	}
@@ -89,7 +58,6 @@ func TestParseProfileShapes(t *testing.T) {
 	if _, err := parseEmbedProfile(wrapEmbed(`{"context":{"user_name":"nasa"}}`)); err == nil || !isTransient(err.Code) {
 		t.Errorf("embed profile without username = %v, want transient", err)
 	}
-	// null: no such account (with 1675030) or a renamed or age-restricted one.
 	for _, body := range []string{`{"data":{"xig_user_by_username":null},"errors":[{"code":1675030}]}`, `{"data":{"xig_user_by_username":null}}`} {
 		if _, err := parseProfileRoot(body); err == nil || err.Code != errorCodeNotFound || !err.Final {
 			t.Errorf("parseProfileRoot(%s) = %v, want a final not_found", body, err)
@@ -136,30 +104,27 @@ func TestParseLoggedOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
-	if post.Username != "instagram" || post.FullName != "Instagram" {
-		t.Errorf("user = %q / %q", post.Username, post.FullName)
+	if post.Username != "instagram" || post.FullName != "Instagram" || post.Shortcode != "DaTSSukB-Lb" ||
+		!strings.Contains(post.Caption, "#InTheMoment") || post.StatsLine != "❤️ 13,215  💬 49" {
+		t.Fatalf("post fields wrong: %+v", post)
 	}
-	if post.Shortcode != "DaTSSukB-Lb" {
-		t.Errorf("shortcode = %q", post.Shortcode)
+	if len(post.Attachments) != 1 || post.Attachments[0].Kind != "video" || post.Attachments[0].URL != "https://cdn/video.mp4" ||
+		post.Attachments[0].Thumbnail != "https://cdn/cover_big.jpg" || post.Attachments[0].Width != 1080 || post.Attachments[0].Height != 1920 {
+		t.Fatalf("video attachment wrong: %+v", post.Attachments)
 	}
-	if !strings.Contains(post.Caption, "#InTheMoment") {
-		t.Errorf("caption = %q", post.Caption)
+
+	carousel, err := parseInstagramPost(sampleCarousel)
+	if err != nil || len(carousel.Attachments) != 2 || carousel.Attachments[0].Kind != "image" ||
+		carousel.Attachments[0].URL != "https://cdn/img1.jpg" || carousel.Attachments[1].Kind != "video" ||
+		carousel.Attachments[1].URL != "https://cdn/vid.mp4" || carousel.StatsLine != "❤️ 226  💬 5" {
+		t.Fatalf("carousel = %+v, %v", carousel, err)
 	}
-	if post.StatsLine != "❤️ 13,215  💬 49" {
-		t.Errorf("stats = %q", post.StatsLine)
-	}
-	if len(post.Attachments) != 1 {
-		t.Fatalf("attachments = %d, want 1", len(post.Attachments))
-	}
-	a := post.Attachments[0]
-	if a.Kind != "video" || a.URL != "https://cdn/video.mp4" {
-		t.Errorf("attachment = %+v", a)
-	}
-	if a.Thumbnail != "https://cdn/cover_big.jpg" {
-		t.Errorf("thumbnail = %q (want largest candidate)", a.Thumbnail)
-	}
-	if a.Width != 1080 || a.Height != 1920 {
-		t.Errorf("dims = %dx%d, want 1080x1920 (from original_width/height)", a.Width, a.Height)
+
+	sizeless, err := parseInstagramPost(`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{` +
+		`"code":"S1","media_type":1,"like_count":3,"like_and_view_counts_disabled":true,"comment_count":2,` +
+		`"user":{"username":"u"},"image_versions2":{"candidates":[{"url":"https://cdn/orig.jpg"},{"url":"https://cdn/thumb.jpg"}]}}}}}`)
+	if err != nil || sizeless.Attachments[0].URL != "https://cdn/orig.jpg" || sizeless.StatsLine != "💬 2" {
+		t.Fatalf("sizeless/hidden-likes post = %+v, %v", sizeless, err)
 	}
 }
 

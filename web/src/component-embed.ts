@@ -1,7 +1,3 @@
-// Parses a Discord component embed (https://docs.discord.com/developers/link-previews/component-embeds)
-// into plain data for the preview. A payload the docs call invalid returns null,
-// so the preview falls back to Open Graph as Discord does.
-
 export type Markdown =
   | string
   | { tag: "b" | "i" | "u" | "s" | "h1" | "h2" | "h3" | "sub"; children: Markdown[] }
@@ -41,7 +37,6 @@ export function httpURL(raw: unknown): string | undefined {
   } catch { return undefined; }
 }
 
-// media maps a validated absolute URL to the one the page loads.
 export function parseComponentEmbed(json: string, media: (url: string) => string | undefined = (url) => url): ComponentEmbed | null {
   if (new TextEncoder().encode(json).length > MAX_BYTES) return null;
   let components = 0, galleryItems = 0;
@@ -118,7 +113,6 @@ const TIMESTAMP = /^<t:(-?\d{1,13})(?::([tTdDfFsSR]))?>/;
 const ANGLE_URL = /^<(https?:\/\/[^\s<>]+)>/;
 const BARE_URL = /^(https?:\/\/[^\s<]+[^<.,:;"')\]\s])/;
 const MASKED_LINK = /^\[([^[\]]+)\]\(<?(https?:\/\/[^\s()<>]+)>?\)/;
-// Discord's simple-markdown inline rules, tried in this order.
 const STYLES: [RegExp, "b" | "u" | "s" | "i"][] = [
   [/^\*\*((?:\\[\s\S]|[^\\])+?)\*\*(?!\*)/, "b"],
   [/^__((?:\\[\s\S]|[^\\])+?)__(?!_)/, "u"],
@@ -133,7 +127,6 @@ function matchAt(rest: string, mode: Mode, lineStart: boolean): [Markdown, numbe
     const tag = m[1] === "-#" ? "sub" : `h${m[1].length}` as "h1" | "h2" | "h3";
     return [{ tag, children: parse(m[2], "inline") }, m[0].length];
   }
-  // Masked-link labels keep backslashes and cannot nest links.
   if (mode !== "label" && (m = ESCAPE.exec(rest))) return [m[1], m[0].length];
   if ((m = EMOJI.exec(rest))) return [{ tag: "emoji", name: m[1] }, m[0].length];
   if ((m = TIMESTAMP.exec(rest)) && Math.abs(Number(m[1])) <= 8.64e12) {
@@ -176,13 +169,10 @@ const TIME_STYLES: Record<string, Intl.DateTimeFormatOptions> = {
   S: { dateStyle: "short", timeStyle: "medium" },
 };
 
-// ponytail: R (relative) renders as f; add Intl.RelativeTimeFormat if a payload ever uses it.
 export function formatTimestamp(unix: number, style: string, lang: string): string {
   return new Intl.DateTimeFormat(lang, TIME_STYLES[style] ?? TIME_STYLES.f).format(unix * 1000);
 }
 
-// Discord's mosaic: rows of 1-3 tiles, the remainder first. Three items use a
-// tall first tile instead, which the renderer lays out itself.
 const GALLERY_ROWS = [[1], [2], [1, 2], [2, 2], [2, 3], [3, 3], [1, 3, 3], [2, 3, 3], [3, 3, 3], [1, 3, 3, 3]];
 
 export function galleryRows<T>(items: T[]): T[][] {
@@ -190,8 +180,6 @@ export function galleryRows<T>(items: T[]): T[][] {
   return (GALLERY_ROWS[items.length - 1] ?? []).map((size) => items.slice(start, start += size));
 }
 
-// Offload URLs redirect to the file itself; the same signed query with a
-// thumbnail=1 prefix gives its still (a photo's is the photo).
 export function offloadPoster(raw: string, origin: string): string | undefined {
   const url = new URL(raw);
   if (url.origin !== origin || !url.pathname.startsWith("/offload/") || url.searchParams.has("thumbnail")) return undefined;

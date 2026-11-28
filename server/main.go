@@ -45,7 +45,6 @@ func main() {
 		}
 		return
 	}
-	// JSON lines on stderr; the Docker log driver stores and rotates them.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
 	if err := cfg.validate(); err != nil {
@@ -65,7 +64,7 @@ func main() {
 		os.Exit(1)
 	}
 	keys := cfg.OffloadSigningKeys
-	if keys == "" { // development only: links die with the process
+	if keys == "" {
 		key := make([]byte, offloadSigningKeySize)
 		rand.Read(key)
 		keys = `{"active":"dev","keys":{"dev":"` + base64.RawURLEncoding.EncodeToString(key) + `"}}`
@@ -93,10 +92,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	// stop restores default handling, so a second signal ends a stuck drain.
 	go func() { <-ctx.Done(); stop() }()
 	if app.helper != nil {
-		// Close Chrome at the signal, not after the drain: the other slot is starting.
 		context.AfterFunc(ctx, app.helper.close)
 		defer app.helper.close()
 	}
@@ -135,7 +132,6 @@ func serveHTTP(ctx context.Context, srv *http.Server) error {
 	return shutdownErr
 }
 
-// The localized home pages are immutable build output, so they are read once.
 func loadHomeTemplates(directory string) (map[string]string, error) {
 	pages := make(map[string]string, len(homeLocales))
 	for locale := range homeLocales {
@@ -157,12 +153,11 @@ type resp struct {
 	headers map[string]string
 	body    []byte
 
-	// Read by the gateway for metrics and preview status; never sent to clients.
 	originStatus int
 	errorType    string
+	category     string
 	cacheHit     bool
-	// The CDN URL whose bytes an offload 200 carries; it bounds the edge TTL.
-	mediaURL string
+	mediaURL     string
 }
 
 func jsonResp(status int, body []byte) resp {
@@ -195,8 +190,6 @@ func logger(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
-// handleWebFinger answers RFC 7033 queries for actors, named by acct: URI or by
-// their actor id (SWICG ActivityPub Discovery, "WebFinger").
 func (a *App) handleWebFinger(req *http.Request) resp {
 	r := a.webFinger(req)
 	r.headers["Access-Control-Allow-Origin"] = "*"
@@ -293,9 +286,6 @@ func (a *App) handlePost(req *http.Request, postType, shortcode string, mediaInd
 	return tagFetch(partialResp(cardResp(a.buildEmbedHTML(baseURL, post, postType, mediaIndex, specified, gallery, discordSupport(req)), id, actor), post), meta)
 }
 
-// A full post replaces a partial one, so like an error fallback its responses
-// carry an originStatus that keeps them out of the edge cache; 203 still
-// counts as resolved.
 func partialResp(r resp, post Post) resp {
 	if post.Partial && r.originStatus == 0 {
 		r.originStatus = http.StatusNonAuthoritativeInfo
@@ -318,21 +308,17 @@ func offloadErrorResp(err *AppError, fallbackURL string) resp {
 	return r
 }
 
-// Offload handlers trust their arguments: offloadRoute or the d. host
-// route has already validated and bounded them.
 func (a *App) handleOffload(req *http.Request, shortcode string, index int, avatar bool) resp {
 	meta := &fetchMeta{}
 	fallback := instagramOrigin + "/p/" + url.PathEscape(shortcode) + "/"
 	var post Post
 	var err *AppError
-	// A partial card's media need not wait out the flight that found it.
 	og, partial := a.ogPosts.localGet(shortcode)
 	if _, cached := a.posts.localGet(shortcode); partial && !cached {
 		post = og.value
 	} else if post, err = a.getPost(req.Context(), shortcode, meta); err != nil {
 		return tagFetch(offloadErrorResp(err, fallback), meta)
 	}
-	// The cover is item 1 only.
 	if post.Partial && !avatar && index > 0 {
 		return tagFetch(partialResp(redirectResp(fallback, http.StatusFound), post), meta)
 	}
@@ -347,7 +333,6 @@ func (a *App) handleOffload(req *http.Request, shortcode string, index int, avat
 	return tagFetch(partialResp(a.offloadResp(req, target, avatar), post), meta)
 }
 
-// n selects the nth recent media item; 0 selects the profile picture.
 func (a *App) handleProfileOffload(req *http.Request, username string, n int) resp {
 	meta := &fetchMeta{}
 	p, err := a.getProfile(req.Context(), username, meta)
@@ -364,7 +349,6 @@ func (a *App) handleProfileOffload(req *http.Request, username string, n int) re
 	return tagFetch(a.offloadResp(req, target, n == 0), meta)
 }
 
-// Gateway.ServeHTTP stores the origin it validated.
 func (a *App) publicBaseURL(req *http.Request) string {
 	origin, _ := req.Context().Value(publicOriginKey{}).(string)
 	return origin
