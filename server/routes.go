@@ -19,17 +19,14 @@ type ShareRoute struct {
 
 var shortcodeRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,24}$`)
 
-// Instagram's top-level PolarisRoutes that share the single-segment username shape.
 var reservedInstagramPaths = map[string]bool{
-	"about": true, "accounts": true, "ads": true, "api": true, "audio": true,
-	"challenge": true, "channels": true, "checkpoint": true, "create": true,
-	"direct": true, "directory": true, "download": true, "emails": true,
-	"explore": true, "graphql": true, "help": true, "legal": true, "login": true,
-	"notifications": true, "p": true, "popular": true, "privacy": true,
-	"profiles": true, "qr": true, "reel": true, "reels": true, "session": true,
-	"settings": true, "share": true, "signup": true, "static": true,
-	"stories": true, "support": true, "terms": true, "threads": true, "tv": true,
-	"users": true, "web": true, "your_activity": true,
+	"about": true, "accounts": true, "api": true, "challenge": true,
+	"channels": true, "direct": true, "download": true, "explore": true,
+	"graphql": true, "help": true, "login": true, "notifications": true,
+	"p": true, "popular": true, "privacy": true, "profiles": true,
+	"qr": true, "reels": true, "session": true, "signup": true,
+	"stories": true, "support": true, "terms": true, "users": true,
+	"web": true, "your_activity": true,
 }
 
 func validShortcode(s string) bool { return shortcodeRE.MatchString(s) }

@@ -215,8 +215,9 @@ func TestGraphQLGatingRulingSkipsOembed(t *testing.T) {
 					}
 					return f.pool().sessions[0].client.Transport.RoundTrip(r)
 				})}
+				addrs := newEgressAddrs(egressPoolSize)
 				v6Pool := func() *SessionPool {
-					return &SessionPool{addrDown: make([]time.Time, egressPoolSize), sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
+					return &SessionPool{addrs: addrs, sessions: []*Session{{name: "v6-1", addr: 0, client: v6}, {name: "v6-2", addr: 1, client: v6}}}
 				}
 				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
 				a.v6, a.v6Pages = v6Pool(), v6Pool()
@@ -700,8 +701,9 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 					}
 					return f.pool().sessions[0].client.Transport.RoundTrip(r)
 				})}
+				addrs := newEgressAddrs(egressPoolSize)
 				v6Pool := func() *SessionPool {
-					return &SessionPool{addrDown: make([]time.Time, egressPoolSize), sessions: []*Session{{name: "v6-1", client: v6}, {name: "v6-2", client: v6}}}
+					return &SessionPool{addrs: addrs, sessions: []*Session{{name: "v6-1", addr: 0, client: v6}, {name: "v6-2", addr: 1, client: v6}}}
 				}
 				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
 				a.v6, a.v6Pages = v6Pool(), v6Pool()
@@ -718,4 +720,21 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 			})
 		})
 	}
+
+	t.Run("skips DC retry when hidden answer already came from DC", func(t *testing.T) {
+		setHelper(t, func(context.Context, string) (Post, *AppError) {
+			return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
+		})
+		synctest.Test(t, func(t *testing.T) {
+			f := &fakeIG{t: t, gql: gqlHidden, oembed: igAnswer{status: 200, body: oembedPublic}}
+			a := newApp(Config{EgressPercent: 0}, f.pool(), offloadSigner{})
+			a.v6 = &SessionPool{addrs: newEgressAddrs(egressPoolSize), sessions: []*Session{{name: "v6-1", addr: 0}}}
+			if _, err := a.getPost(context.Background(), "ABC123", nil); err != nil {
+				t.Fatalf("getPost = %v", err)
+			}
+			if got := f.count("gql"); got != 1 {
+				t.Fatalf("DC GraphQL calls = %d, want 1 (no redundant DC retry)", got)
+			}
+		})
+	})
 }

@@ -48,7 +48,8 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 	}
 	a.helperSlots = make(chan struct{}, helperBackgroundSlots)
 	if cfg.EgressSocket != "" {
-		a.v6, a.v6Pages = newEgressPool(cfg.EgressSocket, "v6-"), newEgressPool(cfg.EgressSocket, "v6p-")
+		addrs := newEgressAddrs(egressPoolSize)
+		a.v6, a.v6Pages = newEgressPool(cfg.EgressSocket, "v6-", addrs), newEgressPool(cfg.EgressSocket, "v6p-", addrs)
 	}
 	if newExternalHelperClient != nil {
 		a.helper = newExternalHelperClient(pool)
@@ -179,6 +180,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	valid := validSourceModel[Post](shortcode)
 	helper := a.newPostHelper(ctx, shortcode)
 	var hidden atomic.Pointer[graphQLGating]
+	var hiddenFromV6 atomic.Bool
 	defer func() {
 		if hidden.Load() != nil && (err != nil || post.Partial) {
 			a.keepAfterFlight(helper, shortcode)
@@ -192,13 +194,14 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 
 	sources := []stagedSource[Post]{
 		{name: "post_graphql", fetch: func(ctx context.Context) (Post, *AppError) {
-			_, body, gqlErr := a.fetchViaProxy(ctx, webLoggedOutSpec(shortcode))
+			_, body, viaV6, gqlErr := a.fetchViaProxySource(ctx, webLoggedOutSpec(shortcode))
 			if gqlErr != nil {
 				return Post{}, gqlErr
 			}
 			post, perr := parseInstagramPost(body)
 			if perr != nil && graphQLHidden(body) {
 				g := parseGraphQLGating(body)
+				hiddenFromV6.Store(viaV6)
 				hidden.Store(&g)
 				perr.Final = true
 			}
@@ -216,7 +219,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 		return post, postCacheTTL(post), true, nil
 	}
 	if g := hidden.Load(); g != nil {
-		return a.hiddenPost(ctx, shortcode, helper, *g)
+		return a.hiddenPost(ctx, shortcode, helper, *g, hiddenFromV6.Load())
 	}
 	outcome := a.fetchOembed(ctx, shortcode)
 	card, cardErr := oembedVerdict(outcome, shortcode, *err)
@@ -226,7 +229,7 @@ func (a *App) fetchPost(ctx context.Context, shortcode string) (post Post, ttl t
 	return Post{}, 0, false, gateOrRetry(cardErr, helper)
 }
 
-func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelper, gating graphQLGating) (Post, time.Duration, bool, *AppError) {
+func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelper, gating graphQLGating, fromV6 bool) (Post, time.Duration, bool, *AppError) {
 	helper.start()
 	oembedC := make(chan oembedOutcome, 1)
 	ogC, dcC, missingC := make(chan Post, 1), make(chan Post, 1), make(chan bool, 1)
@@ -236,7 +239,7 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 		go f()
 	}
 	retryDC := func() {
-		if a.v6 == nil {
+		if !fromV6 {
 			return
 		}
 		follow(func() {

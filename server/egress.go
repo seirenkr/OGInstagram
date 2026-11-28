@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -8,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,7 +30,29 @@ func runEgress(socket, poolFile string) error {
 	}
 	slog.Info("ipv6 egress listening", "socket", socket, "addresses", len(pool))
 	srv := &http.Server{Handler: egressHandler(pool), ReadHeaderTimeout: 5 * time.Second}
-	return srv.Serve(ln)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	errC := make(chan error, 1)
+	go func() { errC <- srv.Serve(ln) }()
+	select {
+	case err := <-errC:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = srv.Close()
+	}
+	serveErr := <-errC
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
+	}
+	return shutdownErr
 }
 
 func readEgressPool(path string) ([]net.IP, error) {
@@ -58,7 +83,7 @@ func egressHandler(pool []net.IP) http.Handler {
 			http.Error(w, "unknown source", http.StatusProxyAuthRequired)
 			return
 		}
-		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: source}, Timeout: 5 * time.Second}
+		d := net.Dialer{LocalAddr: &net.TCPAddr{IP: source}, Timeout: 3 * time.Second}
 		upstream, err := d.DialContext(r.Context(), "tcp6", r.Host)
 		if err != nil {
 			slog.Warn("ipv6 egress dial failed", "source", source.String(), "host", r.Host, "error", err)
@@ -75,7 +100,11 @@ func egressHandler(pool []net.IP) http.Handler {
 			upstream.Close()
 			return
 		}
-		go pipe(upstream, buffered.Reader, client)
+		var clientSrc io.Reader = client
+		if buffered.Reader.Buffered() > 0 {
+			clientSrc = buffered.Reader
+		}
+		go pipe(upstream, clientSrc, client)
 		pipe(client, upstream, upstream)
 	})
 }

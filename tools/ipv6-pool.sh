@@ -23,11 +23,26 @@ if [ "${have:-0}" -lt "$want" ]; then
   fi
   # Existing addresses keep their indexes; new ones are appended.
   { cat "$pool" 2>/dev/null || true
-    python3 -I - "$addr" $((want - ${have:-0})) <<'PY'
-import ipaddress, secrets, sys
-net = ipaddress.IPv6Interface(sys.argv[1].split('/')[0] + '/64').network
-for _ in range(int(sys.argv[2])):
-    print(net[secrets.randbits(64)])
+    python3 -I - "$addr" $((want - ${have:-0})) "$pool" <<'PY'
+import ipaddress, os, secrets, sys
+host = ipaddress.IPv6Address(sys.argv[1].split('/')[0])
+net = ipaddress.IPv6Interface(f"{host}/64").network
+need = int(sys.argv[2])
+seen = {host, net.network_address}
+if os.path.exists(sys.argv[3]):
+    with open(sys.argv[3]) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                seen.add(ipaddress.IPv6Address(line))
+added = 0
+while added < need:
+    cand = net[secrets.randbits(64)]
+    if cand in seen:
+        continue
+    seen.add(cand)
+    print(cand)
+    added += 1
 PY
   } > "$pool.tmp"
   mv "$pool.tmp" "$pool"

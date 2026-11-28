@@ -157,7 +157,7 @@ func fetchRequest(ctx context.Context, client *http.Client, spec fetchSpec) (sta
 	if ctx.Err() != nil {
 		return status, "", contextAppError(ctx)
 	}
-	plainOembedMiss := status == http.StatusNotFound && bytes.Equal(bytes.TrimSpace(raw), []byte("No Media Match"))
+	plainOembedMiss := spec.operation == "oembed" && status == http.StatusNotFound && bytes.Equal(bytes.TrimSpace(raw), []byte("No Media Match"))
 	if isPage && (readErr != nil || len(raw) > pageProbeBytes || (!gjson.ValidBytes(raw) && !plainOembedMiss)) {
 		return pageError()
 	}
@@ -357,70 +357,79 @@ func isInstagramURL(rawURL string) bool {
 }
 
 func (a *App) fetchViaProxy(ctx context.Context, spec fetchSpec) (int, string, *AppError) {
+	status, out, _, err := a.fetchViaProxySource(ctx, spec)
+	return status, out, err
+}
+
+func (a *App) fetchViaProxySource(ctx context.Context, spec fetchSpec) (int, string, bool, *AppError) {
 	v6 := a.v6
 	if spec.page || spec.redirect {
 		v6 = a.v6Pages
 	}
 	if v6 != nil && isInstagramURL(spec.url) && mathrand.IntN(100) < a.cfg.EgressPercent {
+		baseBudget := ipv6AttemptTimeout
+		if spec.page || spec.redirect {
+			baseBudget = ipv6PageAttemptTimeout
+		}
+		budget := baseBudget
+		if deadline, ok := ctx.Deadline(); ok {
+			budget = min(budget, time.Until(deadline)/2)
+		}
 		gate := a.v6Gate(spec.operation)
-		if gate.allow() {
-			budget := ipv6AttemptTimeout
-			if spec.page || spec.redirect {
-				budget = ipv6PageAttemptTimeout
-			}
-			if deadline, ok := ctx.Deadline(); ok {
-				budget = min(budget, time.Until(deadline)/2)
-			}
+		if budget >= ipv6MinBudget && gate.allow() {
 			started := time.Now()
-			v6ctx, cancel := context.WithTimeout(ctx, budget)
+			v6Deadline := started.Add(budget)
 			v6spec := spec
 			v6spec.operation += "_v6"
-			status, out, err := a.fetchOn(v6ctx, v6, v6spec, budget)
-			for retry := 0; retry < ipv6Retries && err != nil && err.Code == errorCodeRateLimited && v6ctx.Err() == nil; retry++ {
-				status, out, err = a.fetchOn(v6ctx, v6, v6spec, budget)
+			hungAfter := min(baseBudget, ipv6PageAttemptTimeout)
+			status, out, err := a.fetchOn(ctx, v6, v6spec, budget, hungAfter)
+			for retry := 0; retry < ipv6Retries && err != nil && err.Code == errorCodeRateLimited && ctx.Err() == nil; retry++ {
+				remaining := time.Until(v6Deadline)
+				if remaining < ipv6MinBudget {
+					break
+				}
+				status, out, err = a.fetchOn(ctx, v6, v6spec, remaining, hungAfter)
 			}
-			cancel()
 			switch {
 			case ctx.Err() != nil:
-				gate.release()
-				return status, out, err
+				gate.release(started)
+				return status, out, true, err
 			case err == nil:
 				gate.ok(spec.operation, started)
 				if spec.dcRecheck == nil || !spec.dcRecheck(out) {
-					return status, out, nil
+					return status, out, true, nil
 				}
-				if dcStatus, dcOut, dcErr := a.fetchDC(ctx, spec, dcRecheckTimeout, proxyHungAfter); dcErr == nil && !spec.dcRecheck(dcOut) {
-					return dcStatus, dcOut, nil
+				if dcStatus, dcOut, dcErr := a.fetchDC(ctx, spec, dcRecheckTimeout, dcRecheckTimeout); dcErr == nil && !spec.dcRecheck(dcOut) {
+					return dcStatus, dcOut, false, nil
 				}
-				return status, out, nil
+				return status, out, true, nil
+			case err.Ephemeral && (err.Status == http.StatusServiceUnavailable || (err.Status == http.StatusGatewayTimeout && budget < baseBudget)):
+				gate.release(started)
 			case !err.Ephemeral && !shouldRotate(err.Code) && status < 500:
 				gate.ok(spec.operation, started)
-				return status, out, err
+				return status, out, true, err
 			default:
 				gate.fail(spec.operation)
 			}
 		}
 	}
-	return a.fetchDC(ctx, spec, dcAttemptTimeout, dcAttemptTimeout)
+	status, out, err := a.fetchDC(ctx, spec, dcAttemptTimeout, dcAttemptTimeout)
+	return status, out, false, err
 }
 
 func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time.Duration) (int, string, *AppError) {
 	if spec.advisory {
-		ctx, cancel := context.WithTimeout(ctx, limit)
-		defer cancel()
-		return a.fetchOn(ctx, a.pool, spec, hungAfter)
+		return a.fetchOn(ctx, a.pool, spec, limit, hungAfter)
 	}
 	gate := a.dcGate(spec.operation)
 	if !gate.allow() {
 		return 0, "", ephemeralErr(http.StatusServiceUnavailable, errorCodeConnection, "Instagram keeps refusing "+spec.operation+"; paused")
 	}
 	started := time.Now()
-	dcCtx, cancel := context.WithTimeout(ctx, limit)
-	defer cancel()
-	status, out, err := a.fetchOn(dcCtx, a.pool, spec, hungAfter)
+	status, out, err := a.fetchOn(ctx, a.pool, spec, limit, hungAfter)
 	switch {
 	case err != nil && err.Ephemeral:
-		gate.release()
+		gate.release(started)
 	case err != nil && shouldRotate(err.Code):
 		gate.fail(spec.operation)
 	default:
@@ -429,7 +438,7 @@ func (a *App) fetchDC(ctx context.Context, spec fetchSpec, limit, hungAfter time
 	return status, out, err
 }
 
-func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hungAfter time.Duration) (status int, out string, ferr *AppError) {
+func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, attemptTimeout, hungAfter time.Duration) (status int, out string, ferr *AppError) {
 	if ctx.Err() != nil {
 		return 0, "", contextAppError(ctx)
 	}
@@ -442,10 +451,18 @@ func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hu
 	}
 
 	started := time.Now()
+	reqCtx := ctx
+	if attemptTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, attemptTimeout)
+		defer cancel()
+	}
 	client := s.getClient()
 	defer func() {
 		elapsed := time.Since(started)
-		hung := !spec.advisory && ferr != nil && ferr.Status == http.StatusGatewayTimeout && elapsed >= hungAfter
+		attemptTimedOut := ctx.Err() == nil && reqCtx.Err() == context.DeadlineExceeded
+		hung := !spec.advisory && ferr != nil && ferr.Status == http.StatusGatewayTimeout &&
+			(elapsed >= hungAfter || (attemptTimedOut && attemptTimeout >= hungAfter))
 		rotated := hung || (!spec.advisory && ferr != nil && !ferr.Ephemeral && shouldRotate(ferr.Code))
 		pool.done(s, client, elapsed, ferr == nil || hung)
 		if rotated {
@@ -454,7 +471,7 @@ func (a *App) fetchOn(ctx context.Context, pool *SessionPool, spec fetchSpec, hu
 		logOutbound(ctx, spec.operation, s.name, spec.method, spec.url, started, status, len(out), ferr, rotated)
 	}()
 
-	return fetchRequest(ctx, client, spec)
+	return fetchRequest(reqCtx, client, spec)
 }
 
 func instagramJSON(status int, raw []byte) *AppError {
@@ -562,15 +579,17 @@ func loggedOutQuerySpec(operation, friendlyName, docID string, variables any) fe
 }
 
 type v6Gate struct {
-	strikes  int
-	source   string
-	mu       sync.Mutex
-	recent   [ipv6Window]bool
-	next     int
-	failures int
-	until    time.Time
-	pause    time.Duration
-	probeAt  time.Time
+	strikes      int
+	probeTimeout time.Duration
+	source       string
+	mu           sync.Mutex
+	recent       [ipv6Window]bool
+	next         int
+	failures     int
+	streak       int
+	until        time.Time
+	pause        time.Duration
+	probeAt      time.Time
 }
 
 func (a *App) v6Gate(operation string) *v6Gate {
@@ -579,7 +598,7 @@ func (a *App) v6Gate(operation string) *v6Gate {
 }
 
 func (a *App) dcGate(operation string) *v6Gate {
-	g, _ := a.v6Gates.LoadOrStore("dc "+operation, &v6Gate{strikes: ipv6Window, source: "dc proxy"})
+	g, _ := a.v6Gates.LoadOrStore("dc "+operation, &v6Gate{strikes: ipv6Window, probeTimeout: dcAttemptTimeout * 2, source: "dc proxy"})
 	return g.(*v6Gate)
 }
 
@@ -590,16 +609,18 @@ func (g *v6Gate) allow() bool {
 	if g.until.IsZero() {
 		return true
 	}
-	if now.Before(g.until) || now.Sub(g.probeAt) < ipv6PageAttemptTimeout*2 {
+	if now.Before(g.until) || now.Sub(g.probeAt) < cmp.Or(g.probeTimeout, ipv6AttemptTimeout*2) {
 		return false
 	}
 	g.probeAt = now
 	return true
 }
 
-func (g *v6Gate) release() {
+func (g *v6Gate) release(started time.Time) {
 	g.mu.Lock()
-	g.probeAt = time.Time{}
+	if !g.until.IsZero() && !started.Before(g.until) {
+		g.probeAt = time.Time{}
+	}
 	g.mu.Unlock()
 }
 
@@ -621,8 +642,13 @@ func (g *v6Gate) ok(operation string, started time.Time) {
 	case resumed:
 		g.recent, g.next, g.failures, g.until, g.probeAt = [ipv6Window]bool{}, 0, 0, time.Time{}, time.Time{}
 		g.pause /= 2
+		g.streak = 1
 	case g.until.IsZero():
 		g.record(false)
+		g.streak++
+		if g.pause > 0 && g.streak >= ipv6Window {
+			g.pause = 0
+		}
 	}
 	g.mu.Unlock()
 	if resumed {
@@ -636,6 +662,7 @@ func (g *v6Gate) fail(operation string) {
 	if time.Now().Before(g.until) {
 		return
 	}
+	g.streak = 0
 	g.record(true)
 	if g.until.IsZero() && g.failures < cmp.Or(g.strikes, ipv6Strikes) {
 		return
@@ -672,16 +699,14 @@ func oembedSpec(shortcode string) fetchSpec {
 
 // oEmbed's gate verdicts depend on location, so it stays on DC's US exits.
 func (a *App) fetchOembed(ctx context.Context, shortcode string) oembedOutcome {
-	status, body, err := a.fetchOn(ctx, a.pool, oembedSpec(shortcode), proxyHungAfter)
+	status, body, err := a.fetchOn(ctx, a.pool, oembedSpec(shortcode), 0, proxyHungAfter)
 	return oembedOutcome{status: status, body: body, ok: err == nil}
 }
 
 func oembedNotFound(o oembedOutcome) bool {
-	return o.ok && o.status == http.StatusNotFound &&
-		(strings.TrimSpace(o.body) == "No Media Match" || gjson.Get(o.body, "status").String() == "fail")
+	return o.ok && o.status == http.StatusNotFound
 }
 
-// Only gating type 2 is regional; 3/10/11/12 are age/audience restrictions.
 func gatingError(gatingType int, title, desc string, base AppError) *AppError {
 	base.Code, base.Status = errorCodeRestricted, http.StatusForbidden
 	if gatingType == 2 {

@@ -163,7 +163,9 @@ func (c *cache[V]) runFlight(
 		cloned := *err
 		cloned.Cause = nil
 		err = &cloned
-		ttl = time.Duration(errorCacheSeconds(err.Code)) * time.Second
+		if ttl <= 0 {
+			ttl = time.Duration(errorCacheSeconds(err.Code)) * time.Second
+		}
 	}
 	call.value, call.err = value, err
 	if ttl <= 0 {

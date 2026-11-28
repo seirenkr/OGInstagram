@@ -9,15 +9,13 @@ const storyIdPattern = /^[0-9]{1,32}$/;
 const maxPostMediaItems = 50;
 
 const reservedInstagramPaths = new Set([
-  "about", "accounts", "ads", "api", "audio",
-  "challenge", "channels", "checkpoint", "create",
-  "direct", "directory", "download", "emails",
-  "explore", "graphql", "help", "legal", "login",
-  "notifications", "p", "popular", "privacy",
-  "profiles", "qr", "reel", "reels", "session",
-  "settings", "share", "signup", "static",
-  "stories", "support", "terms", "threads", "tv",
-  "users", "web", "your_activity",
+  "about", "accounts", "api", "challenge",
+  "channels", "direct", "download", "explore",
+  "graphql", "help", "login", "notifications",
+  "p", "popular", "privacy", "profiles",
+  "qr", "reels", "session", "signup",
+  "stories", "support", "terms", "users",
+  "web", "your_activity",
 ]);
 
 function isStoriesPath(segments: string[]): boolean {

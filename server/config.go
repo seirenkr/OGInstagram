@@ -34,6 +34,7 @@ const (
 
 	ipv6AttemptTimeout     = 2 * time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
+	ipv6MinBudget          = 150 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond
 	dcRecheckTimeout       = 2 * time.Second
 	ipv6Strikes            = 3

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -96,10 +97,15 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 		client := &http.Client{Transport: roundTripFunc(fn)}
 		p := &SessionPool{}
 		if prefix == "v6p-" {
-			p.addrDown = make([]time.Time, egressPoolSize)
+			p.addrs = newEgressAddrs(egressPoolSize)
+			p.newClient = func(*url.URL) *http.Client { return client }
 		}
 		for i := range 2 {
-			p.sessions = append(p.sessions, &Session{name: prefix + strconv.Itoa(i+1), client: client})
+			addr := -1
+			if p.addrs != nil {
+				_, addr, _ = p.nextProxy(-1)
+			}
+			p.sessions = append(p.sessions, &Session{name: prefix + strconv.Itoa(i+1), addr: addr, client: client})
 		}
 		return p
 	}
@@ -107,20 +113,27 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 		name     string
 		v6Status int
 		v6Loc    string
+		dcStatus int
 		want     shareTarget
 		wantCode string
 		wantDC   int32
 	}{
-		{"invalid token 200", http.StatusOK, "", "", errorCodeNotFound, 0},
-		{"unsupported target", http.StatusFound, "https://www.instagram.com/stories/highlights/123/", "", errorCodeNotFound, 0},
-		{"login wall", http.StatusFound, "https://www.instagram.com/accounts/login/?next=%2Fshare%2Fx%2F", "/reel/DgNN8_uKwFg", "", 1},
-		{"off-site redirect", http.StatusFound, "https://evil.example/reel/DgNN8_uKwFg/", "/reel/DgNN8_uKwFg", "", 1},
+		{"v6 200 soft block recovers on DC", http.StatusOK, "", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
+		{"missing token 200 on both", http.StatusOK, "", http.StatusOK, "", errorCodeNotFound, 1},
+		{"explicit 404 skips DC", http.StatusNotFound, "", http.StatusFound, "", errorCodeNotFound, 0},
+		{"unsupported target", http.StatusFound, "https://www.instagram.com/stories/highlights/123/", http.StatusFound, "", errorCodeNotFound, 0},
+		{"login wall", http.StatusFound, "https://www.instagram.com/accounts/login/?next=%2Fshare%2Fx%2F", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
+		{"off-site redirect", http.StatusFound, "https://evil.example/reel/DgNN8_uKwFg/", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var v6Calls, dcCalls atomic.Int32
 			a := newApp(Config{EgressPercent: 100}, makePool(func(r *http.Request) (*http.Response, error) {
 				dcCalls.Add(1)
-				return mediaTestResponse(r, http.StatusFound, http.Header{"Location": {"https://www.instagram.com/reel/DgNN8_uKwFg/"}}, nil), nil
+				h := http.Header{}
+				if tc.dcStatus == http.StatusFound {
+					h.Set("Location", "https://www.instagram.com/reel/DgNN8_uKwFg/")
+				}
+				return mediaTestResponse(r, tc.dcStatus, h, nil), nil
 			}, "us-"), offloadSigner{})
 			a.v6Pages = makePool(func(r *http.Request) (*http.Response, error) {
 				v6Calls.Add(1)
@@ -134,6 +147,11 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 			if tc.wantCode != "" {
 				if err == nil || err.Code != tc.wantCode || v6Calls.Load() != 1 || dcCalls.Load() != tc.wantDC {
 					t.Fatalf("err=%v v6=%d dc=%d; want %s dc=%d", err, v6Calls.Load(), dcCalls.Load(), tc.wantCode, tc.wantDC)
+				}
+				if tc.v6Status == http.StatusOK {
+					if e, ok := a.shares.localGet("BAblI6LDIl"); !ok || time.Until(e.expiresAt) > time.Duration(transientErrorCacheSeconds+1)*time.Second {
+						t.Fatalf("ambiguous 200 share miss cached too long: ok=%v ttl=%v", ok, time.Until(e.expiresAt))
+					}
 				}
 				return
 			}

@@ -42,7 +42,6 @@ func isShareRedirectHop(prev, next *url.URL) bool {
 		next.Port() == "" && next.User == nil && strings.HasPrefix(next.Path, "/share/") && next.String() != prev.String()
 }
 
-// Non-browser UAs get a 302 Location (and 200 HTML for missing tokens), so HEAD resolves with zero body.
 func shareSpec(token string) fetchSpec {
 	return fetchSpec{
 		operation: "share",
@@ -51,12 +50,15 @@ func shareSpec(token string) fetchSpec {
 		subject:   "Instagram",
 		redirect:  true,
 		headers:   map[string]string{"User-Agent": embedUA},
+		dcRecheck: func(location string) bool { return location == "" },
 		interpret: func(status int, raw []byte) *AppError {
 			switch {
 			case status >= 300 && status < 400:
 				_, err := parseShareTarget(string(raw))
 				return err
-			case status == http.StatusOK || status == http.StatusNotFound:
+			case status == http.StatusOK:
+				return nil
+			case status == http.StatusNotFound:
 				return igErr(http.StatusNotFound, errorCodeNotFound, "share link not found")
 			case status == http.StatusTooManyRequests:
 				return igErr(status, errorCodeRateLimited, http.StatusText(status))
@@ -103,6 +105,9 @@ func (a *App) getShareTarget(ctx context.Context, token string, meta *fetchMeta)
 		_, location, err := a.fetchViaProxy(fetchCtx, shareSpec(token))
 		if err != nil {
 			return "", 0, false, err
+		}
+		if location == "" {
+			return "", transientErrorCacheSeconds * time.Second, false, igErr(http.StatusNotFound, errorCodeNotFound, "share link not found")
 		}
 		target, err := parseShareTarget(location)
 		return target, shareCacheTTL, true, err

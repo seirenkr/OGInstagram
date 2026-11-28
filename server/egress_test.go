@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -68,10 +70,13 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 		dcCalls.Add(1)
 		return reply(200, `{"data":{"ok":true}}`), nil
 	})}
-	v6Pool := &SessionPool{addrDown: make([]time.Time, egressPoolSize)}
-	// Rotation swaps in a real client, so every throttled attempt needs its own session.
+	v6Pool := &SessionPool{
+		addrs:     newEgressAddrs(egressPoolSize),
+		newClient: func(*url.URL) *http.Client { return v6 },
+	}
 	for i := range ipv6Strikes*(ipv6Retries+1) + 1 {
-		v6Pool.sessions = append(v6Pool.sessions, &Session{name: "v6-" + string(rune('a'+i)), client: v6})
+		_, addr, _ := v6Pool.nextProxy(-1)
+		v6Pool.sessions = append(v6Pool.sessions, &Session{name: "v6-" + string(rune('a'+i)), addr: addr, client: v6})
 	}
 	return &App{cfg: Config{EgressPercent: 100}, pool: &SessionPool{sessions: []*Session{{name: "us-1", client: dc}}}, v6: v6Pool}, v6Calls, dcCalls
 }
@@ -138,6 +143,12 @@ func TestV6GateResumesAfterPause(t *testing.T) {
 	if !g.allow() || !g.until.IsZero() || g.failures != 0 || g.pause != ipv6PauseMin/2 {
 		t.Fatalf("gate not reset after a successful probe, or the pause not halved: %+v", g)
 	}
+	for range ipv6Window {
+		g.ok("post", time.Now())
+	}
+	if g.pause != 0 {
+		t.Fatalf("pause = %v after sustained healthy streak, want 0", g.pause)
+	}
 }
 
 func TestThrottledIPv6TriesAnotherAddress(t *testing.T) {
@@ -154,16 +165,76 @@ func TestThrottledIPv6TriesAnotherAddress(t *testing.T) {
 }
 
 func TestFailedEgressAddressSitsOut(t *testing.T) {
-	p := &SessionPool{addrDown: make([]time.Time, 3)}
-	p.nextProxy(0)
-	for range 20 {
-		if u, addr := p.nextProxy(1); addr != 2 || u.User.Username() != "a2" {
-			t.Fatalf("picked %d (%s) with 0 and 1 sitting out", addr, u.User.Username())
+	addrs := newEgressAddrs(3)
+	p1 := &SessionPool{addrs: addrs}
+	p2 := &SessionPool{addrs: addrs}
+
+	_, a1, rested1 := p1.nextProxy(-1)
+	_, a2, rested2 := p2.nextProxy(-1)
+	if !rested1 || !rested2 || a1 == a2 {
+		t.Fatalf("initial picks = (%d,%v) and (%d,%v); want two distinct rested addresses", a1, rested1, a2, rested2)
+	}
+	addrs.release(a1)
+	addrs.release(a2)
+
+	base := time.Now()
+	addrs.down[0] = base.Add(20 * time.Minute)
+	addrs.down[1] = base.Add(10 * time.Minute)
+	for range 10 {
+		u, addr, rested := p1.nextProxy(-1)
+		addrs.release(addr)
+		if !rested || addr != 2 || u.User.Username() != "a2" {
+			t.Fatalf("picked %d (%s, rested=%v) with 0 and 1 sitting out", addr, u.User.Username(), rested)
 		}
 	}
-	if _, addr := p.nextProxy(2); addr < 0 || addr > 2 {
-		t.Fatalf("all addresses sitting out picked %d", addr)
+	addrs.down[2] = base.Add(30 * time.Minute)
+	if _, addr, rested := p2.nextProxy(-1); rested || addr != 1 {
+		t.Fatalf("all down picked (%d, rested=%v), want (1, false)", addr, rested)
+	} else {
+		addrs.release(addr)
 	}
+}
+
+func TestShortBudgetAndRetryHangHandling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, _, dcCalls := fallbackApp(func(*http.Request) (int, string) { return 0, "" })
+		initial := a.v6.sessions[0].getClient()
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		defer cancel()
+		if _, body, err := a.fetchViaProxy(ctx, webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(body, `"ok"`) || dcCalls.Load() != 1 {
+			t.Fatalf("short budget: body=%q err=%v dc=%d", body, err, dcCalls.Load())
+		}
+		if g := a.v6Gate("post"); g.failures != 0 || !g.until.IsZero() {
+			t.Fatalf("short budget timeout tripped v6Gate: %+v", g)
+		}
+		for _, s := range a.v6.sessions {
+			if s.getClient() != initial {
+				t.Fatal("short budget timeout rotated a healthy IPv6 session")
+			}
+		}
+
+		var attempt atomic.Int32
+		var rotated atomic.Int32
+		a2, _, dcCalls2 := fallbackApp(func(r *http.Request) (int, string) {
+			if attempt.Add(1) == 1 {
+				time.Sleep(200 * time.Millisecond)
+				return 200, `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`
+			}
+			<-r.Context().Done()
+			return 0, ""
+		})
+		origNew := a2.v6.newClient
+		a2.v6.newClient = func(u *url.URL) *http.Client {
+			rotated.Add(1)
+			return origNew(u)
+		}
+		if _, body, err := a2.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(body, `"ok"`) || dcCalls2.Load() != 1 {
+			t.Fatalf("retry hang: body=%q err=%v dc=%d", body, err, dcCalls2.Load())
+		}
+		if rotated.Load() != 2 {
+			t.Fatalf("rotations = %d, want 2 (429 attempt + hung retry)", rotated.Load())
+		}
+	})
 }
 
 func TestEgressSourceReadsTheIndex(t *testing.T) {

@@ -225,6 +225,18 @@ func TestOembedHTMLErrorPageClassification(t *testing.T) {
 			t.Errorf("%s: code=%q rotated=%v body=%q, want %q rotated=%v", tt.name, code, rotated, out, tt.code, tt.rotated)
 		}
 	}
+	plainMiss := &http.Client{Transport: page(404, "text/html; charset=utf-8", "No Media Match")}
+	var gotRaw []byte
+	_, _, err := fetchRequest(context.Background(), plainMiss, fetchSpec{operation: "post", method: http.MethodPost, url: "https://www.instagram.com/api/graphql/", expectJSON: true, interpret: func(status int, raw []byte) *AppError {
+		gotRaw = raw
+		return graphQLJSON(status, raw)
+	}})
+	if err == nil || gotRaw != nil {
+		t.Fatalf("non-oembed 404 No Media Match: err=%v raw=%q, want pageError with nil raw", err, gotRaw)
+	}
+	if !oembedNotFound(oembedOutcome{status: http.StatusNotFound, body: `{"message":"missing"}`, ok: true}) {
+		t.Fatal("oembedNotFound should accept any valid JSON 404")
+	}
 }
 
 func TestOembedVerdictGating(t *testing.T) {
@@ -400,6 +412,17 @@ func TestPeakRTTAvoidsThenRetriesSlowSession(t *testing.T) {
 		p.done(fast, nil, 300*time.Millisecond, true)
 		if n := picks(); n == 0 {
 			t.Fatal("a decayed peak should let the slow session be retried")
+		}
+		slow.pending = 1
+		if slow.costLocked(time.Now()) <= fast.costLocked(time.Now()) {
+			t.Fatalf("stale in-flight slow session (%v) beat healthy idle session (%v)", slow.costLocked(time.Now()), fast.costLocked(time.Now()))
+		}
+		slow.pending = 0
+		time.Sleep(5 * time.Second)
+		fast.pending++
+		p.done(fast, nil, 300*time.Millisecond, true)
+		if fast.rttNs < float64(299*time.Millisecond) || fast.rttNs > float64(301*time.Millisecond) {
+			t.Fatalf("steady 300ms sample drifted to %v", time.Duration(fast.rttNs))
 		}
 	})
 }
