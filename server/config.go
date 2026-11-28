@@ -34,7 +34,12 @@ const (
 
 	ipv6AttemptTimeout     = 2 * time.Second
 	ipv6PageAttemptTimeout = 1500 * time.Millisecond
+	ipv6HungAfter          = time.Second
 	ipv6MinBudget          = 150 * time.Millisecond
+	ogPageIPv6Budget       = 1200 * time.Millisecond
+	rulingIPv6Budget       = 950 * time.Millisecond
+	shareIPv6Timeout       = 750 * time.Millisecond
+	shareDCTimeout         = 1250 * time.Millisecond
 	dcAttemptTimeout       = 2500 * time.Millisecond
 	dcRecheckTimeout       = 2 * time.Second
 	ipv6Strikes            = 3

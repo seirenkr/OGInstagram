@@ -325,7 +325,7 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		return route, true
 	}
 	if share := parseShareSegments(segments); share != nil {
-		route.category, route.direct, route.card = "posts", direct, !direct
+		route.category, route.direct, route.card = "share", direct, !direct
 		index, specified := mediaSelection(r.URL.Query(), share.PathIndex)
 		if !direct {
 			route.humanRedirect = instagramShareURL(share.Kind, share.Token, index, specified)
@@ -335,7 +335,7 @@ func resolveGatewayRoute(r *http.Request) (gatewayRoute, bool) {
 		}
 		return route, true
 	}
-	if len(segments) == 2 && validUsername(segments[0]) && slices.Contains([]string{"inbox", "outbox", "followers", "following"}, segments[1]) {
+	if len(segments) == 2 && isProfileUsername(segments[0]) && slices.Contains([]string{"inbox", "outbox", "followers", "following"}, segments[1]) {
 		username, name := segments[0], segments[1]
 		route.handle = func(a *App, r *http.Request) resp { return a.handleActivityCollection(r, username, name) }
 		return route, true
@@ -412,7 +412,7 @@ func previewTarget(r *http.Request, path string) (*http.Request, gatewayRoute, b
 	internal.URL = u
 	internal.Header.Del("Accept")
 	route, ok := resolveGatewayRoute(internal)
-	if !ok || route.category == "" || reservedAssetPath(u.Path) || !previewQuery(u.RawQuery, route.category == "posts") {
+	if !ok || route.category == "" || reservedAssetPath(u.Path) || !previewQuery(u.RawQuery, route.category == "posts" || route.category == "share") {
 		return nil, gatewayRoute{}, false
 	}
 	return internal, route, true

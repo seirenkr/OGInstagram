@@ -38,19 +38,21 @@ func isInstagramShareHost(u *url.URL) bool {
 }
 
 func isShareRedirectHop(prev, next *url.URL) bool {
-	return next != nil && next.Scheme == "https" && strings.EqualFold(next.Hostname(), "www.instagram.com") &&
-		next.Port() == "" && next.User == nil && strings.HasPrefix(next.Path, "/share/") && next.String() != prev.String()
+	return isInstagramShareHost(next) && strings.HasPrefix(next.Path, "/share/") && next.String() != prev.String()
 }
 
 func shareSpec(token string) fetchSpec {
 	return fetchSpec{
-		operation: "share",
-		method:    http.MethodHead,
-		url:       instagramOrigin + "/share/" + url.PathEscape(token) + "/",
-		subject:   "Instagram",
-		redirect:  true,
-		headers:   map[string]string{"User-Agent": embedUA},
-		dcRecheck: func(location string) bool { return location == "" },
+		operation:       "share",
+		method:          http.MethodHead,
+		url:             instagramOrigin + "/share/" + url.PathEscape(token) + "/",
+		subject:         "Instagram",
+		redirect:        true,
+		headers:         map[string]string{"User-Agent": embedUA},
+		dcRecheck:       func(location string) bool { return location == "" },
+		recheckSoftFail: true,
+		ipv6Budget:      shareIPv6Timeout,
+		dcTimeout:       shareDCTimeout,
 		interpret: func(status int, raw []byte) *AppError {
 			switch {
 			case status >= 300 && status < 400:
@@ -72,7 +74,7 @@ func shareSpec(token string) fetchSpec {
 func parseShareTarget(rawURL string) (shareTarget, *AppError) {
 	u, err := url.Parse(rawURL)
 	if err != nil || !isInstagramShareHost(u) {
-		return "", igErr(http.StatusBadGateway, errorCodeUpstream, "Instagram returned an unexpected share redirect")
+		return "", igErr(http.StatusNotFound, errorCodeNotFound, "share link target is not supported")
 	}
 	if isLoginWallPath(u.Path) {
 		return "", igErr(http.StatusBadGateway, errorCodeLoginRequired, "Instagram redirected to login or verification")

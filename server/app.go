@@ -48,8 +48,8 @@ func newApp(cfg Config, pool *SessionPool, signer offloadSigner) *App {
 	}
 	a.helperSlots = make(chan struct{}, helperBackgroundSlots)
 	if cfg.EgressSocket != "" {
-		addrs := newEgressAddrs(egressPoolSize)
-		a.v6, a.v6Pages = newEgressPool(cfg.EgressSocket, "v6-", addrs), newEgressPool(cfg.EgressSocket, "v6p-", addrs)
+		usage := newEgressUsage(egressPoolSize)
+		a.v6, a.v6Pages = newEgressPool(cfg.EgressSocket, "v6-", usage), newEgressPool(cfg.EgressSocket, "v6p-", usage)
 	}
 	if newExternalHelperClient != nil {
 		a.helper = newExternalHelperClient(pool)
@@ -238,10 +238,12 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 		pending++
 		go f()
 	}
+	dcRetried := false
 	retryDC := func() {
-		if !fromV6 {
+		if !fromV6 || dcRetried {
 			return
 		}
+		dcRetried = true
 		follow(func() {
 			var post Post
 			if _, body, err := a.fetchDC(ctx, webLoggedOutSpec(shortcode), dcAttemptTimeout, dcAttemptTimeout); err == nil {
@@ -276,12 +278,15 @@ func (a *App) hiddenPost(ctx context.Context, shortcode string, helper *postHelp
 	var gate *AppError
 	oembedStatus := 0
 	oembedGone := false
-	if gating.gatingType != 0 && gating.title != "" {
+	if !fromV6 && gating.gatingType != 0 && gating.title != "" {
 		gate = gatingError(gating.gatingType, gating.title, gating.desc, base)
 		a.publishGate(shortcode, gate)
 		followGate(gating.gatingType)
 	} else {
 		follow(func() { oembedC <- a.fetchOembed(ctx, shortcode) })
+		if fromV6 && gating.gatingType == 2 {
+			retryDC()
+		}
 	}
 
 	answer := func(helperErr *AppError) (Post, time.Duration, bool, *AppError) {

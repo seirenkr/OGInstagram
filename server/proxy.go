@@ -38,19 +38,30 @@ func (s *Session) costLocked(now time.Time) float64 {
 	return s.rttNs * math.Exp(-float64(now.Sub(s.rttAt))/float64(sessionRTTDecay))
 }
 
-type egressAddrs struct {
+type egressUsage struct {
 	mu    sync.Mutex
-	down  []time.Time
 	inUse []int
 }
 
-func newEgressAddrs(size int) *egressAddrs {
-	return &egressAddrs{down: make([]time.Time, size), inUse: make([]int, size)}
+func newEgressUsage(size int) *egressUsage {
+	return &egressUsage{inUse: make([]int, size)}
+}
+
+type egressAddrs struct {
+	usage *egressUsage
+	down  []time.Time
+}
+
+func newEgressAddrs(size int, usage *egressUsage) *egressAddrs {
+	if usage == nil {
+		usage = newEgressUsage(size)
+	}
+	return &egressAddrs{usage: usage, down: make([]time.Time, size)}
 }
 
 func (e *egressAddrs) acquire(failed int, now time.Time) (addr int, rested bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.usage.mu.Lock()
+	defer e.usage.mu.Unlock()
 	if failed >= 0 && failed < len(e.down) {
 		e.down[failed] = now.Add(egressAddrCooldown)
 	}
@@ -60,12 +71,12 @@ func (e *egressAddrs) acquire(failed int, now time.Time) (addr int, rested bool)
 		if until.After(now) {
 			continue
 		}
-		if e.inUse[i] == 0 {
+		if e.usage.inUse[i] == 0 {
 			free = append(free, i)
-		} else if e.inUse[i] < minUse {
-			minUse = e.inUse[i]
+		} else if e.usage.inUse[i] < minUse {
+			minUse = e.usage.inUse[i]
 			shared = append(shared[:0], i)
-		} else if e.inUse[i] == minUse {
+		} else if e.usage.inUse[i] == minUse {
 			shared = append(shared, i)
 		}
 	}
@@ -87,7 +98,7 @@ func (e *egressAddrs) acquire(failed int, now time.Time) (addr int, rested bool)
 		}
 		addr = earliest[rand.IntN(len(earliest))]
 	}
-	e.inUse[addr]++
+	e.usage.inUse[addr]++
 	return addr, rested
 }
 
@@ -95,11 +106,11 @@ func (e *egressAddrs) release(addr int) {
 	if e == nil || addr < 0 {
 		return
 	}
-	e.mu.Lock()
-	if addr < len(e.inUse) && e.inUse[addr] > 0 {
-		e.inUse[addr]--
+	e.usage.mu.Lock()
+	if addr < len(e.usage.inUse) && e.usage.inUse[addr] > 0 {
+		e.usage.inUse[addr]--
 	}
-	e.mu.Unlock()
+	e.usage.mu.Unlock()
 }
 
 type SessionPool struct {
@@ -120,13 +131,10 @@ func (p *SessionPool) nextProxy(failed int) (*url.URL, int, bool) {
 	return &url.URL{Scheme: "http", User: url.User("a" + strconv.Itoa(addr)), Host: "egress"}, addr, rested
 }
 
-func newEgressPool(socket, prefix string, addrs *egressAddrs) *SessionPool {
-	if addrs == nil {
-		addrs = newEgressAddrs(egressPoolSize)
-	}
+func newEgressPool(socket, prefix string, usage *egressUsage) *SessionPool {
 	pool := &SessionPool{
 		tlsCache: tls.NewLRUClientSessionCache(proxySessionCount * 2),
-		addrs:    addrs,
+		addrs:    newEgressAddrs(egressPoolSize, usage),
 		dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)

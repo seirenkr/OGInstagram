@@ -412,3 +412,25 @@ func TestCacheFetchPanicBecomesUncachedError(t *testing.T) {
 		t.Fatalf("fetches = %d, want 2 because a panic is not cached", got)
 	}
 }
+
+func TestCacheErrorTTLIsCappedByErrorPolicy(t *testing.T) {
+	c := newPersistentCache[Profile](nil, "profile", make(chan struct{}, 1), 1<<20)
+	_, err := c.get(context.Background(), "alice", nil, func(context.Context) (Profile, time.Duration, bool, *AppError) {
+		return Profile{}, 24 * time.Hour, true, igErr(http.StatusTooManyRequests, errorCodeRateLimited, "rate limited")
+	})
+	if err == nil || err.Code != errorCodeRateLimited {
+		t.Fatalf("err = %#v, want rate_limited", err)
+	}
+	if e, ok := c.localGet("alice"); !ok || time.Until(e.expiresAt) > time.Duration(transientErrorCacheSeconds+1)*time.Second {
+		t.Fatalf("rate_limited TTL = %v, want <= %ds", time.Until(e.expiresAt), transientErrorCacheSeconds)
+	}
+	_, err = c.get(context.Background(), "bob", nil, func(context.Context) (Profile, time.Duration, bool, *AppError) {
+		return Profile{}, time.Duration(transientErrorCacheSeconds) * time.Second, false, igErr(http.StatusNotFound, errorCodeNotFound, "missing")
+	})
+	if err == nil || err.Code != errorCodeNotFound {
+		t.Fatalf("err = %#v, want not_found", err)
+	}
+	if e, ok := c.localGet("bob"); !ok || time.Until(e.expiresAt) > time.Duration(transientErrorCacheSeconds+1)*time.Second {
+		t.Fatalf("shortened not_found TTL = %v, want <= %ds", time.Until(e.expiresAt), transientErrorCacheSeconds)
+	}
+}

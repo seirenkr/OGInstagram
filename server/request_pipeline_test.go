@@ -192,49 +192,71 @@ func TestGoneNeedsRulingAndOembedToAgree(t *testing.T) {
 }
 
 func TestGraphQLGatingRulingSkipsOembed(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		gatingType int
-		dcRetry    bool
-		wantCode   string
-	}{
-		{"age gate 3", 3, false, errorCodeRestricted},
-		{"geo gate 2", 2, true, errorCodeGeoBlocked},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setHelper(t, func(context.Context, string) (Post, *AppError) {
-				return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
-			})
-			synctest.Test(t, func(t *testing.T) {
-				gqlGated := `{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":` +
-					string(rune('0'+tc.gatingType)) + `,"title":"Gate Title","description":"Gate Desc"}}}}`
-				f := &fakeIG{t: t, gql: gqlFull, og: igAnswer{status: 200, body: ogTestPage("ABC123")}}
-				v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-					if strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent") {
-						return mediaTestResponse(r, 200, nil, []byte(gqlGated)), nil
-					}
-					return f.pool().sessions[0].client.Transport.RoundTrip(r)
-				})}
-				addrs := newEgressAddrs(egressPoolSize)
-				v6Pool := func() *SessionPool {
-					return &SessionPool{addrs: addrs, sessions: []*Session{{name: "v6-1", addr: 0, client: v6}, {name: "v6-2", addr: 1, client: v6}}}
-				}
-				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
-				a.v6, a.v6Pages = v6Pool(), v6Pool()
-				post, err := a.getPost(context.Background(), "ABC123", nil)
-				if tc.dcRetry {
-					if err != nil || post.Partial || f.count("gql") != 1 {
-						t.Fatalf("geo gate = %+v, %v, dcGQL=%d; want DC GraphQL full post", post, err, f.count("gql"))
-					}
-				} else if err != nil || !post.Partial || f.count("og") != 1 || f.count("gql") != 0 {
-					t.Fatalf("age gate = %+v, %v, og=%d dcGQL=%d; want OG partial without DC retry", post, err, f.count("og"), f.count("gql"))
-				}
-				if f.count("oembed") != 0 {
-					t.Fatalf("oEmbed called %d times despite GraphQL gating_ruling", f.count("oembed"))
-				}
-			})
+	t.Run("DC gating_ruling skips oembed", func(t *testing.T) {
+		setHelper(t, func(context.Context, string) (Post, *AppError) {
+			return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
 		})
-	}
+		synctest.Test(t, func(t *testing.T) {
+			gqlGated := `{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":3,"title":"Gate Title","description":"Gate Desc"}}}}`
+			f := &fakeIG{t: t, gql: gqlGated, og: igAnswer{status: 200, body: ogTestPage("ABC123")}}
+			a := newApp(Config{}, f.pool(), offloadSigner{})
+			post, err := a.getPost(context.Background(), "ABC123", nil)
+			if err != nil || !post.Partial || f.count("og") != 1 || f.count("oembed") != 0 {
+				t.Fatalf("DC age gate = %+v, %v, og=%d oembed=%d; want OG partial without oembed", post, err, f.count("og"), f.count("oembed"))
+			}
+		})
+	})
+
+	t.Run("IPv6 type 2 cross-checks US oembed when DC GraphQL throttles", func(t *testing.T) {
+		setHelper(t, func(context.Context, string) (Post, *AppError) {
+			return Post{}, igErr(http.StatusNotFound, errorCodeUpstream, helperNoPost)
+		})
+		synctest.Test(t, func(t *testing.T) {
+			gqlGeo := `{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":2,"title":"Region Block","description":"d"}}}}`
+			f := &fakeIG{t: t, gql: `{"errors":[{"code":1675004,"message":"Rate limit exceeded"}]}`, oembed: igAnswer{status: 200, body: oembedPublic}}
+			v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if strings.Contains(r.Header.Get("X-FB-Friendly-Name"), "PostRootContent") {
+					return mediaTestResponse(r, 200, nil, []byte(gqlGeo)), nil
+				}
+				return mediaTestResponse(r, 200, nil, []byte("<html>no og</html>")), nil
+			})}
+			usage := newEgressUsage(egressPoolSize)
+			a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
+			a.v6 = &SessionPool{addrs: newEgressAddrs(egressPoolSize, usage), sessions: []*Session{{name: "v6-1", addr: 0, client: v6}}}
+			a.v6Pages = &SessionPool{addrs: newEgressAddrs(egressPoolSize, usage), sessions: []*Session{{name: "v6p-1", addr: 1, client: v6}}}
+			post, err := a.getPost(context.Background(), "ABC123", nil)
+			if err != nil || !post.Partial || post.Username != "instagram" || f.count("oembed") != 1 || f.count("gql") != 1 {
+				t.Fatalf("IPv6 geo gate = %+v, %v, oembed=%d dcGQL=%d; want oEmbed partial", post, err, f.count("oembed"), f.count("gql"))
+			}
+			if e, ok := a.posts.localGet("ABC123"); !ok || time.Until(e.expiresAt) > time.Duration(transientErrorCacheSeconds+1)*time.Second {
+				t.Fatalf("oembed partial TTL = %v, want <= %ds", time.Until(e.expiresAt), transientErrorCacheSeconds)
+			}
+		})
+	})
+
+	t.Run("IPv6 type 2 serves US oembed at deadline instead of premature 451", func(t *testing.T) {
+		setHelper(t, func(ctx context.Context, _ string) (Post, *AppError) {
+			<-ctx.Done()
+			return Post{}, contextAppError(ctx)
+		})
+		synctest.Test(t, func(t *testing.T) {
+			gqlGeo := `{"data":{"xig_polaris_media":{"pk":"1","if_not_gated_logged_out":null,"gating_ruling":{"gating_type":2,"title":"Region Block","description":"d"}}}}`
+			f := &fakeIG{t: t, gql: gqlFull, gqlDelay: 2200 * time.Millisecond, oembed: igAnswer{status: 200, body: oembedPublic}}
+			v6 := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return mediaTestResponse(r, 200, nil, []byte(gqlGeo)), nil
+			})}
+			a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
+			a.v6 = &SessionPool{addrs: newEgressAddrs(egressPoolSize, nil), sessions: []*Session{{name: "v6-1", addr: 0, client: v6}}}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			post, err := a.getPost(ctx, "ABC123", nil)
+			if err != nil || !post.Partial || post.Username != "instagram" {
+				t.Fatalf("deadline getPost = %+v, %v; want oEmbed partial instead of 451", post, err)
+			}
+			time.Sleep(time.Second)
+			synctest.Wait()
+		})
+	})
 }
 
 func TestGateVerdictTTLDependsOnHelper(t *testing.T) {
@@ -701,9 +723,9 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 					}
 					return f.pool().sessions[0].client.Transport.RoundTrip(r)
 				})}
-				addrs := newEgressAddrs(egressPoolSize)
+				usage := newEgressUsage(egressPoolSize)
 				v6Pool := func() *SessionPool {
-					return &SessionPool{addrs: addrs, sessions: []*Session{{name: "v6-1", addr: 0, client: v6}, {name: "v6-2", addr: 1, client: v6}}}
+					return &SessionPool{addrs: newEgressAddrs(egressPoolSize, usage), sessions: []*Session{{name: "v6-1", addr: 0, client: v6}, {name: "v6-2", addr: 1, client: v6}}}
 				}
 				a := newApp(Config{EgressPercent: 100}, f.pool(), offloadSigner{})
 				a.v6, a.v6Pages = v6Pool(), v6Pool()
@@ -728,7 +750,7 @@ func TestOembedVerdictPicksTheFollowUp(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			f := &fakeIG{t: t, gql: gqlHidden, oembed: igAnswer{status: 200, body: oembedPublic}}
 			a := newApp(Config{EgressPercent: 0}, f.pool(), offloadSigner{})
-			a.v6 = &SessionPool{addrs: newEgressAddrs(egressPoolSize), sessions: []*Session{{name: "v6-1", addr: 0}}}
+			a.v6 = &SessionPool{addrs: newEgressAddrs(egressPoolSize, nil), sessions: []*Session{{name: "v6-1", addr: 0}}}
 			if _, err := a.getPost(context.Background(), "ABC123", nil); err != nil {
 				t.Fatalf("getPost = %v", err)
 			}

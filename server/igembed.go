@@ -30,6 +30,7 @@ func (a *App) mediaMissing(ctx context.Context, shortcode string) bool {
 		subject:    "Instagram",
 		expectJSON: true,
 		advisory:   true,
+		ipv6Budget: rulingIPv6Budget,
 		headers: map[string]string{
 			"User-Agent": "Mozilla/5.0", "X-IG-App-ID": instagramAppID, "X-ASBD-ID": rulingAsbdID, "X-IG-WWW-Claim": "0",
 		},
@@ -74,6 +75,7 @@ func (a *App) fetchPostOG(ctx context.Context, shortcode string) (Post, *AppErro
 	defer cancel()
 	spec := pageSpec("og_page", instagramOrigin+"/p/"+url.PathEscape(shortcode)+"/")
 	spec.maxBytes = ogPageBytes
+	spec.ipv6Budget = ogPageIPv6Budget
 	spec.dcRecheck = func(page string) bool { return !strings.Contains(page, `property="og:url"`) }
 	_, page, err := a.fetchViaProxy(ctx, spec)
 	if err != nil {
@@ -330,6 +332,13 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		return Post{}, err
 	}
 
+	likes := countOf(sm, "edge_liked_by.count")
+	prefix := graphStatsPrefix(sm)
+	if sm.Get("like_and_view_counts_disabled").Bool() {
+		likes = -1
+		prefix = ""
+	}
+
 	return Post{
 		Shortcode:   sm.Get("shortcode").String(),
 		Username:    username,
@@ -337,7 +346,7 @@ func parseGraphMedia(sm gjson.Result) (Post, *AppError) {
 		ProfilePic:  owner.Get("profile_pic_url").String(),
 		IsVerified:  owner.Get("is_verified").Type == gjson.True,
 		Caption:     sm.Get("edge_media_to_caption.edges.0.node.text").String(),
-		StatsLine:   statsLine(graphStatsPrefix(sm), countOf(sm, "edge_liked_by.count"), countOf(sm, "edge_media_to_comment.count")),
+		StatsLine:   statsLine(prefix, likes, countOf(sm, "edge_media_to_comment.count")),
 		Attachments: atts,
 	}, nil
 }

@@ -71,7 +71,7 @@ func fallbackApp(fn func(*http.Request) (int, string)) (a *App, v6Calls, dcCalls
 		return reply(200, `{"data":{"ok":true}}`), nil
 	})}
 	v6Pool := &SessionPool{
-		addrs:     newEgressAddrs(egressPoolSize),
+		addrs:     newEgressAddrs(egressPoolSize, nil),
 		newClient: func(*url.URL) *http.Client { return v6 },
 	}
 	for i := range ipv6Strikes*(ipv6Retries+1) + 1 {
@@ -165,34 +165,68 @@ func TestThrottledIPv6TriesAnotherAddress(t *testing.T) {
 }
 
 func TestFailedEgressAddressSitsOut(t *testing.T) {
-	addrs := newEgressAddrs(3)
-	p1 := &SessionPool{addrs: addrs}
-	p2 := &SessionPool{addrs: addrs}
+	usage := newEgressUsage(3)
+	a1Book := newEgressAddrs(3, usage)
+	a2Book := newEgressAddrs(3, usage)
+	p1 := &SessionPool{addrs: a1Book}
+	p2 := &SessionPool{addrs: a2Book}
 
 	_, a1, rested1 := p1.nextProxy(-1)
 	_, a2, rested2 := p2.nextProxy(-1)
 	if !rested1 || !rested2 || a1 == a2 {
 		t.Fatalf("initial picks = (%d,%v) and (%d,%v); want two distinct rested addresses", a1, rested1, a2, rested2)
 	}
-	addrs.release(a1)
-	addrs.release(a2)
+	a1Book.release(a1)
+	a2Book.release(a2)
 
 	base := time.Now()
-	addrs.down[0] = base.Add(20 * time.Minute)
-	addrs.down[1] = base.Add(10 * time.Minute)
+	a1Book.down[0] = base.Add(20 * time.Minute)
+	a1Book.down[1] = base.Add(10 * time.Minute)
 	for range 10 {
 		u, addr, rested := p1.nextProxy(-1)
-		addrs.release(addr)
+		a1Book.release(addr)
 		if !rested || addr != 2 || u.User.Username() != "a2" {
 			t.Fatalf("picked %d (%s, rested=%v) with 0 and 1 sitting out", addr, u.User.Username(), rested)
 		}
 	}
-	addrs.down[2] = base.Add(30 * time.Minute)
-	if _, addr, rested := p2.nextProxy(-1); rested || addr != 1 {
+	a2Book.down[1] = base.Add(10 * time.Minute)
+	a2Book.down[2] = base.Add(20 * time.Minute)
+	if _, addr, rested := p2.nextProxy(-1); !rested || addr != 0 {
+		t.Fatalf("p2 blocked by p1 cooldown: got (%d, rested=%v), want (0, true)", addr, rested)
+	} else {
+		a2Book.release(addr)
+	}
+	a1Book.down[2] = base.Add(30 * time.Minute)
+	if _, addr, rested := p1.nextProxy(-1); rested || addr != 1 {
 		t.Fatalf("all down picked (%d, rested=%v), want (1, false)", addr, rested)
 	} else {
-		addrs.release(addr)
+		a1Book.release(addr)
 	}
+}
+
+func TestShortSpecBudgetsPauseV6GateOnHang(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, _, dcCalls := fallbackApp(func(*http.Request) (int, string) { return 0, "" })
+		a.v6Pages = a.v6
+		var rotated atomic.Int32
+		origNew := a.v6.newClient
+		a.v6.newClient = func(u *url.URL) *http.Client {
+			rotated.Add(1)
+			return origNew(u)
+		}
+		for range ipv6Strikes + 2 {
+			_, _ = a.fetchPostOG(context.Background(), "DerT8tHim4K")
+		}
+		if g := a.v6Gate("og_page"); g.allow() || rotated.Load() < ipv6Strikes {
+			t.Fatalf("og_page gate=%+v rotated=%d dc=%d; want paused and rotated", g, rotated.Load(), dcCalls.Load())
+		}
+		for range ipv6Strikes + 2 {
+			_ = a.mediaMissing(context.Background(), "DerT8tHim4K")
+		}
+		if g := a.v6Gate("ruling"); g.allow() {
+			t.Fatalf("ruling gate=%+v; want paused after hangs", g)
+		}
+	})
 }
 
 func TestShortBudgetAndRetryHangHandling(t *testing.T) {
@@ -285,6 +319,15 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 			t.Fatalf("muted: body %q, err %v, DC calls %d; want the DC copy", got, err, dcCalls.Load())
 		}
 	}
+	for _, unmuted := range []string{
+		`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"original_sound_info":{"should_mute_audio":false,"consumption_info":{"should_mute_audio_reason":"","should_mute_audio_reason_type":""}}}}}}}`,
+		`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"original_sound_info":{"should_mute_audio":false,"consumption_info":{"should_mute_audio_reason_type":0}}}}}}}`,
+		`{"data":{"xig_polaris_media":{"if_not_gated_logged_out":{"clips_metadata":{"original_sound_info":{"should_mute_audio":false,"consumption_info":{"should_mute_audio_reason_type":false}}}}}}}`,
+	} {
+		if mutedMusic(unmuted) {
+			t.Fatalf("mutedMusic falsely matched default reason type: %s", unmuted)
+		}
+	}
 	// A withheld post comes back at once; hiddenPost races DC separately.
 	a, _, dcCalls = fallbackApp(func(*http.Request) (int, string) { return 200, `{"data":{"xig_polaris_media":null}}` })
 	if _, got, err := a.fetchViaProxy(context.Background(), webLoggedOutSpec("DerT8tHim4K")); err != nil || !strings.Contains(got, "xig_polaris_media") || dcCalls.Load() != 0 {
@@ -307,7 +350,7 @@ func TestFetchViaProxyFallsBackFromIPv6(t *testing.T) {
 }
 
 func TestEgressRefusesOtherHosts(t *testing.T) {
-	srv := httptest.NewServer(egressHandler([]net.IP{net.ParseIP("::1")}))
+	srv := httptest.NewServer(egressHandler([]net.IP{net.ParseIP("::1")}, nil))
 	defer srv.Close()
 	for _, target := range []string{"example.com:443", "i.instagram.com:80", "169.254.169.254:80"} {
 		req, _ := http.NewRequest(http.MethodConnect, srv.URL, nil)

@@ -214,7 +214,7 @@ func (a *App) webFinger(req *http.Request) resp {
 	} else if strings.EqualFold(u.Scheme+"://"+u.Host, origin) && u.RawQuery == "" {
 		username = strings.TrimPrefix(u.Path, "/")
 	}
-	if !validUsername(username) {
+	if !isProfileUsername(username) {
 		return textResp(http.StatusNotFound, "resource not found")
 	}
 	actor := actorID(origin, username)

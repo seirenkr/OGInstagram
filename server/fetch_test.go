@@ -65,13 +65,22 @@ func TestParseOembedPost(t *testing.T) {
 
 func TestWebLoggedOutSpec(t *testing.T) {
 	spec := webLoggedOutSpec("DaEd82_pQ40")
+	if spec.method != http.MethodPost || spec.url != instagramOrigin+"/api/graphql/" ||
+		spec.headers["X-FB-Friendly-Name"] != "PolarisLoggedOutDesktopWWWPostRootContentQuery" ||
+		spec.headers["User-Agent"] != "Mozilla/5.0" {
+		t.Fatalf("unexpected spec metadata: %+v", spec)
+	}
 	vals, err := url.ParseQuery(spec.body)
 	if err != nil {
 		t.Fatalf("body parse: %v", err)
 	}
+	if vals.Get("doc_id") != instagramWebLoggedOutDocID {
+		t.Errorf("doc_id = %q, want %q", vals.Get("doc_id"), instagramWebLoggedOutDocID)
+	}
 	if lsd := vals.Get("lsd"); lsd == "" || lsd != spec.headers["X-FB-LSD"] {
 		t.Errorf("lsd mismatch: body=%q header=%q", lsd, spec.headers["X-FB-LSD"])
 	}
+	logOutbound(context.Background(), "test", "us-1", http.MethodGet, "://%zz", time.Now(), 502, 0, igErr(502, errorCodeUpstream, "x"), false)
 	bits := "1" + strings.Repeat("0", len(strconv.FormatInt(200000, 2))-1) + strconv.FormatInt(200000, 2) + "00000"
 	var haveAll string
 	for i := 0; i+6 <= len(bits); i += 6 {
@@ -236,6 +245,11 @@ func TestOembedHTMLErrorPageClassification(t *testing.T) {
 	}
 	if !oembedNotFound(oembedOutcome{status: http.StatusNotFound, body: `{"message":"missing"}`, ok: true}) {
 		t.Fatal("oembedNotFound should accept any valid JSON 404")
+	}
+	for _, body := range []string{"", "plain error", "<html>404</html>"} {
+		if oembedNotFound(oembedOutcome{status: http.StatusNotFound, body: body, ok: true}) {
+			t.Fatalf("oembedNotFound accepted invalid body %q", body)
+		}
 	}
 }
 

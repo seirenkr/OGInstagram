@@ -26,9 +26,10 @@ func TestParseShareTarget(t *testing.T) {
 		{"https://www.instagram.com/stories/alice.user/4011387627600768522/?igsh=xyz", "/stories/alice.user/4011387627600768522", ""},
 		{"https://m.instagram.com/alice.user/?igsh=xyz", "/alice.user", ""},
 		{"https://www.instagram.com/accounts/login/?next=%2Freel%2Fabc%2F", "", errorCodeLoginRequired},
+		{"https://www.instagram.com/accounts/onetap/?next=%2Freel%2Fabc%2F", "", errorCodeLoginRequired},
 		{"https://m.instagram.com/challenge/123/", "", errorCodeLoginRequired},
-		{"https://evil.example/reel/DgNN8_uKwFg/", "", errorCodeUpstream},
-		{"http://www.instagram.com/reel/DgNN8_uKwFg/", "", errorCodeUpstream},
+		{"https://threads.com/@alice/post/123", "", errorCodeNotFound},
+		{"http://www.instagram.com/reel/DgNN8_uKwFg/", "", errorCodeNotFound},
 		{"https://www.instagram.com/stories/highlights/1794567890/", "", errorCodeNotFound},
 		{"https://www.instagram.com/reels/audio/1234567890/", "", errorCodeNotFound},
 		{"https://www.instagram.com/channels/", "", errorCodeNotFound},
@@ -62,7 +63,7 @@ func TestShareRedirectHopsAndLoopCap(t *testing.T) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
 		case "/share/BAblI6LDIl/":
-			return mediaTestResponse(r, http.StatusFound, http.Header{"Location": {"/share/reel/BAblI6LDIl/"}}, nil), nil
+			return mediaTestResponse(r, http.StatusFound, http.Header{"Location": {"https://m.instagram.com/share/reel/BAblI6LDIl/"}}, nil), nil
 		case "/share/reel/BAblI6LDIl/":
 			return &http.Response{
 				StatusCode: http.StatusFound,
@@ -97,7 +98,7 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 		client := &http.Client{Transport: roundTripFunc(fn)}
 		p := &SessionPool{}
 		if prefix == "v6p-" {
-			p.addrs = newEgressAddrs(egressPoolSize)
+			p.addrs = newEgressAddrs(egressPoolSize, nil)
 			p.newClient = func(*url.URL) *http.Client { return client }
 		}
 		for i := range 2 {
@@ -110,20 +111,22 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 		return p
 	}
 	for _, tc := range []struct {
-		name     string
-		v6Status int
-		v6Loc    string
-		dcStatus int
-		want     shareTarget
-		wantCode string
-		wantDC   int32
+		name         string
+		v6Status     int
+		v6Loc        string
+		dcStatus     int
+		want         shareTarget
+		wantCode     string
+		wantDC       int32
+		wantV6Strike bool
 	}{
-		{"v6 200 soft block recovers on DC", http.StatusOK, "", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
-		{"missing token 200 on both", http.StatusOK, "", http.StatusOK, "", errorCodeNotFound, 1},
-		{"explicit 404 skips DC", http.StatusNotFound, "", http.StatusFound, "", errorCodeNotFound, 0},
-		{"unsupported target", http.StatusFound, "https://www.instagram.com/stories/highlights/123/", http.StatusFound, "", errorCodeNotFound, 0},
-		{"login wall", http.StatusFound, "https://www.instagram.com/accounts/login/?next=%2Fshare%2Fx%2F", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
-		{"off-site redirect", http.StatusFound, "https://evil.example/reel/DgNN8_uKwFg/", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1},
+		{"v6 200 soft block recovers on DC", http.StatusOK, "", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1, true},
+		{"v6 200 and DC fails stays transient", http.StatusOK, "", http.StatusBadGateway, "", errorCodeUpstream, 1, false},
+		{"missing token 200 on both", http.StatusOK, "", http.StatusOK, "", errorCodeNotFound, 1, false},
+		{"explicit 404 skips DC", http.StatusNotFound, "", http.StatusFound, "", errorCodeNotFound, 0, false},
+		{"unsupported target", http.StatusFound, "https://www.instagram.com/stories/highlights/123/", http.StatusFound, "", errorCodeNotFound, 0, false},
+		{"external redirect skips DC", http.StatusFound, "https://threads.com/@alice", http.StatusFound, "", errorCodeNotFound, 0, false},
+		{"login wall", http.StatusFound, "https://www.instagram.com/accounts/login/?next=%2Fshare%2Fx%2F", http.StatusFound, "/reel/DgNN8_uKwFg", "", 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var v6Calls, dcCalls atomic.Int32
@@ -144,11 +147,14 @@ func TestShareViaProxyFallbackPolicy(t *testing.T) {
 				return mediaTestResponse(r, tc.v6Status, h, nil), nil
 			}, "v6p-")
 			got, err := a.getShareTarget(context.Background(), "BAblI6LDIl", nil)
+			if g := a.v6Gate("share"); (g.failures > 0) != tc.wantV6Strike {
+				t.Fatalf("v6Gate failures = %d, want strike=%v", g.failures, tc.wantV6Strike)
+			}
 			if tc.wantCode != "" {
 				if err == nil || err.Code != tc.wantCode || v6Calls.Load() != 1 || dcCalls.Load() != tc.wantDC {
 					t.Fatalf("err=%v v6=%d dc=%d; want %s dc=%d", err, v6Calls.Load(), dcCalls.Load(), tc.wantCode, tc.wantDC)
 				}
-				if tc.v6Status == http.StatusOK {
+				if tc.v6Status == http.StatusOK && tc.dcStatus == http.StatusOK {
 					if e, ok := a.shares.localGet("BAblI6LDIl"); !ok || time.Until(e.expiresAt) > time.Duration(transientErrorCacheSeconds+1)*time.Second {
 						t.Fatalf("ambiguous 200 share miss cached too long: ok=%v ttl=%v", ok, time.Until(e.expiresAt))
 					}
@@ -293,5 +299,18 @@ func TestGatewayShareRoutes(t *testing.T) {
 		if w.Code != tt.status || !strings.Contains(w.Body.String(), tt.want) {
 			t.Errorf("preview %s = %d %s, want %d containing %q", tt.body, w.Code, w.Body.String(), tt.status, tt.want)
 		}
+	}
+
+	if route, ok := resolveGatewayRoute(publicRequest("GET", "/share/GONE1")); !ok || route.category != "share" {
+		t.Fatalf("share route = %+v, %v; want share category", route, ok)
+	}
+	if _, ok := resolveGatewayRoute(publicRequest("GET", "/explore/inbox")); ok {
+		t.Fatal("/explore/inbox routed as an ActivityPub collection")
+	}
+	if w := httptest.NewRecorder(); func() int {
+		g.ServeHTTP(w, publicRequest("GET", "/.well-known/webfinger?resource=acct:explore@oginstagram.com"))
+		return w.Code
+	}() != http.StatusNotFound {
+		t.Fatalf("reserved WebFinger status = %d, want 404", w.Code)
 	}
 }

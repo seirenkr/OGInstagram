@@ -45,6 +45,7 @@
   { "path": "/threads", "valid": true },
   { "path": "/tv", "valid": true },
   { "path": "/create", "valid": true },
+  { "path": "/directory", "valid": true },
   { "path": "/reel", "valid": true },
   { "path": "/users/p/Ab_12", "valid": true },
   { "path": "/users/p/inbox", "valid": true },

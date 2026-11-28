@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -29,7 +30,8 @@ func runEgress(socket, poolFile string) error {
 		return err
 	}
 	slog.Info("ipv6 egress listening", "socket", socket, "addresses", len(pool))
-	srv := &http.Server{Handler: egressHandler(pool), ReadHeaderTimeout: 5 * time.Second}
+	var tunnels sync.WaitGroup
+	srv := &http.Server{Handler: egressHandler(pool, &tunnels), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	errC := make(chan error, 1)
@@ -42,11 +44,20 @@ func runEgress(socket, poolFile string) error {
 		return err
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	shutdownErr := srv.Shutdown(shutdownCtx)
 	if shutdownErr != nil {
 		_ = srv.Close()
+	}
+	drained := make(chan struct{})
+	go func() {
+		tunnels.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-shutdownCtx.Done():
 	}
 	serveErr := <-errC
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -72,7 +83,7 @@ func readEgressPool(path string) ([]net.IP, error) {
 	return pool, nil
 }
 
-func egressHandler(pool []net.IP) http.Handler {
+func egressHandler(pool []net.IP, tunnels *sync.WaitGroup) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect || !egressHosts[r.Host] {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -100,12 +111,21 @@ func egressHandler(pool []net.IP) http.Handler {
 			upstream.Close()
 			return
 		}
+		if tunnels != nil {
+			tunnels.Add(1)
+			defer tunnels.Done()
+		}
 		var clientSrc io.Reader = client
 		if buffered.Reader.Buffered() > 0 {
 			clientSrc = buffered.Reader
 		}
-		go pipe(upstream, clientSrc, client)
+		done := make(chan struct{})
+		go func() {
+			pipe(upstream, clientSrc, client)
+			close(done)
+		}()
 		pipe(client, upstream, upstream)
+		<-done
 	})
 }
 
